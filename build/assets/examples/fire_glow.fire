@@ -1,0 +1,10 @@
+{
+  "name": "Glow Circle",
+  "width": 1280,
+  "height": 720,
+  "uniforms": [
+    { "name": "uStrength", "type": "float", "value": 1.0 }
+  ],
+  "vertex": "#version 330 core\nlayout (location = 0) in vec3 aPos;\nlayout (location = 1) in vec2 aUV;\nout vec2 vUV;\nvoid main(){ vUV = aUV; gl_Position = vec4(aPos, 1.0); }\n",
+  "fragment": "#version 330 core\nout vec4 FragColor;\nin vec2 vUV;\nuniform float iTime;\nuniform vec2 iResolution;\nuniform float uStrength;\nfloat sdCircle(vec2 p, float r){ return length(p)-r; }\nvoid main(){ vec2 uv=(vUV*2.0-1.0)*vec2(iResolution.x/iResolution.y,1.0); float t=iTime; float d=sdCircle(uv+0.3*vec2(sin(t*1.1),cos(t*1.7)), 0.4+0.1*sin(t*2.0)); float glow=exp(-10.0*abs(d))*uStrength; vec3 col=vec3(0.1,0.2,0.9)*glow + vec3(0.9,0.3,0.1)*smoothstep(0.0,0.01,-d); FragColor=vec4(col,1.0);}\n"
+}

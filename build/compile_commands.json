@@ -1,0 +1,170 @@
+[
+{
+  "directory": "/workspace/build",
+  "command": "/usr/bin/c++ -DIMGUI_IMPL_OPENGL_LOADER_GLEW -I/workspace/build/_deps/imgui-src -I/workspace/build/_deps/imgui-src/backends -I/workspace/build/_deps/imgui-src/misc/cpp -I/workspace/build/_deps/glfw-src/include -O3 -DNDEBUG -std=gnu++20 -o CMakeFiles/imgui.dir/_deps/imgui-src/imgui.cpp.o -c /workspace/build/_deps/imgui-src/imgui.cpp",
+  "file": "/workspace/build/_deps/imgui-src/imgui.cpp",
+  "output": "CMakeFiles/imgui.dir/_deps/imgui-src/imgui.cpp.o"
+},
+{
+  "directory": "/workspace/build",
+  "command": "/usr/bin/c++ -DIMGUI_IMPL_OPENGL_LOADER_GLEW -I/workspace/build/_deps/imgui-src -I/workspace/build/_deps/imgui-src/backends -I/workspace/build/_deps/imgui-src/misc/cpp -I/workspace/build/_deps/glfw-src/include -O3 -DNDEBUG -std=gnu++20 -o CMakeFiles/imgui.dir/_deps/imgui-src/imgui_draw.cpp.o -c /workspace/build/_deps/imgui-src/imgui_draw.cpp",
+  "file": "/workspace/build/_deps/imgui-src/imgui_draw.cpp",
+  "output": "CMakeFiles/imgui.dir/_deps/imgui-src/imgui_draw.cpp.o"
+},
+{
+  "directory": "/workspace/build",
+  "command": "/usr/bin/c++ -DIMGUI_IMPL_OPENGL_LOADER_GLEW -I/workspace/build/_deps/imgui-src -I/workspace/build/_deps/imgui-src/backends -I/workspace/build/_deps/imgui-src/misc/cpp -I/workspace/build/_deps/glfw-src/include -O3 -DNDEBUG -std=gnu++20 -o CMakeFiles/imgui.dir/_deps/imgui-src/imgui_widgets.cpp.o -c /workspace/build/_deps/imgui-src/imgui_widgets.cpp",
+  "file": "/workspace/build/_deps/imgui-src/imgui_widgets.cpp",
+  "output": "CMakeFiles/imgui.dir/_deps/imgui-src/imgui_widgets.cpp.o"
+},
+{
+  "directory": "/workspace/build",
+  "command": "/usr/bin/c++ -DIMGUI_IMPL_OPENGL_LOADER_GLEW -I/workspace/build/_deps/imgui-src -I/workspace/build/_deps/imgui-src/backends -I/workspace/build/_deps/imgui-src/misc/cpp -I/workspace/build/_deps/glfw-src/include -O3 -DNDEBUG -std=gnu++20 -o CMakeFiles/imgui.dir/_deps/imgui-src/imgui_tables.cpp.o -c /workspace/build/_deps/imgui-src/imgui_tables.cpp",
+  "file": "/workspace/build/_deps/imgui-src/imgui_tables.cpp",
+  "output": "CMakeFiles/imgui.dir/_deps/imgui-src/imgui_tables.cpp.o"
+},
+{
+  "directory": "/workspace/build",
+  "command": "/usr/bin/c++ -DIMGUI_IMPL_OPENGL_LOADER_GLEW -I/workspace/build/_deps/imgui-src -I/workspace/build/_deps/imgui-src/backends -I/workspace/build/_deps/imgui-src/misc/cpp -I/workspace/build/_deps/glfw-src/include -O3 -DNDEBUG -std=gnu++20 -o CMakeFiles/imgui.dir/_deps/imgui-src/backends/imgui_impl_glfw.cpp.o -c /workspace/build/_deps/imgui-src/backends/imgui_impl_glfw.cpp",
+  "file": "/workspace/build/_deps/imgui-src/backends/imgui_impl_glfw.cpp",
+  "output": "CMakeFiles/imgui.dir/_deps/imgui-src/backends/imgui_impl_glfw.cpp.o"
+},
+{
+  "directory": "/workspace/build",
+  "command": "/usr/bin/c++ -DIMGUI_IMPL_OPENGL_LOADER_GLEW -I/workspace/build/_deps/imgui-src -I/workspace/build/_deps/imgui-src/backends -I/workspace/build/_deps/imgui-src/misc/cpp -I/workspace/build/_deps/glfw-src/include -O3 -DNDEBUG -std=gnu++20 -o CMakeFiles/imgui.dir/_deps/imgui-src/backends/imgui_impl_opengl3.cpp.o -c /workspace/build/_deps/imgui-src/backends/imgui_impl_opengl3.cpp",
+  "file": "/workspace/build/_deps/imgui-src/backends/imgui_impl_opengl3.cpp",
+  "output": "CMakeFiles/imgui.dir/_deps/imgui-src/backends/imgui_impl_opengl3.cpp.o"
+},
+{
+  "directory": "/workspace/build",
+  "command": "/usr/bin/c++ -DIMGUI_IMPL_OPENGL_LOADER_GLEW -I/workspace/build/_deps/imgui-src -I/workspace/build/_deps/imgui-src/backends -I/workspace/build/_deps/imgui-src/misc/cpp -I/workspace/build/_deps/glfw-src/include -O3 -DNDEBUG -std=gnu++20 -o CMakeFiles/imgui.dir/_deps/imgui-src/misc/cpp/imgui_stdlib.cpp.o -c /workspace/build/_deps/imgui-src/misc/cpp/imgui_stdlib.cpp",
+  "file": "/workspace/build/_deps/imgui-src/misc/cpp/imgui_stdlib.cpp",
+  "output": "CMakeFiles/imgui.dir/_deps/imgui-src/misc/cpp/imgui_stdlib.cpp.o"
+},
+{
+  "directory": "/workspace/build",
+  "command": "/usr/bin/c++ -DIMGUI_IMPL_OPENGL_LOADER_GLEW -I/workspace/src -I/workspace/build/_deps/imgui-src -I/workspace/build/_deps/imgui-src/backends -I/workspace/build/_deps/imgui-src/misc/cpp -I/workspace/build/_deps/glfw-src/include -I/workspace/build/_deps/nlohmann_json-src/include -O3 -DNDEBUG -std=gnu++20 -o CMakeFiles/fire_player.dir/src/FireFormat.cpp.o -c /workspace/src/FireFormat.cpp",
+  "file": "/workspace/src/FireFormat.cpp",
+  "output": "CMakeFiles/fire_player.dir/src/FireFormat.cpp.o"
+},
+{
+  "directory": "/workspace/build",
+  "command": "/usr/bin/c++ -DIMGUI_IMPL_OPENGL_LOADER_GLEW -I/workspace/src -I/workspace/build/_deps/imgui-src -I/workspace/build/_deps/imgui-src/backends -I/workspace/build/_deps/imgui-src/misc/cpp -I/workspace/build/_deps/glfw-src/include -I/workspace/build/_deps/nlohmann_json-src/include -O3 -DNDEBUG -std=gnu++20 -o CMakeFiles/fire_player.dir/src/FireRuntime.cpp.o -c /workspace/src/FireRuntime.cpp",
+  "file": "/workspace/src/FireRuntime.cpp",
+  "output": "CMakeFiles/fire_player.dir/src/FireRuntime.cpp.o"
+},
+{
+  "directory": "/workspace/build",
+  "command": "/usr/bin/c++ -DIMGUI_IMPL_OPENGL_LOADER_GLEW -I/workspace/src -I/workspace/build/_deps/imgui-src -I/workspace/build/_deps/imgui-src/backends -I/workspace/build/_deps/imgui-src/misc/cpp -I/workspace/build/_deps/glfw-src/include -I/workspace/build/_deps/nlohmann_json-src/include -O3 -DNDEBUG -std=gnu++20 -o CMakeFiles/fire_player.dir/src/Mesh.cpp.o -c /workspace/src/Mesh.cpp",
+  "file": "/workspace/src/Mesh.cpp",
+  "output": "CMakeFiles/fire_player.dir/src/Mesh.cpp.o"
+},
+{
+  "directory": "/workspace/build",
+  "command": "/usr/bin/c++ -DIMGUI_IMPL_OPENGL_LOADER_GLEW -I/workspace/src -I/workspace/build/_deps/imgui-src -I/workspace/build/_deps/imgui-src/backends -I/workspace/build/_deps/imgui-src/misc/cpp -I/workspace/build/_deps/glfw-src/include -I/workspace/build/_deps/nlohmann_json-src/include -O3 -DNDEBUG -std=gnu++20 -o CMakeFiles/fire_player.dir/src/ShaderProgram.cpp.o -c /workspace/src/ShaderProgram.cpp",
+  "file": "/workspace/src/ShaderProgram.cpp",
+  "output": "CMakeFiles/fire_player.dir/src/ShaderProgram.cpp.o"
+},
+{
+  "directory": "/workspace/build",
+  "command": "/usr/bin/c++ -DIMGUI_IMPL_OPENGL_LOADER_GLEW -I/workspace/src -I/workspace/build/_deps/imgui-src -I/workspace/build/_deps/imgui-src/backends -I/workspace/build/_deps/imgui-src/misc/cpp -I/workspace/build/_deps/glfw-src/include -I/workspace/build/_deps/nlohmann_json-src/include -O3 -DNDEBUG -std=gnu++20 -o CMakeFiles/fire_player.dir/src/main.cpp.o -c /workspace/src/main.cpp",
+  "file": "/workspace/src/main.cpp",
+  "output": "CMakeFiles/fire_player.dir/src/main.cpp.o"
+},
+{
+  "directory": "/workspace/build/_deps/glfw-build/src",
+  "command": "/usr/bin/cc -D_GLFW_USE_CONFIG_H -I/workspace/build/_deps/glfw-src/include -I/workspace/build/_deps/glfw-src/src -I/workspace/build/_deps/glfw-build/src -O3 -DNDEBUG -std=gnu99 -fPIC -Wall -o CMakeFiles/glfw.dir/context.c.o -c /workspace/build/_deps/glfw-src/src/context.c",
+  "file": "/workspace/build/_deps/glfw-src/src/context.c",
+  "output": "_deps/glfw-build/src/CMakeFiles/glfw.dir/context.c.o"
+},
+{
+  "directory": "/workspace/build/_deps/glfw-build/src",
+  "command": "/usr/bin/cc -D_GLFW_USE_CONFIG_H -I/workspace/build/_deps/glfw-src/include -I/workspace/build/_deps/glfw-src/src -I/workspace/build/_deps/glfw-build/src -O3 -DNDEBUG -std=gnu99 -fPIC -Wall -o CMakeFiles/glfw.dir/init.c.o -c /workspace/build/_deps/glfw-src/src/init.c",
+  "file": "/workspace/build/_deps/glfw-src/src/init.c",
+  "output": "_deps/glfw-build/src/CMakeFiles/glfw.dir/init.c.o"
+},
+{
+  "directory": "/workspace/build/_deps/glfw-build/src",
+  "command": "/usr/bin/cc -D_GLFW_USE_CONFIG_H -I/workspace/build/_deps/glfw-src/include -I/workspace/build/_deps/glfw-src/src -I/workspace/build/_deps/glfw-build/src -O3 -DNDEBUG -std=gnu99 -fPIC -Wall -o CMakeFiles/glfw.dir/input.c.o -c /workspace/build/_deps/glfw-src/src/input.c",
+  "file": "/workspace/build/_deps/glfw-src/src/input.c",
+  "output": "_deps/glfw-build/src/CMakeFiles/glfw.dir/input.c.o"
+},
+{
+  "directory": "/workspace/build/_deps/glfw-build/src",
+  "command": "/usr/bin/cc -D_GLFW_USE_CONFIG_H -I/workspace/build/_deps/glfw-src/include -I/workspace/build/_deps/glfw-src/src -I/workspace/build/_deps/glfw-build/src -O3 -DNDEBUG -std=gnu99 -fPIC -Wall -o CMakeFiles/glfw.dir/monitor.c.o -c /workspace/build/_deps/glfw-src/src/monitor.c",
+  "file": "/workspace/build/_deps/glfw-src/src/monitor.c",
+  "output": "_deps/glfw-build/src/CMakeFiles/glfw.dir/monitor.c.o"
+},
+{
+  "directory": "/workspace/build/_deps/glfw-build/src",
+  "command": "/usr/bin/cc -D_GLFW_USE_CONFIG_H -I/workspace/build/_deps/glfw-src/include -I/workspace/build/_deps/glfw-src/src -I/workspace/build/_deps/glfw-build/src -O3 -DNDEBUG -std=gnu99 -fPIC -Wall -o CMakeFiles/glfw.dir/vulkan.c.o -c /workspace/build/_deps/glfw-src/src/vulkan.c",
+  "file": "/workspace/build/_deps/glfw-src/src/vulkan.c",
+  "output": "_deps/glfw-build/src/CMakeFiles/glfw.dir/vulkan.c.o"
+},
+{
+  "directory": "/workspace/build/_deps/glfw-build/src",
+  "command": "/usr/bin/cc -D_GLFW_USE_CONFIG_H -I/workspace/build/_deps/glfw-src/include -I/workspace/build/_deps/glfw-src/src -I/workspace/build/_deps/glfw-build/src -O3 -DNDEBUG -std=gnu99 -fPIC -Wall -o CMakeFiles/glfw.dir/window.c.o -c /workspace/build/_deps/glfw-src/src/window.c",
+  "file": "/workspace/build/_deps/glfw-src/src/window.c",
+  "output": "_deps/glfw-build/src/CMakeFiles/glfw.dir/window.c.o"
+},
+{
+  "directory": "/workspace/build/_deps/glfw-build/src",
+  "command": "/usr/bin/cc -D_GLFW_USE_CONFIG_H -I/workspace/build/_deps/glfw-src/include -I/workspace/build/_deps/glfw-src/src -I/workspace/build/_deps/glfw-build/src -O3 -DNDEBUG -std=gnu99 -fPIC -Wall -o CMakeFiles/glfw.dir/x11_init.c.o -c /workspace/build/_deps/glfw-src/src/x11_init.c",
+  "file": "/workspace/build/_deps/glfw-src/src/x11_init.c",
+  "output": "_deps/glfw-build/src/CMakeFiles/glfw.dir/x11_init.c.o"
+},
+{
+  "directory": "/workspace/build/_deps/glfw-build/src",
+  "command": "/usr/bin/cc -D_GLFW_USE_CONFIG_H -I/workspace/build/_deps/glfw-src/include -I/workspace/build/_deps/glfw-src/src -I/workspace/build/_deps/glfw-build/src -O3 -DNDEBUG -std=gnu99 -fPIC -Wall -o CMakeFiles/glfw.dir/x11_monitor.c.o -c /workspace/build/_deps/glfw-src/src/x11_monitor.c",
+  "file": "/workspace/build/_deps/glfw-src/src/x11_monitor.c",
+  "output": "_deps/glfw-build/src/CMakeFiles/glfw.dir/x11_monitor.c.o"
+},
+{
+  "directory": "/workspace/build/_deps/glfw-build/src",
+  "command": "/usr/bin/cc -D_GLFW_USE_CONFIG_H -I/workspace/build/_deps/glfw-src/include -I/workspace/build/_deps/glfw-src/src -I/workspace/build/_deps/glfw-build/src -O3 -DNDEBUG -std=gnu99 -fPIC -Wall -o CMakeFiles/glfw.dir/x11_window.c.o -c /workspace/build/_deps/glfw-src/src/x11_window.c",
+  "file": "/workspace/build/_deps/glfw-src/src/x11_window.c",
+  "output": "_deps/glfw-build/src/CMakeFiles/glfw.dir/x11_window.c.o"
+},
+{
+  "directory": "/workspace/build/_deps/glfw-build/src",
+  "command": "/usr/bin/cc -D_GLFW_USE_CONFIG_H -I/workspace/build/_deps/glfw-src/include -I/workspace/build/_deps/glfw-src/src -I/workspace/build/_deps/glfw-build/src -O3 -DNDEBUG -std=gnu99 -fPIC -Wall -o CMakeFiles/glfw.dir/xkb_unicode.c.o -c /workspace/build/_deps/glfw-src/src/xkb_unicode.c",
+  "file": "/workspace/build/_deps/glfw-src/src/xkb_unicode.c",
+  "output": "_deps/glfw-build/src/CMakeFiles/glfw.dir/xkb_unicode.c.o"
+},
+{
+  "directory": "/workspace/build/_deps/glfw-build/src",
+  "command": "/usr/bin/cc -D_GLFW_USE_CONFIG_H -I/workspace/build/_deps/glfw-src/include -I/workspace/build/_deps/glfw-src/src -I/workspace/build/_deps/glfw-build/src -O3 -DNDEBUG -std=gnu99 -fPIC -Wall -o CMakeFiles/glfw.dir/posix_time.c.o -c /workspace/build/_deps/glfw-src/src/posix_time.c",
+  "file": "/workspace/build/_deps/glfw-src/src/posix_time.c",
+  "output": "_deps/glfw-build/src/CMakeFiles/glfw.dir/posix_time.c.o"
+},
+{
+  "directory": "/workspace/build/_deps/glfw-build/src",
+  "command": "/usr/bin/cc -D_GLFW_USE_CONFIG_H -I/workspace/build/_deps/glfw-src/include -I/workspace/build/_deps/glfw-src/src -I/workspace/build/_deps/glfw-build/src -O3 -DNDEBUG -std=gnu99 -fPIC -Wall -o CMakeFiles/glfw.dir/posix_thread.c.o -c /workspace/build/_deps/glfw-src/src/posix_thread.c",
+  "file": "/workspace/build/_deps/glfw-src/src/posix_thread.c",
+  "output": "_deps/glfw-build/src/CMakeFiles/glfw.dir/posix_thread.c.o"
+},
+{
+  "directory": "/workspace/build/_deps/glfw-build/src",
+  "command": "/usr/bin/cc -D_GLFW_USE_CONFIG_H -I/workspace/build/_deps/glfw-src/include -I/workspace/build/_deps/glfw-src/src -I/workspace/build/_deps/glfw-build/src -O3 -DNDEBUG -std=gnu99 -fPIC -Wall -o CMakeFiles/glfw.dir/glx_context.c.o -c /workspace/build/_deps/glfw-src/src/glx_context.c",
+  "file": "/workspace/build/_deps/glfw-src/src/glx_context.c",
+  "output": "_deps/glfw-build/src/CMakeFiles/glfw.dir/glx_context.c.o"
+},
+{
+  "directory": "/workspace/build/_deps/glfw-build/src",
+  "command": "/usr/bin/cc -D_GLFW_USE_CONFIG_H -I/workspace/build/_deps/glfw-src/include -I/workspace/build/_deps/glfw-src/src -I/workspace/build/_deps/glfw-build/src -O3 -DNDEBUG -std=gnu99 -fPIC -Wall -o CMakeFiles/glfw.dir/egl_context.c.o -c /workspace/build/_deps/glfw-src/src/egl_context.c",
+  "file": "/workspace/build/_deps/glfw-src/src/egl_context.c",
+  "output": "_deps/glfw-build/src/CMakeFiles/glfw.dir/egl_context.c.o"
+},
+{
+  "directory": "/workspace/build/_deps/glfw-build/src",
+  "command": "/usr/bin/cc -D_GLFW_USE_CONFIG_H -I/workspace/build/_deps/glfw-src/include -I/workspace/build/_deps/glfw-src/src -I/workspace/build/_deps/glfw-build/src -O3 -DNDEBUG -std=gnu99 -fPIC -Wall -o CMakeFiles/glfw.dir/osmesa_context.c.o -c /workspace/build/_deps/glfw-src/src/osmesa_context.c",
+  "file": "/workspace/build/_deps/glfw-src/src/osmesa_context.c",
+  "output": "_deps/glfw-build/src/CMakeFiles/glfw.dir/osmesa_context.c.o"
+},
+{
+  "directory": "/workspace/build/_deps/glfw-build/src",
+  "command": "/usr/bin/cc -D_GLFW_USE_CONFIG_H -I/workspace/build/_deps/glfw-src/include -I/workspace/build/_deps/glfw-src/src -I/workspace/build/_deps/glfw-build/src -O3 -DNDEBUG -std=gnu99 -fPIC -Wall -o CMakeFiles/glfw.dir/linux_joystick.c.o -c /workspace/build/_deps/glfw-src/src/linux_joystick.c",
+  "file": "/workspace/build/_deps/glfw-src/src/linux_joystick.c",
+  "output": "_deps/glfw-build/src/CMakeFiles/glfw.dir/linux_joystick.c.o"
+}
+]
