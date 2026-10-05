@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Мобильный контролёр</string>
+    <string name="section_device">USB-устройство</string>
+    <string name="btn_refresh">Обновить</string>
+    <string name="btn_connect">Подключить</string>
+    <string name="btn_disconnect">Отключить</string>
+    <string name="btn_identify">Опрос /?!</string>
+    <string name="btn_readout">Показания</string>
+    <string name="btn_program">Вход (P1)</string>
+    <string name="btn_read_reg">Чтение R1</string>
+    <string name="btn_raw">Сырой текст</string>
+    <string name="btn_signoff">Выход B0</string>
+    <string name="btn_share">Отправить лог</string>
+    <string name="btn_clear">Очистить</string>
+    <string name="btn_device_info">Инфо USB</string>
+    <string name="hint_address">Адрес (серийный №, можно пусто)</string>
+    <string name="hint_password">Пароль</string>
+    <string name="hint_command">Параметр или текст, напр. ET0PE или SNUMB</string>
+    <string name="label_baud">Нач. скорость</string>
+    <string name="label_format">Формат</string>
+    <string name="label_force">Драйвер</string>
+    <string name="cb_switch_baud">Переключать скорость по ответу счётчика</string>
+    <string name="cb_hex">HEX в логе</string>
+    <string name="cb_dtr">DTR/RTS вкл</string>
+    <string name="status_idle">Не подключено</string>
+    <string name="no_devices">USB-устройства не найдены. Подключите оптоголовку или радиомодуль через OTG.</string>
+</resources>
