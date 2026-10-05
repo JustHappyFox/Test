@@ -1,7 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Мобильный контролёр</string>
-    <string name="section_device">USB-устройство</string>
     <string name="btn_refresh">Обновить</string>
     <string name="btn_connect">Подключить</string>
     <string name="btn_disconnect">Отключить</string>
@@ -14,15 +13,31 @@
     <string name="btn_share">Отправить лог</string>
     <string name="btn_clear">Очистить</string>
     <string name="btn_device_info">Инфо USB</string>
-    <string name="hint_address">Адрес (серийный №, можно пусто)</string>
-    <string name="hint_password">Пароль</string>
-    <string name="hint_command">Параметр или текст, напр. ET0PE или SNUMB</string>
-    <string name="label_baud">Нач. скорость</string>
+    <string name="btn_m_ping">Ping</string>
+    <string name="btn_m_energy">Показания</string>
+    <string name="btn_m_datetime">Дата/время</string>
+    <string name="btn_m_info">Инфо счётчика</string>
+    <string name="btn_m_relay_on">Реле ВКЛ</string>
+    <string name="btn_m_relay_off">Реле ОТКЛ</string>
+    <string name="btn_m_raw">Команда HEX</string>
+    <string name="hint_address_iec">Адрес (можно пусто)</string>
+    <string name="hint_password_iec">Пароль</string>
+    <string name="hint_address_mirtek">Адрес счётчика (число)</string>
+    <string name="hint_password_mirtek">Пароль (число)</string>
+    <string name="hint_command_iec">Параметр или текст, напр. ET0PE</string>
+    <string name="hint_command_mirtek">Команда и данные HEX, напр. 2B 00</string>
+    <string name="label_protocol">Протокол</string>
+    <string name="label_baud">Скорость</string>
     <string name="label_format">Формат</string>
     <string name="label_force">Драйвер</string>
-    <string name="cb_switch_baud">Переключать скорость по ответу счётчика</string>
-    <string name="cb_hex">HEX в логе</string>
-    <string name="cb_dtr">DTR/RTS вкл</string>
+    <string name="cb_switch_baud">Переключать скорость по ответу</string>
+    <string name="cb_hex">HEX</string>
+    <string name="cb_dtr">DTR/RTS</string>
     <string name="status_idle">Не подключено</string>
     <string name="no_devices">USB-устройства не найдены. Подключите оптоголовку или радиомодуль через OTG.</string>
+    <string name="relay_confirm_title">Подтверждение</string>
+    <string name="relay_off_text">Отключить нагрузку на счётчике с адресом %1$d? Действие записывается в журнал счётчика.</string>
+    <string name="relay_on_text">Включить нагрузку на счётчике с адресом %1$d?</string>
+    <string name="yes">Да</string>
+    <string name="no">Отмена</string>
 </resources>

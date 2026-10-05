@@ -34,17 +34,57 @@ public final class Iec62056Session {
     private int currentBaud = -1;
     private Identification lastId;
 
+    /** Auto mode: scan these (baud, 7E1?) pairs until the meter answers, then stick to the winner. */
+    private boolean auto;
+    private boolean locked;
+    private int lockedBaud;
+    private boolean lockedSevenE1;
+
+    /** Scan order: the most likely settings first (Энергомера: 9600 7E1; стандарт IEC: 300 7E1). */
+    private static final int[][] CANDIDATES = {
+            {9600, 1}, {300, 1}, {9600, 0}, {300, 0},
+            {2400, 1}, {4800, 1}, {1200, 1}, {19200, 1}, {600, 1},
+    };
+
     public Iec62056Session(SerialLink link, LogSink log) {
         this.link = link;
         this.log = log;
     }
 
     public void configure(int initialBaud, boolean switchBaud, boolean sevenE1) {
+        this.auto = false;
         this.initialBaud = initialBaud;
         this.switchBaud = switchBaud;
+        setFormat(sevenE1);
+        this.currentBaud = -1;
+    }
+
+    /**
+     * Auto mode. baud <= 0 means "scan all rates"; sevenE1 == null means "try both formats".
+     * The first combination the meter answers to is remembered for the following operations.
+     */
+    public void configureAuto(int baud, Boolean sevenE1, boolean switchBaud) {
+        this.auto = true;
+        this.switchBaud = switchBaud;
+        this.initialBaud = baud;
+        this.autoSevenE1 = sevenE1;
+        this.locked = false;
+        this.currentBaud = -1;
+        if (sevenE1 != null) {
+            setFormat(sevenE1);
+        }
+    }
+
+    private Boolean autoSevenE1;
+
+    private void setFormat(boolean sevenE1) {
         this.dataBits = sevenE1 ? 7 : 8;
         this.parity = sevenE1 ? SerialLink.PARITY_EVEN : SerialLink.PARITY_NONE;
-        this.currentBaud = -1;
+    }
+
+    /** "9600 7E1" once auto mode has found the meter, otherwise null. */
+    public String lockedDescription() {
+        return auto && locked ? lockedBaud + " " + (lockedSevenE1 ? "7E1" : "8N1") : null;
     }
 
     public Identification lastIdentification() {
@@ -53,13 +93,59 @@ public final class Iec62056Session {
 
     // ---- public operations -------------------------------------------------
 
-    /** Sends "/?address!" and parses the identification message. */
+    /** Sends "/?address!" and parses the identification message; in auto mode scans the settings first. */
     public Identification identify(String address) throws IOException {
-        applyBaud(initialBaud);
+        if (!auto) {
+            return identifyWith(initialBaud, address, responseTimeoutMs);
+        }
+        if (locked) {
+            try {
+                setFormat(lockedSevenE1);
+                return identifyWith(lockedBaud, address, responseTimeoutMs);
+            } catch (IOException e) {
+                log.line("На сохранённых параметрах " + lockedDescription() + " ответа нет, подбираю заново");
+                locked = false;
+            }
+        }
+        StringBuilder tried = new StringBuilder();
+        for (int[] c : CANDIDATES) {
+            int baud = c[0];
+            boolean sevenE1 = c[1] == 1;
+            if (initialBaud > 0 && baud != initialBaud) {
+                continue;
+            }
+            if (autoSevenE1 != null && sevenE1 != autoSevenE1.booleanValue()) {
+                continue;
+            }
+            setFormat(sevenE1);
+            // Give the meter a moment of silence after garbage at a wrong rate.
+            sleep(300);
+            try {
+                Identification id = identifyWith(baud, address, baud <= 600 ? 3000 : 2200);
+                locked = true;
+                lockedBaud = baud;
+                lockedSevenE1 = sevenE1;
+                log.line("Параметры подобраны: " + lockedDescription() + ", дальше использую их");
+                return id;
+            } catch (IOException e) {
+                if (tried.length() > 0) {
+                    tried.append(", ");
+                }
+                tried.append(baud).append(' ').append(sevenE1 ? "7E1" : "8N1");
+                log.line("  нет ответа на " + baud + " " + (sevenE1 ? "7E1" : "8N1"));
+            }
+        }
+        throw new IOException("Счётчик не ответил ни на одной комбинации (" + tried
+                + "). Проверьте положение оптоголовки и питание DTR/RTS.");
+    }
+
+    private Identification identifyWith(int baud, String address, int timeoutMs) throws IOException {
+        currentBaud = -1; // force re-applying the format even if the rate is unchanged
+        applyBaud(baud);
         drain();
         String addr = address == null ? "" : address.trim();
         send(Hex.ascii("/?" + addr + "!\r\n"));
-        byte[] line = readUntil((byte) '\n', responseTimeoutMs);
+        byte[] line = readUntil((byte) '\n', timeoutMs);
         if (line.length == 0) {
             throw new IOException("Счётчик не ответил на запрос идентификации (" + currentBaud
                     + " бод, " + formatName() + "). Проверьте положение оптоголовки, начальную скорость и формат.");
@@ -149,7 +235,14 @@ public final class Iec62056Session {
     /** Sends text verbatim plus CR LF and shows whatever arrives within waitMs. */
     public String raw(String text, int waitMs) throws IOException {
         if (currentBaud < 0) {
-            applyBaud(initialBaud);
+            if (auto && locked) {
+                setFormat(lockedSevenE1);
+                applyBaud(lockedBaud);
+            } else if (auto) {
+                throw new IOException("Сначала выполните «Опрос /?!», чтобы подобрать скорость, либо задайте её вручную");
+            } else {
+                applyBaud(initialBaud);
+            }
         }
         send(Hex.ascii(text + "\r\n"));
         byte[] reply = collect(waitMs);

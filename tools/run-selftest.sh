@@ -8,5 +8,8 @@ javac -source 8 -target 8 -encoding UTF-8 -Xlint:-options -nowarn -d "$OUT" \
   "$ROOT"/app/src/main/java/by/mobilemeter/util/*.java \
   "$ROOT"/app/src/main/java/by/mobilemeter/transport/SerialLink.java \
   "$ROOT"/app/src/main/java/by/mobilemeter/protocol/iec62056/*.java \
-  "$ROOT"/app/src/test/java/by/mobilemeter/protocol/iec62056/SessionSelfTest.java
+  "$ROOT"/app/src/main/java/by/mobilemeter/protocol/mirtek/*.java \
+  "$ROOT"/app/src/test/java/by/mobilemeter/protocol/iec62056/SessionSelfTest.java \
+  "$ROOT"/app/src/test/java/by/mobilemeter/protocol/mirtek/MirtekSelfTest.java
 java -cp "$OUT" by.mobilemeter.protocol.iec62056.SessionSelfTest
+java -cp "$OUT" by.mobilemeter.protocol.mirtek.MirtekSelfTest

@@ -22,6 +22,11 @@ public final class SessionSelfTest {
         final ByteArrayOutputStream pending = new ByteArrayOutputStream();
         final List<Integer> bauds = new ArrayList<Integer>();
         int step = 0;
+        /** When set, the fake meter only hears requests sent at exactly these settings. */
+        int onlyBaud = -1;
+        int onlyParity = -1;
+        int curBaud = -1;
+        int curParity = -1;
 
         void script(String request, byte[] answer) {
             script(Hex.ascii(request), answer);
@@ -37,9 +42,14 @@ public final class SessionSelfTest {
 
         public void setParameters(int baud, int dataBits, int stopBits, int parity) {
             bauds.add(baud);
+            curBaud = baud;
+            curParity = parity;
         }
 
         public void write(byte[] data) throws IOException {
+            if (onlyBaud >= 0 && (curBaud != onlyBaud || curParity != onlyParity)) {
+                return; // wrong settings: the meter sees garbage and stays silent
+            }
             if (step >= expect.size()) {
                 throw new IOException("unexpected write: " + Hex.printable(data, 0, data.length));
             }
@@ -177,6 +187,46 @@ public final class SessionSelfTest {
         s3.configure(300, false, true);
         s3.readout("");
         check(l3.bauds.size() == 1, "no baud switch");
+
+        // 7. auto mode: the meter answers only at 9600 8N1; the scan must find it and then reuse it
+        FakeLink l4 = new FakeLink();
+        l4.onlyBaud = 9600;
+        l4.onlyParity = SerialLink.PARITY_NONE;
+        l4.script("/?!\r\n", Hex.ascii("/EKT5CE318BY\r\n"));
+        l4.script("/?!\r\n", Hex.ascii("/EKT5CE318BY\r\n"));
+        l4.script("\u0006050\r\n", dataBlock("1.8.0(00000.18*kWh)\r\n!\r\n"));
+        Iec62056Session s4 = new Iec62056Session(l4, new LogSink());
+        s4.configureAuto(0, null, true);
+        Identification found = s4.identify("");
+        check("CE318BY".equals(found.ident), "auto ident");
+        check("9600 8N1".equals(s4.lockedDescription()), "locked " + s4.lockedDescription());
+        int baudsAfterScan = l4.bauds.size();
+        check(baudsAfterScan == 3, "scan order 9600 7E1, 300 7E1, 9600 8N1: " + l4.bauds);
+        List<Register> r4 = s4.readout("");
+        check(r4.size() == 1, "readout after auto");
+        check(l4.bauds.size() == baudsAfterScan + 1, "locked settings reused without rescanning: " + l4.bauds);
+
+        // 8. auto mode with nothing answering: one clear error listing the attempts
+        FakeLink l5 = new FakeLink();
+        l5.onlyBaud = 1; // never matches
+        Iec62056Session s5 = new Iec62056Session(l5, new LogSink());
+        s5.configureAuto(0, null, true);
+        try {
+            s5.identify("");
+            check(false, "expected failure");
+        } catch (IOException e) {
+            check(e.getMessage().contains("300 7E1") && e.getMessage().contains("19200 7E1"), "attempts listed: " + e.getMessage());
+        }
+
+        // 9. auto format only, fixed 300 baud
+        FakeLink l6 = new FakeLink();
+        l6.onlyBaud = 300;
+        l6.onlyParity = SerialLink.PARITY_NONE;
+        l6.script("/?!\r\n", Hex.ascii("/EKT5CE208v3\r\n"));
+        Iec62056Session s6 = new Iec62056Session(l6, new LogSink());
+        s6.configureAuto(300, null, true);
+        s6.identify("");
+        check("300 8N1".equals(s6.lockedDescription()), "fixed baud, auto format: " + s6.lockedDescription());
 
         System.out.println("SELFTEST OK: " + log.text().split("\n").length + " log lines in scenario 4");
     }

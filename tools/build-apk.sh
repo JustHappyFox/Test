@@ -12,8 +12,8 @@ ANDROID_JAR=${ANDROID_JAR:-$TOOLS_DIR/android-all-34.jar}
 KEYSTORE=${KEYSTORE:-$TOOLS_DIR/debug.keystore}
 DX=${DX:-$(command -v dx || command -v dalvik-exchange || echo /usr/lib/android-sdk/build-tools/debian/dx)}
 APP_ID=by.mobilemeter
-VERSION_CODE=${VERSION_CODE:-1}
-VERSION_NAME=${VERSION_NAME:-0.1.0}
+VERSION_CODE=${VERSION_CODE:-3}
+VERSION_NAME=${VERSION_NAME:-0.3.0}
 MIN_SDK=24
 TARGET_SDK=34
 
