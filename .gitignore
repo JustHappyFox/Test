@@ -1,0 +1,7 @@
+# Данные абонентов хранятся только на компьютере и в git не попадают (energosbyt/rules.md, п. 2.1–2.2)
+energosbyt/inbox/*
+energosbyt/objects/*
+energosbyt/template/*
+!energosbyt/inbox/.gitkeep
+!energosbyt/objects/.gitkeep
+!energosbyt/template/.gitkeep
