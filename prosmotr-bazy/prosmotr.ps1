@@ -28,6 +28,9 @@ public class DbfField {
 // Решает, оставить ли прочитанную запись (для поиска по всем таблицам без загрузки их целиком)
 public delegate bool RowFilter(object[] values);
 
+// Сообщает, сколько записей уже прочитано (чтобы окно не "зависало" на больших таблицах)
+public delegate void LoadProgress(int done, int expected);
+
 // Таблица DBF (FoxPro / dBase), прочитанная в память. Файл открывается только на чтение.
 public class DbfTable {
     public string FilePath;
@@ -39,10 +42,10 @@ public class DbfTable {
     const int MaxMemoFile = 64 * 1024 * 1024;
 
     public static DbfTable Load(string path, bool otherEncoding) {
-        return Load(path, otherEncoding, null);
+        return Load(path, otherEncoding, null, null);
     }
 
-    public static DbfTable Load(string path, bool otherEncoding, RowFilter filter) {
+    public static DbfTable Load(string path, bool otherEncoding, RowFilter filter, LoadProgress progress) {
         DbfTable t = new DbfTable();
         t.FilePath = path;
         using (FileStream fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 1 << 16)) {
@@ -84,6 +87,7 @@ public class DbfTable {
             fs.Seek(headerLen, SeekOrigin.Begin);
             byte[] rec = new byte[recordLen];
             for (int i = 0; i < count; i++) {
+                if (progress != null && i > 0 && i % 5000 == 0) progress(i, count);
                 if (!ReadFull(fs, rec) || rec[0] == 0x1A) break;
                 if (rec[0] == (byte)'*') { t.Deleted++; continue; }
                 object[] values = new object[t.Fields.Count];
@@ -104,19 +108,38 @@ public class DbfTable {
     }
 
     public static string[] SplitWords(string query) {
-        return query.ToLowerInvariant().Split(new char[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+        return query.ToLowerInvariant().Split(new char[] { ' ', ',', ';', '\t' }, StringSplitOptions.RemoveEmptyEntries);
     }
 
-    // Все слова должны встретиться в тексте. Номер с нулями впереди ищем и без них -
-    // на случай, если в таблице он хранится числом.
+    // Все слова должны встретиться в тексте записи
     public static bool Matches(string text, string[] words) {
         foreach (string w in words) {
-            if (text.IndexOf(w, StringComparison.Ordinal) >= 0) continue;
-            string trimmed = w.TrimStart('0');
-            if (trimmed.Length > 0 && trimmed.Length < w.Length && IsDigits(w) && text.IndexOf(trimmed, StringComparison.Ordinal) >= 0) continue;
-            return false;
+            if (!MatchesWord(text, w)) return false;
         }
         return true;
+    }
+
+    static bool MatchesWord(string text, string w) {
+        if (!IsDigits(w)) return text.IndexOf(w, StringComparison.Ordinal) >= 0;
+        string trimmed = w.TrimStart('0');
+        // короткое число - дом или квартира - ищем только целиком: "18" не найдёт "118" и "180"
+        if (w.Length <= 4)
+            return ContainsNumber(text, w) || (trimmed.Length > 0 && trimmed.Length < w.Length && ContainsNumber(text, trimmed));
+        // длинное - лицевой счёт, телефон: можно часть; с нулями впереди ищем и без них
+        if (text.IndexOf(w, StringComparison.Ordinal) >= 0) return true;
+        return trimmed.Length > 0 && trimmed.Length < w.Length && text.IndexOf(trimmed, StringComparison.Ordinal) >= 0;
+    }
+
+    static bool ContainsNumber(string text, string n) {
+        int i = text.IndexOf(n, StringComparison.Ordinal);
+        while (i >= 0) {
+            bool before = i == 0 || text[i - 1] < '0' || text[i - 1] > '9';
+            int end = i + n.Length;
+            bool after = end >= text.Length || text[end] < '0' || text[end] > '9';
+            if (before && after) return true;
+            i = text.IndexOf(n, i + 1, StringComparison.Ordinal);
+        }
+        return false;
     }
 
     static bool IsDigits(string s) {
@@ -325,6 +348,12 @@ public class DbfViewer : Form {
     bool sortDescending;
     bool suspend;
     bool resizeColumns;
+    bool loading;
+    readonly FlowLayoutPanel bar1 = Bar();
+    readonly FlowLayoutPanel bar2 = Bar();
+
+    // больше стольки записей таблица целиком не показывается - только найденное
+    const int ShowAllLimit = 5000;
 
     public static void Run(string settingsFile) {
         Application.EnableVisualStyles();
@@ -337,7 +366,6 @@ public class DbfViewer : Form {
         Size = new Size(1100, 700);
         StartPosition = FormStartPosition.CenterScreen;
 
-        FlowLayoutPanel bar1 = Bar();
         folderBox.Width = 420;
         folderBox.KeyDown += new KeyEventHandler(OnFolderKey);
         Button openButton = new Button();
@@ -350,7 +378,6 @@ public class DbfViewer : Form {
         folderButton.Click += delegate { ChooseFolder(); };
         bar1.Controls.AddRange(new Control[] { Caption("Папка:"), folderBox, openButton, folderButton });
 
-        FlowLayoutPanel bar2 = Bar();
         tableBox.DropDownStyle = ComboBoxStyle.DropDownList;
         tableBox.Width = 180;
         tableBox.SelectedIndexChanged += delegate { LoadSelected(); };
@@ -494,13 +521,21 @@ public class DbfViewer : Form {
     }
 
     void LoadSelected() {
-        if (suspend || tableBox.SelectedItem == null) return;
+        if (suspend || loading || tableBox.SelectedItem == null) return;
         string name = (string)tableBox.SelectedItem;
-        Cursor = Cursors.WaitCursor;
+        table = null;
+        BuildColumns();
+        SetBusy(true);
         status.Text = "Загрузка " + name + "...";
         status.Refresh();
         try {
-            table = DbfTable.Load(Path.Combine(folder, name), encodingBox.Checked);
+            table = DbfTable.Load(Path.Combine(folder, name), encodingBox.Checked, null, delegate(int done, int expected) {
+                if (IsDisposed) throw new OperationCanceledException();
+                status.Text = "Загрузка " + name + ": прочитано " + done + " из " + expected + " записей...";
+                Application.DoEvents();
+            });
+        } catch (OperationCanceledException) {
+            return;
         } catch (IOException ex) {
             table = null;
             Message("Не удалось открыть таблицу (возможно, она сейчас занята):\n" + ex.Message);
@@ -508,11 +543,20 @@ public class DbfViewer : Form {
             table = null;
             Message("Не удалось прочитать таблицу:\n" + ex.Message);
         } finally {
-            Cursor = Cursors.Default;
+            if (!IsDisposed) SetBusy(false);
         }
         SaveSettings();
         BuildColumns();
         ApplyFilter();
+        searchBox.Focus();
+    }
+
+    void SetBusy(bool busy) {
+        loading = busy;
+        bar1.Enabled = !busy;
+        bar2.Enabled = !busy;
+        grid.Enabled = !busy;
+        Cursor = busy ? Cursors.WaitCursor : Cursors.Default;
     }
 
     void BuildColumns() {
@@ -542,10 +586,10 @@ public class DbfViewer : Form {
     }
 
     internal void ApplyFilter() {
-        if (suspend) return;
+        if (suspend || loading) return;
         view.Clear();
-        if (table != null) {
-            string[] words = DbfTable.SplitWords(searchBox.Text);
+        string[] words = DbfTable.SplitWords(searchBox.Text);
+        if (table != null && (words.Length > 0 || table.Rows.Count <= ShowAllLimit)) {
             int field = fieldBox.SelectedIndex - 1;   // -1 - искать во всех полях
             for (int i = 0; i < table.Rows.Count; i++) {
                 string text = field < 0 ? rowText[i] : DbfTable.Format(table.Rows[i][field], true).ToLowerInvariant();
@@ -556,7 +600,7 @@ public class DbfViewer : Form {
         grid.RowCount = 0;
         grid.RowCount = view.Count;
         grid.Invalidate();
-        if (resizeColumns && grid.Columns.Count > 0) {
+        if (resizeColumns && grid.Columns.Count > 0 && view.Count > 0) {   // ширина - по первым найденным строкам
             resizeColumns = false;
             grid.AutoResizeColumns(DataGridViewAutoSizeColumnsMode.DisplayedCells);
             foreach (DataGridViewColumn c in grid.Columns) if (c.Width > 300) c.Width = 300;
@@ -595,15 +639,13 @@ public class DbfViewer : Form {
     }
 
     void ScanTable(ScanResults results, string name, string[] words) {
-        int counter = 0;
         try {
-            DbfTable t = DbfTable.Load(Path.Combine(folder, name), encodingBox.Checked, delegate(object[] values) {
-                if (++counter % 2000 == 0) {
+            DbfTable t = DbfTable.Load(Path.Combine(folder, name), encodingBox.Checked,
+                delegate(object[] values) { return DbfTable.Matches(DbfTable.SearchText(values), words); },
+                delegate(int done, int expected) {
                     Application.DoEvents();
-                    if (results.Cancelled) throw new OperationCanceledException();
-                }
-                return DbfTable.Matches(DbfTable.SearchText(values), words);
-            });
+                    if (results.Cancelled || IsDisposed) throw new OperationCanceledException();
+                });
             if (t.Rows.Count > 0) results.AddResult(name, t.Rows.Count, t.Total);
         } catch (OperationCanceledException) {
         } catch (Exception ex) {
@@ -639,6 +681,10 @@ public class DbfViewer : Form {
 
     void UpdateStatus() {
         if (table == null) { status.Text = ""; return; }
+        if (DbfTable.SplitWords(searchBox.Text).Length == 0 && table.Rows.Count > ShowAllLimit) {
+            status.Text = "В таблице " + table.Rows.Count + " записей. Впишите в \"Поиск\" адрес, номер или фамилию - покажу только подходящие. Например: заводская 18";
+            return;
+        }
         status.Text = "Показано записей: " + view.Count + " из " + table.Rows.Count
             + (table.Deleted > 0 ? " (удалённые записи не показываются: " + table.Deleted + ")" : "")
             + ".   Двойной щелчок или Enter по строке - карточка целиком.";
@@ -765,6 +811,7 @@ public class DbfViewer : Form {
     }
 
     void Message(string text) {
+        if (IsDisposed) return;
         MessageBox.Show(this, text, Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
     }
 }
