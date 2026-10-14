@@ -1387,11 +1387,17 @@ public class SearchResult {
     public Dictionary<int, bool> Added = new Dictionary<int, bool>();     // строки, которые не искали: другие тарифы того же счётчика
     public Dictionary<int, string> Group = new Dictionary<int, string>(); // строка -> её группа (рамка): тарифы одного счётчика, абоненты одного адреса
     public Dictionary<int, string> Related = new Dictionary<int, string>(); // добавленные по адресу или ФИО -> почему
-    public Dictionary<int, bool> Orange = new Dictionary<int, bool>();      // на адресе больше одного счётчика - оранжевым
+    public Dictionary<int, string> Orange = new Dictionary<int, string>();  // в доме больше одного абонента - оранжевым (почему)
+    public Dictionary<int, string> House = new Dictionary<int, string>();   // строка -> её дом (только дома, где абонентов больше одного)
 
     public string GroupOf(int row) {
         string g;
         return Group.TryGetValue(row, out g) ? g : null;
+    }
+
+    public string HouseOf(int row) {
+        string h;
+        return House.TryGetValue(row, out h) ? h : null;
     }
 
     public int Searched { get { return Rows.Count - Added.Count; } }
@@ -2426,26 +2432,36 @@ public class LiveBase {
         res.How += "; домов проверено на второй счётчик/то же ФИО: " + houses.Count + ", добавлено абонентов: " + added;
     }
 
-    // Группы (рамка): тарифы одного счётчика, абоненты одного адреса и добавленные к найденному.
-    // В группе больше одного счётчика - не тарифные строки оранжевым. Группа стоит на месте первой её строки.
+    // Группы (рамка): тарифы одного счётчика, абоненты одного адреса (второй счётчик) и один человек в доме.
+    // Дом, где в найденном больше одного абонента, - весь оранжевым, внутри него - группы в рамках;
+    // тарифы (T1, T2...) - всегда зелёным. Строки одного дома стоят подряд, дом - на месте первой его строки.
     void Arrange(SearchResult res, Dictionary<int, string> mainOf) {
         DbfTable tb = res.Table;
         Dictionary<int, int> parent = new Dictionary<int, int>();
         foreach (int row in res.Rows) parent[row] = row;
         Dictionary<string, int> firstOf = new Dictionary<string, int>();
+        Dictionary<int, string> house = new Dictionary<int, string>(), addr = new Dictionary<int, string>();
         foreach (int row in res.Rows) {
+            house[row] = HouseKey(tb, row);
+            addr[row] = AddrKey(tb, row);
             string m;
             if (mainOf.TryGetValue(row, out m)) Join(parent, firstOf, "T" + m, row);
-            string a = AddrKey(tb, row);
-            if (a.Length > 0) Join(parent, firstOf, "A" + a, row);
+            if (addr[row].Length > 0) Join(parent, firstOf, "A" + addr[row], row);
         }
         // один человек (то же ФИО) в одном доме - тоже вместе
         int fioF = tb.FieldIndex("FIO");
         if (fioF >= 0)
             foreach (int row in res.Rows) {
-                string h = HouseKey(tb, row), f = FioKey(Field(tb, row, fioF));
-                if (h.Length > 0 && f.Length > 0) Join(parent, firstOf, "F" + h + "|" + f, row);
+                string f = FioKey(Field(tb, row, fioF));
+                if (house[row].Length > 0 && f.Length > 0) Join(parent, firstOf, "F" + house[row] + "|" + f, row);
             }
+        // счётчики (тариф одного счётчика - один) по домам и по адресам
+        Dictionary<string, Dictionary<string, bool>> houseUnits = new Dictionary<string, Dictionary<string, bool>>();
+        Dictionary<string, Dictionary<string, bool>> addrUnits = new Dictionary<string, Dictionary<string, bool>>();
+        foreach (int row in res.Rows) {
+            Count(houseUnits, house[row], UnitOf(row, mainOf));
+            Count(addrUnits, addr[row], UnitOf(row, mainOf));
+        }
         Dictionary<int, List<int>> members = new Dictionary<int, List<int>>();
         foreach (int row in res.Rows) {
             int root = Find(parent, row);
@@ -2456,37 +2472,64 @@ public class LiveBase {
         Dictionary<int, int> original = new Dictionary<int, int>();
         for (int i = 0; i < res.Rows.Count; i++) original[res.Rows[i]] = i;
         Dictionary<int, int> clusterPos = new Dictionary<int, int>(), unitPos = new Dictionary<int, int>();
+        Dictionary<int, string> blockOf = new Dictionary<int, string>();
+        Dictionary<string, int> blockPos = new Dictionary<string, int>();
         Dictionary<string, int> unitFirst = new Dictionary<string, int>();
         foreach (KeyValuePair<int, List<int>> kv in members) {
             List<int> l = kv.Value;
-            int pos = int.MaxValue;
+            int pos = int.MaxValue, first = l[0];
             Dictionary<string, bool> units = new Dictionary<string, bool>();
             foreach (int row in l) {
-                pos = Math.Min(pos, original[row]);
-                string m;
-                string unit = mainOf.TryGetValue(row, out m) ? "T" + m : "R" + row;
+                if (original[row] < pos) { pos = original[row]; first = row; }
+                string unit = UnitOf(row, mainOf);
                 units[unit] = true;
                 int up;
                 if (!unitFirst.TryGetValue(unit, out up) || original[row] < up) unitFirst[unit] = original[row];
             }
+            // группа стоит в доме своей первой строки
+            string block = house[first].Length > 0 ? "H" + house[first] : "C" + kv.Key;
+            int bp;
+            if (!blockPos.TryGetValue(block, out bp) || pos < bp) blockPos[block] = pos;
             foreach (int row in l) {
                 clusterPos[row] = pos;
+                blockOf[row] = block;
                 if (l.Count > 1) res.Group[row] = "G" + kv.Key;
-                if (units.Count > 1 && !res.Tariff.ContainsKey(row)) res.Orange[row] = true;
+                string why = null;
+                if (Units(addrUnits, addr[row]) > 1) why = "на этом адресе больше одного счётчика";
+                else if (Units(houseUnits, house[row]) > 1) why = "в этом доме больше одного абонента";
+                else if (units.Count > 1) why = "вместе с найденным";
+                if (Units(houseUnits, house[row]) > 1) res.House[row] = house[row];
+                if (why != null && !res.Tariff.ContainsKey(row)) res.Orange[row] = why;
             }
         }
-        foreach (int row in res.Rows) {
-            string m;
-            unitPos[row] = unitFirst[mainOf.TryGetValue(row, out m) ? "T" + m : "R" + row];
-        }
+        foreach (int row in res.Rows) unitPos[row] = unitFirst[UnitOf(row, mainOf)];
         List<int> order = new List<int>(res.Rows);
         order.Sort(delegate(int x, int y) {
-            int c = clusterPos[x].CompareTo(clusterPos[y]);
+            int c = blockPos[blockOf[x]].CompareTo(blockPos[blockOf[y]]);
+            if (c == 0) c = clusterPos[x].CompareTo(clusterPos[y]);
             if (c == 0) c = unitPos[x].CompareTo(unitPos[y]);
             if (c == 0) { int tx, ty; res.Tariff.TryGetValue(x, out tx); res.Tariff.TryGetValue(y, out ty); c = tx.CompareTo(ty); }
             return c != 0 ? c : original[x].CompareTo(original[y]);
         });
         res.Rows = order;
+    }
+
+    // счётчик строки: тарифы одного счётчика - один счётчик
+    static string UnitOf(int row, Dictionary<int, string> mainOf) {
+        string m;
+        return mainOf.TryGetValue(row, out m) ? "T" + m : "R" + row;
+    }
+
+    static void Count(Dictionary<string, Dictionary<string, bool>> map, string key, string unit) {
+        if (key.Length == 0) return;
+        Dictionary<string, bool> u;
+        if (!map.TryGetValue(key, out u)) { u = new Dictionary<string, bool>(); map[key] = u; }
+        u[unit] = true;
+    }
+
+    static int Units(Dictionary<string, Dictionary<string, bool>> map, string key) {
+        Dictionary<string, bool> u;
+        return key.Length > 0 && map.TryGetValue(key, out u) ? u.Count : 0;
     }
 
     static int Find(Dictionary<int, int> parent, int x) {
@@ -5674,9 +5717,15 @@ public class AbonentSearch : Form {
         return r == null || i < 0 || i >= r.Rows.Count ? null : r.GroupOf(r.Rows[i]);
     }
 
+    string HouseAt(int i) {
+        SearchResult r = current;
+        return r == null || i < 0 || i >= r.Rows.Count ? null : r.HouseOf(r.Rows[i]);
+    }
+
     void OnCellPainting(object sender, DataGridViewCellPaintingEventArgs e) {
         if (e.RowIndex < 0) return;
-        ResultColumns.PaintGroup(grid, e, GroupAt(e.RowIndex - 1), GroupAt(e.RowIndex), GroupAt(e.RowIndex + 1));
+        string h = HouseAt(e.RowIndex), hp = HouseAt(e.RowIndex - 1);
+        ResultColumns.PaintGroup(grid, e, GroupAt(e.RowIndex - 1), GroupAt(e.RowIndex), GroupAt(e.RowIndex + 1), h != null && hp != null && h != hp);
     }
 
     // лицевые тарифов (T1, T2...) - зеленоватым; не искавшиеся тарифы того же счётчика - номер красным
@@ -5966,18 +6015,23 @@ public static class ResultColumns {
         }
     }
 
-    // Жирная чёрная рамка вокруг группы тарифов одного счётчика (T1, T2, T3), чтобы группы не сливались.
-    // prev, cur, next - группа предыдущей, этой и следующей строки (null - строка не в группе)
-    public static void PaintGroup(DataGridView g, DataGridViewCellPaintingEventArgs e, string prev, string cur, string next) {
-        if (cur == null || e.RowIndex < 0 || e.ColumnIndex < 0) return;
+    public static readonly Color HouseLineColor = Color.FromArgb(200, 95, 0);
+
+    // Жирная чёрная рамка вокруг группы (тарифы одного счётчика, счётчики одного адреса), чтобы группы не сливались.
+    // prev, cur, next - группа предыдущей, этой и следующей строки (null - строка не в группе);
+    // newHouse - с этой строки начинается другой оранжевый дом (тонкая оранжевая черта сверху)
+    public static void PaintGroup(DataGridView g, DataGridViewCellPaintingEventArgs e, string prev, string cur, string next, bool newHouse) {
+        if ((cur == null && !newHouse) || e.RowIndex < 0 || e.ColumnIndex < 0) return;
         e.Paint(e.ClipBounds, DataGridViewPaintParts.All);
         Rectangle b = e.CellBounds;
+        if (newHouse) using (SolidBrush br = new SolidBrush(HouseLineColor)) e.Graphics.FillRectangle(br, b.Left, b.Top, b.Width, 2);
+        e.Handled = true;
+        if (cur == null) return;
         const int w = 3;
         if (prev != cur) e.Graphics.FillRectangle(Brushes.Black, b.Left, b.Top, b.Width, w);
         if (next != cur) e.Graphics.FillRectangle(Brushes.Black, b.Left, b.Bottom - w, b.Width, w);
         if (e.ColumnIndex == 0) e.Graphics.FillRectangle(Brushes.Black, b.Left, b.Top, w, b.Height);
         if (e.ColumnIndex == g.Columns.Count - 1) e.Graphics.FillRectangle(Brushes.Black, b.Right - w, b.Top, w, b.Height);
-        e.Handled = true;
     }
 
     // Ctrl+A в поле ввода - выделить всё
@@ -6002,7 +6056,7 @@ public static class ResultColumns {
         if (r.Tariff.TryGetValue(row, out t)) { first.Add("Тариф"); first.Add("T" + t + " (лицевые одного счётчика: таблица ABDIF_T)"); }
         string why;
         if (r.Related.TryGetValue(row, out why)) { first.Add("Добавлен к найденному"); first.Add(why); }
-        else if (r.Orange.ContainsKey(row)) { first.Add("На адресе"); first.Add("больше одного счётчика (подсвечено оранжевым)"); }
+        else if (r.Orange.TryGetValue(row, out why)) { first.Add("Подсвечено оранжевым"); first.Add(why); }
         List<string> after = null;
         int nab = r.Table.FieldIndex("NAB");
         if (x != null && nab >= 0) {
@@ -6157,7 +6211,9 @@ public class BatchSearch : Form {
         grid.CellValueNeeded += new DataGridViewCellValueEventHandler(OnCellValueNeeded);
         grid.CellFormatting += new DataGridViewCellFormattingEventHandler(OnCellFormatting);
         grid.CellPainting += delegate(object s, DataGridViewCellPaintingEventArgs e) {
-            if (e.RowIndex >= 0) ResultColumns.PaintGroup(grid, e, GroupAt(e.RowIndex - 1), GroupAt(e.RowIndex), GroupAt(e.RowIndex + 1));
+            if (e.RowIndex < 0) return;
+            string h = HouseAt(e.RowIndex), hp = HouseAt(e.RowIndex - 1);
+            ResultColumns.PaintGroup(grid, e, GroupAt(e.RowIndex - 1), GroupAt(e.RowIndex), GroupAt(e.RowIndex + 1), h != null && hp != null && h != hp);
         };
         grid.CellDoubleClick += delegate(object s, DataGridViewCellEventArgs e) { OpenCard(e.RowIndex); };
         AddColumn("№", 35);
@@ -6170,7 +6226,7 @@ public class BatchSearch : Form {
         bottom.Height = 34;
         status.Dock = DockStyle.Fill;
         status.TextAlign = ContentAlignment.MiddleLeft;
-        status.Text = "Найденные - белым, несколько - жёлтым, тарифы (T1, T2...) - зелёным, 2 счётчика на адресе - оранжевым, не найденные - красным; номер красным - добавлено к найденному. Двойной щелчок - карточка.";
+        status.Text = "Найденные - белым, несколько - жёлтым, тарифы (T1, T2...) - зелёным, дом, где больше одного абонента, - оранжевым, не найденные - красным; номер красным - добавлено к найденному. Двойной щелчок - карточка.";
         Button excel = new Button();
         excel.Text = "В Excel";
         excel.Dock = DockStyle.Right;
@@ -6305,6 +6361,15 @@ public class BatchSearch : Form {
         if (it.Res == null || it.Row < 0) return null;
         string g = it.Res.GroupOf(it.Row);
         return g == null ? null : it.Line + "|" + g;
+    }
+
+    // дом строки итога (только оранжевые дома) - свой для каждой строки списка
+    string HouseAt(int i) {
+        if (i < 0 || i >= items.Count) return null;
+        Item it = items[i];
+        if (it.Res == null || it.Row < 0) return null;
+        string h = it.Res.HouseOf(it.Row);
+        return h == null ? null : it.Line + "|" + h;
     }
 
     void OnCellFormatting(object sender, DataGridViewCellFormattingEventArgs e) {
