@@ -1384,6 +1384,9 @@ public class SearchResult {
     public double Seconds;
     public Dictionary<int, int> Tariff = new Dictionary<int, int>();      // строка -> номер тарифа (T1, T2...)
     public Dictionary<int, string> Power = new Dictionary<int, string>(); // строка -> мощность (доп. сведения)
+    public Dictionary<int, bool> Added = new Dictionary<int, bool>();     // строки, которые не искали: другие тарифы того же счётчика
+
+    public int Searched { get { return Rows.Count - Added.Count; } }
 
     public string TariffText(int row) {
         int n;
@@ -1409,6 +1412,7 @@ public class ExtraInfo {
     long tariffSize;
     readonly Dictionary<string, int> tariffOf = new Dictionary<string, int>();   // лицевой -> номер тарифа
     readonly Dictionary<string, string> mainOf = new Dictionary<string, string>(); // лицевой -> основной лицевой
+    readonly Dictionary<string, List<KeyValuePair<int, string>>> groups = new Dictionary<string, List<KeyValuePair<int, string>>>(); // основной -> (тариф, лицевой)
     int mainField = -1, nabField = -1, numField = -1;
     readonly object sync = new object();
     public string TariffNote = "";
@@ -1526,20 +1530,31 @@ public class ExtraInfo {
         }
         Dictionary<string, int> tariff = new Dictionary<string, int>();
         Dictionary<string, string> main = new Dictionary<string, string>();
+        Dictionary<string, List<KeyValuePair<int, string>>> group = new Dictionary<string, List<KeyValuePair<int, string>>>();
         if (nabField >= 0 && numField >= 0) {
             for (int r = 0; r < t.Count; r++) {
-                string nab = Nab(DbfTable.Format(t.GetValue(r, nabField, null), true));
+                string raw = DbfTable.Format(t.GetValue(r, nabField, null), true).Trim();
+                string nab = Nab(raw);
                 int n;
                 if (nab.Length == 0 || !int.TryParse(DbfTable.Format(t.GetValue(r, numField, null), true).Trim(), out n)) continue;
                 tariff[nab] = n;
-                if (mainField >= 0) main[nab] = Nab(DbfTable.Format(t.GetValue(r, mainField, null), true));
+                string m = mainField >= 0 ? Nab(DbfTable.Format(t.GetValue(r, mainField, null), true)) : "";
+                if (m.Length == 0) continue;
+                main[nab] = m;
+                List<KeyValuePair<int, string>> list;
+                if (!group.TryGetValue(m, out list)) { list = new List<KeyValuePair<int, string>>(); group[m] = list; }
+                list.Add(new KeyValuePair<int, string>(n, raw));
             }
         }
+        foreach (List<KeyValuePair<int, string>> list in group.Values)
+            list.Sort(delegate(KeyValuePair<int, string> a, KeyValuePair<int, string> b) { return a.Key.CompareTo(b.Key); });
         lock (sync) {
             tariffOf.Clear();
             mainOf.Clear();
+            groups.Clear();
             foreach (KeyValuePair<string, int> kv in tariff) tariffOf[kv.Key] = kv.Value;
             foreach (KeyValuePair<string, string> kv in main) mainOf[kv.Key] = kv.Value;
+            foreach (KeyValuePair<string, List<KeyValuePair<int, string>>> kv in group) groups[kv.Key] = kv.Value;
             tariffTime = fi.LastWriteTime;
             tariffSize = fi.Length;
             tariffChecked = DateTime.Now;
@@ -1576,6 +1591,14 @@ public class ExtraInfo {
             if (!tariffOf.TryGetValue(k, out n)) { main = null; return 0; }
             if (!mainOf.TryGetValue(k, out main)) main = null;
             return n;
+        }
+    }
+
+    // все лицевые одного многотарифного счётчика по основному лицевому: (номер тарифа, лицевой), по порядку тарифов
+    public List<KeyValuePair<int, string>> Group(string main) {
+        lock (sync) {
+            List<KeyValuePair<int, string>> list;
+            return main != null && groups.TryGetValue(Nab(main), out list) ? new List<KeyValuePair<int, string>>(list) : new List<KeyValuePair<int, string>>();
         }
     }
 
@@ -2244,14 +2267,15 @@ public class LiveBase {
         int nab = res.Table.FieldIndex("NAB");
         if (nab < 0) return;
         Dictionary<int, string> mainOf = new Dictionary<int, string>();
-        List<string> nabs = new List<string>();
         foreach (int row in res.Rows) {
             string v = DbfTable.Format(res.Table.GetValue(row, nab, null), true);
             string main;
             int t = Extra.Tariff(v, out main);
             if (t > 0) { res.Tariff[row] = t; mainOf[row] = main == null ? ExtraInfo.Nab(v) : main; }
-            if (nabs.Count < 100) nabs.Add(v);
         }
+        if (res.Tariff.Count > 0) AddSiblings(res, nab, mainOf);
+        List<string> nabs = new List<string>();
+        foreach (int row in res.Rows) if (nabs.Count < 100) nabs.Add(DbfTable.Format(res.Table.GetValue(row, nab, null), true));
         if (res.Tariff.Count > 0) {
             // группа тарифов встаёт на место первой из её строк
             Dictionary<string, int> groupAt = new Dictionary<string, int>();
@@ -2281,6 +2305,67 @@ public class LiveBase {
         } catch (Exception ex) {
             res.How += "; мощность не прочиталась: " + ex.Message;
         }
+    }
+
+    // Нашёлся лицевой одного из тарифов - добавляем остальные тарифы того же счётчика (их не искали - помечаются)
+    void AddSiblings(SearchResult res, int nab, Dictionary<int, string> mainOf) {
+        Dictionary<string, int> rowOf = new Dictionary<string, int>();
+        for (int row = 0; row < res.Table.Count; row++) {
+            string k = ExtraInfo.Nab(DbfTable.Format(res.Table.GetValue(row, nab, null), true));
+            if (!rowOf.ContainsKey(k)) rowOf[k] = row;
+        }
+        Dictionary<int, bool> shown = new Dictionary<int, bool>();
+        foreach (int row in res.Rows) shown[row] = true;
+        List<string> missing = new List<string>();
+        Dictionary<string, string> wantMain = new Dictionary<string, string>();
+        Dictionary<string, bool> doneGroup = new Dictionary<string, bool>();
+        foreach (string main in mainOf.Values) {
+            if (doneGroup.ContainsKey(main)) continue;
+            doneGroup[main] = true;
+            foreach (KeyValuePair<int, string> sib in Extra.Group(main)) {
+                string k = ExtraInfo.Nab(sib.Value);
+                wantMain[k] = main;
+                if (!rowOf.ContainsKey(k)) missing.Add(sib.Value);
+            }
+        }
+        bool grown = false;
+        if (missing.Count > 0) {
+            try {
+                DbfTable more;
+                Dictionary<string, int> found = LookupNabs(missing, out more);
+                foreach (KeyValuePair<string, int> kv in found) {
+                    int start;
+                    byte[] buf = more.RecordBuffer(kv.Value, out start);
+                    res.Table.AddRecord(buf, start, more.RecNos[kv.Value]);
+                    rowOf[kv.Key] = res.Table.Count - 1;
+                    grown = true;
+                }
+            } catch (Exception ex) {
+                res.How += "; другие тарифы не прочитались: " + ex.Message;
+            }
+        }
+        foreach (KeyValuePair<string, string> kv in wantMain) {
+            int row;
+            if (!rowOf.TryGetValue(kv.Key, out row) || shown.ContainsKey(row)) continue;
+            string main;
+            int t = Extra.Tariff(kv.Key, out main);
+            if (t <= 0) continue;
+            res.Rows.Add(row);
+            res.Added[row] = true;
+            res.Tariff[row] = t;
+            mainOf[row] = kv.Value;
+            shown[row] = true;
+        }
+        if (grown) {
+            // в таблице результата добавились записи - столбцы (улица по справочнику) считаем заново
+            AbonentQuery q = new AbonentQuery(res.Table, Dir);
+            q.Partial = res.Query.Partial;
+            q.Address = res.Query.Address;
+            q.LastExplain = res.Query.LastExplain;
+            q.Miss = res.Query.Miss;
+            res.Query = q;
+        }
+        if (res.Added.Count > 0) res.How += "; добавлено лицевых других тарифов тех же счётчиков: " + res.Added.Count;
     }
 
     // Записи по номерам абонентов (по индексу NAB): номер (без нулей впереди) -> строка в table. null - нет индекса
@@ -4871,6 +4956,7 @@ public class AbonentSearch : Form {
         queryBox.Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top;
         queryBox.TextChanged += new EventHandler(OnQueryChanged);
         queryBox.KeyDown += new KeyEventHandler(OnQueryKey);
+        ResultColumns.SelectAllKey(queryBox);
         hint.ForeColor = SystemColors.GrayText;
         hint.AutoSize = true;
         hint.Location = new Point(12, 76);
@@ -5010,7 +5096,7 @@ public class AbonentSearch : Form {
         if (r == null) return;
         string line = "Поиск по: " + Prompts[(int)r.Mode] + (r.Partial ? " (частичное совпадение)" : "") + (r.Scanned ? " (перебором)" : "") + "; "
             + (r.NoIndex ? "нет подходящего индекса" : r.How) + (r.Query != null && r.Query.LastExplain.Length > 0 ? "; " + r.Query.LastExplain : "")
-            + (r.Note.Length > 0 ? "; " + r.Note : "") + " -> найдено " + r.Rows.Count + (r.Hidden > 0 ? ", скрыто (другие сельсоветы) " + r.Hidden : "")
+            + (r.Note.Length > 0 ? "; " + r.Note : "") + " -> найдено " + r.Searched + (r.Added.Count > 0 ? " (+" + r.Added.Count + " других тарифов)" : "") + (r.Hidden > 0 ? ", скрыто (другие сельсоветы) " + r.Hidden : "")
             + (r.TooMany ? ", показана часть" : "") + ", " + r.Seconds.ToString("0.00") + " с";
         if (line == lastLogged) return;
         lastLogged = line;
@@ -5288,8 +5374,9 @@ public class AbonentSearch : Form {
         if (cardWhenDone) {
             cardWhenDone = false;
             LogSearch();
-            if (r.Rows.Count == 1) OpenCard(0);   // нашёлся один - сразу карточка
-            else if (r.Rows.Count > 1) grid.Focus();
+            // нашёлся один (кроме добавленных тарифов того же счётчика) - сразу его карточка
+            if (r.Searched == 1) { for (int i = 0; i < r.Rows.Count; i++) if (!r.Added.ContainsKey(r.Rows[i])) { grid.CurrentCell = grid.Rows[i].Cells[0]; OpenCard(i); break; } }
+            else if (r.Rows.Count > 0) grid.Focus();
         }
     }
 
@@ -5373,7 +5460,8 @@ public class AbonentSearch : Form {
             status.Text = (r.Hidden > 0 ? "В выбранных сельсоветах не найдено, а в других нашлось: " + r.Hidden + " - отметьте их в списке \"Сельсоветы\"."
                 : "Ничего не найдено. " + (!r.TooMany && r.Query != null ? r.Query.Miss : "") + tip) + took + "   " + where;
         else
-            status.Text = "Найдено: " + r.Rows.Count + (r.TooMany ? " (нашлось очень много, показана часть - уточните запрос)" : "")
+            status.Text = "Найдено: " + r.Searched + (r.TooMany ? " (нашлось очень много, показана часть - уточните запрос)" : "")
+                + (r.Added.Count > 0 ? ", и ещё " + r.Added.Count + " лицевых других тарифов тех же счётчиков (номер красным)" : "")
                 + (r.Hidden > 0 ? ", ещё " + r.Hidden + " в других сельсоветах скрыто" : "")
                 + ". Enter или двойной щелчок - карточка." + took + "   " + where;
     }
@@ -5384,11 +5472,11 @@ public class AbonentSearch : Form {
         e.Value = ResultColumns.Text(r, r.Rows[e.RowIndex], kinds[e.ColumnIndex]);
     }
 
-    // лицевые тарифов (T1, T2...) - зеленоватым
+    // лицевые тарифов (T1, T2...) - зеленоватым; не искавшиеся тарифы того же счётчика - номер красным
     void OnCellFormatting(object sender, DataGridViewCellFormattingEventArgs e) {
         SearchResult r = current;
-        if (r == null || e.RowIndex < 0 || e.RowIndex >= r.Rows.Count) return;
-        if (r.Tariff.ContainsKey(r.Rows[e.RowIndex])) e.CellStyle.BackColor = ResultColumns.TariffColor;
+        if (r == null || e.RowIndex < 0 || e.RowIndex >= r.Rows.Count || e.ColumnIndex >= kinds.Count) return;
+        ResultColumns.Format(r, r.Rows[e.RowIndex], kinds[e.ColumnIndex], e.CellStyle);
     }
 
     void OnQueryKey(object sender, KeyEventArgs e) {
@@ -5657,6 +5745,24 @@ public static class ResultColumns {
         return n == "FIO" ? 300 : n == "UL" ? 200 : (n == "NAB" || n == "NCH" || n == "TIPCH") ? 130 : 70;
     }
 
+    public static readonly Color AddedColor = Color.FromArgb(210, 0, 0);
+
+    // строка - другой тариф того же счётчика (её не искали): номер абонента красным
+    public static void Format(SearchResult r, int row, int kind, DataGridViewCellStyle style) {
+        if (r.Tariff.ContainsKey(row)) style.BackColor = TariffColor;
+        if (r.Added.ContainsKey(row) && kind >= 0 && string.Compare(r.Table.Fields[kind].Name, "NAB", StringComparison.OrdinalIgnoreCase) == 0) {
+            style.ForeColor = AddedColor;
+            style.SelectionForeColor = Color.FromArgb(255, 190, 190);
+        }
+    }
+
+    // Ctrl+A в поле ввода - выделить всё
+    public static void SelectAllKey(TextBox box) {
+        box.KeyDown += delegate(object s, KeyEventArgs e) {
+            if (e.Control && e.KeyCode == Keys.A) { box.SelectAll(); e.Handled = true; e.SuppressKeyPress = true; }
+        };
+    }
+
     public static string Text(SearchResult r, int row, int kind) {
         if (kind == Tariff) return r.TariffText(row);
         if (kind == Power) return r.PowerText(row);
@@ -5790,6 +5896,7 @@ public class BatchSearch : Form {
         input.WordWrap = false;
         input.Dock = DockStyle.Fill;
         input.Font = new Font(FontFamily.GenericMonospace, 10f);
+        ResultColumns.SelectAllKey(input);
 
         Panel buttons = new Panel();
         buttons.Dock = DockStyle.Right;
@@ -5833,7 +5940,7 @@ public class BatchSearch : Form {
         bottom.Height = 34;
         status.Dock = DockStyle.Fill;
         status.TextAlign = ContentAlignment.MiddleLeft;
-        status.Text = "Найденные - белым, несколько абонентов на одну строку - жёлтым, тарифы (T1, T2...) - зелёным, не найденные - красным. Двойной щелчок - карточка.";
+        status.Text = "Найденные - белым, несколько на одну строку - жёлтым, тарифы (T1, T2...) - зелёным, не найденные - красным; номер красным - другой тариф того же счётчика. Двойной щелчок - карточка.";
         Button excel = new Button();
         excel.Text = "В Excel";
         excel.Dock = DockStyle.Right;
@@ -5887,11 +5994,13 @@ public class BatchSearch : Form {
                     add.Add(NewItem(i + 1, lines[i], why, null, -1, 2));
                     none++;
                 } else {
-                    string result = r.Rows.Count == 1 ? "найден" : "найдено " + r.Rows.Count + (r.Rows.Count > MaxPerLine ? " (показаны " + MaxPerLine + ")" : "");
+                    int n = r.Searched;
+                    string result = n == 1 ? "найден" : "найдено " + n + (r.Rows.Count > MaxPerLine ? " (показаны " + MaxPerLine + ")" : "");
+                    if (r.Added.Count > 0) result += " (+" + r.Added.Count + " др. тариф)";
                     if (r.Hidden > 0) result += " (+" + r.Hidden + " в других с/с)";
-                    if (r.Rows.Count == 1) single++; else several++;
+                    if (n == 1) single++; else several++;
                     for (int k = 0; k < r.Rows.Count && k < MaxPerLine; k++)
-                        add.Add(NewItem(i + 1, lines[i], result, r, r.Rows[k], r.Rows.Count == 1 ? 0 : 1));
+                        add.Add(NewItem(i + 1, lines[i], result, r, r.Rows[k], n == 1 ? 0 : 1));
                 }
                 done = i + 1;
                 int line = done;
@@ -5963,8 +6072,10 @@ public class BatchSearch : Form {
         Item it = items[e.RowIndex];
         int kind = it.Kind;
         if (kind == 2) e.CellStyle.BackColor = Color.FromArgb(255, 220, 220);
-        else if (it.Res != null && it.Res.Tariff.ContainsKey(it.Row)) e.CellStyle.BackColor = ResultColumns.TariffColor;
         else if (kind == 1) e.CellStyle.BackColor = Color.FromArgb(255, 245, 200);
+        if (it.Res != null && it.Row >= 0 && e.ColumnIndex >= 3 && e.ColumnIndex - 3 < kinds.Count)
+            ResultColumns.Format(it.Res, it.Row, kinds[e.ColumnIndex - 3], e.CellStyle);
+        else if (it.Res != null && it.Res.Tariff.ContainsKey(it.Row)) e.CellStyle.BackColor = ResultColumns.TariffColor;
     }
 
     void OpenCard(int index) {
