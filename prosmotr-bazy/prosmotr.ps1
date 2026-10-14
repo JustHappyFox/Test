@@ -23,6 +23,7 @@ public class DbfField {
     public char Type;
     public int Offset;
     public int Length;
+    public int Decimals;   // знаков после запятой у числовых полей
 }
 
 // Сообщает, сколько записей уже прочитано (чтобы окно не "зависало" на больших таблицах)
@@ -101,7 +102,10 @@ public class DbfTable {
     public int Expected;  // сколько записей написано в заголовке файла
     public long BytesRead;
     public double Seconds;
+    public List<int> RecNos = new List<int>();   // номер каждой записи в файле (с 1)
+    public bool Truncated;                       // подходящих записей было больше, прочитана часть
     byte[] headerBytes;
+    int headerLength;
 
     const int BlockRecords = 4096;   // записи хранятся кусками, без одного огромного массива
     int recordLength;
@@ -117,21 +121,26 @@ public class DbfTable {
 
     // query - если задан, в памяти остаются только подходящие записи (поиск во всех таблицах)
     public static DbfTable Load(string path, bool otherEncoding, string query, LoadProgress progress) {
-        return LoadCore(path, otherEncoding, query, progress, false, null, 0);
+        return LoadCore(path, otherEncoding, query, progress, false, null, 0, 0);
+    }
+
+    // maxKeep - больше стольких подходящих записей не набирать (перебор с очень общим запросом)
+    public static DbfTable Load(string path, string query, RecordFilter keep, LoadProgress progress, int maxKeep) {
+        return LoadCore(path, false, query, progress, false, keep, 0, maxKeep);
     }
 
     // keep - какие записи оставлять; maxRecords > 0 - прочитать только начало файла
     public static DbfTable Load(string path, RecordFilter keep, LoadProgress progress, int maxRecords) {
-        return LoadCore(path, false, null, progress, false, keep, maxRecords);
+        return LoadCore(path, false, null, progress, false, keep, maxRecords, 0);
     }
 
     // Только заголовок: список полей и число записей, без чтения самих записей
     public static DbfTable LoadHeader(string path) {
-        return LoadCore(path, false, null, null, true, null, 0);
+        return LoadCore(path, false, null, null, true, null, 0, 0);
     }
 
     static DbfTable LoadCore(string path, bool otherEncoding, string query, LoadProgress progress, bool headerOnly,
-                             RecordFilter keep, int maxRecords) {
+                             RecordFilter keep, int maxRecords, int maxKeep) {
         DateTime started = DateTime.Now;
         DbfTable t = new DbfTable();
         t.FilePath = path;
@@ -160,6 +169,7 @@ public class DbfTable {
                 f.Type = char.ToUpperInvariant((char)desc[p + 11]);
                 f.Length = desc[p + 16];
                 if (f.Type == 'C') f.Length += desc[p + 17] << 8;   // длинные текстовые поля (Clipper)
+                else f.Decimals = desc[p + 17];
                 f.Offset = offset;
                 offset += f.Length;
                 if (f.Type != '0') t.Fields.Add(f);                  // '0' - служебное поле VFP
@@ -167,23 +177,13 @@ public class DbfTable {
             if (offset > recordLen)
                 throw new InvalidDataException("Не удалось разобрать структуру таблицы.");
             t.Expected = count;
+            t.headerLength = headerLen;
             t.headerBytes = new byte[headerLen];
             Buffer.BlockCopy(head, 0, t.headerBytes, 0, 32);
             Buffer.BlockCopy(desc, 0, t.headerBytes, 32, desc.Length);
             if (headerOnly) return t;
 
-            // поисковая копия: только текстовые поля (двоичные числа и ссылки на примечания - пропуск),
-            // после каждого поля - разделитель
-            int fieldCount = t.Fields.Count;
-            bool[] text = new bool[fieldCount];
-            t.lowerOffsets = new int[fieldCount];
-            int pos = 0;
-            for (int j = 0; j < fieldCount; j++) {
-                t.lowerOffsets[j] = pos;
-                pos += t.Fields[j].Length + 1;
-                text[j] = "CNFDL".IndexOf(t.Fields[j].Type) >= 0;
-            }
-            t.lowerLength = Math.Max(pos, 1);
+            t.PrepareLower();
             SearchWord[] filter = query == null ? null : t.PrepareWords(query);
 
             fs.Seek(headerLen, SeekOrigin.Begin);
@@ -204,14 +204,9 @@ public class DbfTable {
                     if (flag == (byte)'*') { t.Deleted++; continue; }  // удалённая запись
                     t.Total++;
                     if (keep != null && !keep(chunk, start)) continue;
-                    for (int j = 0; j < fieldCount; j++) {
-                        DbfField f = t.Fields[j];
-                        int src = start + f.Offset, dst = t.lowerOffsets[j];
-                        if (text[j]) for (int k = 0; k < f.Length; k++) low[dst + k] = t.lowerMap[chunk[src + k]];
-                        else for (int k = 0; k < f.Length; k++) low[dst + k] = 1;
-                        low[dst + f.Length] = 1;
-                    }
-                    if (filter == null || MatchesAll(low, 0, t.lowerLength, filter)) t.Append(chunk, start, low);
+                    t.MakeLower(chunk, start, low);
+                    if (filter == null || MatchesAll(low, 0, t.lowerLength, filter)) t.Append(chunk, start, low, index + r + 1);
+                    if (maxKeep > 0 && t.Count >= maxKeep) { t.Truncated = true; end = true; break; }
                 }
                 index += got;
                 if (got < want) break;   // файл короче, чем написано в его заголовке
@@ -220,24 +215,6 @@ public class DbfTable {
         }
         t.Seconds = (DateTime.Now - started).TotalSeconds;
         return t;
-    }
-
-    // Сохранить записи, что в памяти, отдельным файлом DBF той же структуры (быстрый запуск в следующий раз)
-    public void SaveCopy(string file) {
-        string tmp = file + ".tmp";
-        using (FileStream fs = new FileStream(tmp, FileMode.Create, FileAccess.Write, FileShare.None, 1 << 16)) {
-            byte[] head = (byte[])headerBytes.Clone();
-            byte[] n = BitConverter.GetBytes(Count);
-            Buffer.BlockCopy(n, 0, head, 4, 4);
-            fs.Write(head, 0, head.Length);
-            for (int b = 0; b < data.Count; b++) {
-                int records = Math.Min(BlockRecords, Count - b * BlockRecords);
-                fs.Write(data[b], 0, records * recordLength);
-            }
-            fs.WriteByte(0x1A);
-        }
-        if (File.Exists(file)) File.Delete(file);
-        File.Move(tmp, file);
     }
 
     void BuildLowerMap() {
@@ -253,7 +230,67 @@ public class DbfTable {
         }
     }
 
-    void Append(byte[] src, int start, byte[] low) {
+    // поисковая копия: только текстовые поля (двоичные числа и ссылки на примечания - пропуск),
+    // после каждого поля - разделитель
+    bool[] lowerText;
+
+    void PrepareLower() {
+        int fieldCount = Fields.Count;
+        lowerText = new bool[fieldCount];
+        lowerOffsets = new int[fieldCount];
+        int pos = 0;
+        for (int j = 0; j < fieldCount; j++) {
+            lowerOffsets[j] = pos;
+            pos += Fields[j].Length + 1;
+            lowerText[j] = "CNFDL".IndexOf(Fields[j].Type) >= 0;
+        }
+        lowerLength = Math.Max(pos, 1);
+    }
+
+    void MakeLower(byte[] src, int start, byte[] low) {
+        for (int j = 0; j < Fields.Count; j++) {
+            DbfField f = Fields[j];
+            int from = start + f.Offset, dst = lowerOffsets[j];
+            if (lowerText[j]) for (int k = 0; k < f.Length; k++) low[dst + k] = lowerMap[src[from + k]];
+            else for (int k = 0; k < f.Length; k++) low[dst + k] = 1;
+            low[dst + f.Length] = 1;
+        }
+    }
+
+    public int RecordLength { get { return recordLength; } }
+    public int HeaderLength { get { return headerLength; } }
+
+    // Пустая таблица той же структуры - в неё складываются записи, прочитанные по номерам
+    public static DbfTable CreateLike(DbfTable h) {
+        DbfTable t = new DbfTable();
+        t.FilePath = h.FilePath;
+        t.Fields = h.Fields;
+        t.Enc = h.Enc;
+        t.recordLength = h.recordLength;
+        t.headerLength = h.headerLength;
+        t.headerBytes = h.headerBytes;
+        t.Expected = h.Expected;
+        t.BuildLowerMap();
+        t.PrepareLower();
+        return t;
+    }
+
+    public void AddRecord(byte[] src, int start, int recNo) {
+        if (lowerOffsets == null) PrepareLower();
+        byte[] low = new byte[lowerLength];
+        MakeLower(src, start, low);
+        Append(src, start, low, recNo);
+        Total++;
+    }
+
+    // запись как в файле: буфер и место в нём
+    public byte[] RecordBuffer(int row, out int start) {
+        start = (row % BlockRecords) * recordLength;
+        return data[row / BlockRecords];
+    }
+
+    void Append(byte[] src, int start, byte[] low, int recNo) {
+        RecNos.Add(recNo);
         int block = Count / BlockRecords;
         int slot = Count % BlockRecords;
         if (block == data.Count) {
@@ -551,6 +588,1489 @@ public class DbfTable {
             }
         }
         return sb.ToString();
+    }
+}
+
+// ---- выражения FoxPro: по ним построены индексы (ключ и условие FOR) ----
+
+public class FoxValue {
+    public char Type;      // C - текст, N - число, D - дата (номер дня), L - да/нет
+    public byte[] Text;
+    public double Num;
+    public bool Log;
+
+    public static FoxValue Chars(byte[] b) { FoxValue v = new FoxValue(); v.Type = 'C'; v.Text = b; return v; }
+    public static FoxValue Number(double d) { FoxValue v = new FoxValue(); v.Type = 'N'; v.Num = d; return v; }
+    public static FoxValue Date(double d) { FoxValue v = new FoxValue(); v.Type = 'D'; v.Num = d; return v; }
+    public static FoxValue Logical(bool b) { FoxValue v = new FoxValue(); v.Type = 'L'; v.Log = b; return v; }
+}
+
+// Запись, на которой считается выражение
+public class FoxContext {
+    public DbfTable Table;
+    public byte[] Rec;
+    public int Start;
+    public bool CyrillicUpper = true;   // UPPER() переводит и русские буквы (как в вашей FoxPro - проверяется по индексу)
+}
+
+public class FoxExpr {
+    // f - поле, v - готовое значение, c - функция, + - = # < > a (<=) b (>=) e (==) $ & (и) | (или) ! (не) m (минус числа)
+    public char Op;
+    public string Name;
+    public int Field = -1;
+    public FoxValue Value;
+    public FoxExpr[] Args = new FoxExpr[0];
+
+    static readonly string[] Functions = {
+        "UPPER", "LOWER", "STR", "DTOS", "DTOC", "LEFT", "RIGHT", "SUBSTR", "ALLTRIM", "TRIM", "RTRIM", "LTRIM",
+        "PADL", "PADR", "VAL", "INT", "EMPTY", "DELETED", "IIF", "SPACE" };
+
+    public static FoxExpr Parse(string text, DbfTable t) {
+        Parser p = new Parser(text, t);
+        FoxExpr e = p.Or();
+        p.Space();
+        if (p.pos < text.Length) throw new FormatException("непонятно: " + text.Substring(p.pos));
+        return e;
+    }
+
+    // поля, из которых считается выражение
+    public void CollectFields(List<int> list) {
+        if (Op == 'f' && !list.Contains(Field)) list.Add(Field);
+        foreach (FoxExpr a in Args) a.CollectFields(list);
+    }
+
+    // слагаемые верхнего уровня: STR(UL,5)+DOM+KV -> STR(UL,5), DOM, KV
+    public List<FoxExpr> Terms() {
+        List<FoxExpr> list = new List<FoxExpr>();
+        if (Op == '+') { list.AddRange(Args[0].Terms()); list.AddRange(Args[1].Terms()); }
+        else list.Add(this);
+        return list;
+    }
+
+    // начало значения поля даёт начало ключа: FIO, UPPER(FIO), LEFT(FIO,20) - да; STR(), ALLTRIM() - нет
+    public bool PrefixSafe() {
+        if (Op == 'f') return true;
+        if (Op != 'c') return false;
+        if (Name == "UPPER" || Name == "LOWER" || Name == "PADR") return Args.Length > 0 && Args[0].PrefixSafe();
+        if (Name == "LEFT") return Args.Length == 2 && Args[0].PrefixSafe();
+        if (Name == "SUBSTR") return Args.Length >= 2 && Args[1].Op == 'v' && Args[1].Value.Num == 1 && Args[0].PrefixSafe();
+        return false;
+    }
+
+    public bool UsesCase() {
+        if (Op == 'c' && (Name == "UPPER" || Name == "LOWER")) return true;
+        foreach (FoxExpr a in Args) if (a.UsesCase()) return true;
+        return false;
+    }
+
+    // ---- вычисление ----
+
+    public FoxValue Eval(FoxContext c) {
+        switch (Op) {
+            case 'f': return FieldValue(c, Field);
+            case 'v': return Value;
+            case 'c': return Call(c);
+            case 'm': return FoxValue.Number(-Num(Args[0].Eval(c)));
+            case '!': return FoxValue.Logical(!Bool(Args[0].Eval(c)));
+            case '&': return FoxValue.Logical(Bool(Args[0].Eval(c)) && Bool(Args[1].Eval(c)));
+            case '|': return FoxValue.Logical(Bool(Args[0].Eval(c)) || Bool(Args[1].Eval(c)));
+        }
+        FoxValue a = Args[0].Eval(c), b = Args[1].Eval(c);
+        switch (Op) {
+            case '+':
+                if (a.Type == 'C' && b.Type == 'C') return FoxValue.Chars(Concat(a.Text, b.Text));
+                if (a.Type == 'D' && b.Type == 'N') return FoxValue.Date(a.Num + b.Num);
+                return FoxValue.Number(Num(a) + Num(b));
+            case '-':
+                if (a.Type == 'C' && b.Type == 'C') {
+                    int end = a.Text.Length;
+                    while (end > 0 && a.Text[end - 1] == ' ') end--;
+                    byte[] r = new byte[a.Text.Length + b.Text.Length];
+                    Buffer.BlockCopy(a.Text, 0, r, 0, end);
+                    Buffer.BlockCopy(b.Text, 0, r, end, b.Text.Length);
+                    for (int i = end + b.Text.Length; i < r.Length; i++) r[i] = (byte)' ';
+                    return FoxValue.Chars(r);
+                }
+                if (a.Type == 'D' && b.Type == 'D') return FoxValue.Number(a.Num - b.Num);
+                if (a.Type == 'D') return FoxValue.Date(a.Num - Num(b));
+                return FoxValue.Number(Num(a) - Num(b));
+            case '$':
+                return FoxValue.Logical(Find(Str(b), Str(a)) >= 0);
+        }
+        int cmp = Compare(a, b, Op == '=' || Op == '#');
+        switch (Op) {
+            case '=': case 'e': return FoxValue.Logical(cmp == 0);
+            case '#': return FoxValue.Logical(cmp != 0);
+            case '<': return FoxValue.Logical(cmp < 0);
+            case '>': return FoxValue.Logical(cmp > 0);
+            case 'a': return FoxValue.Logical(cmp <= 0);
+            default: return FoxValue.Logical(cmp >= 0);
+        }
+    }
+
+    // "=" для текста - как в FoxPro при SET EXACT OFF: сравнение по длине правой части
+    static int Compare(FoxValue a, FoxValue b, bool loose) {
+        if (a.Type == 'C' && b.Type == 'C') {
+            byte[] x = a.Text, y = b.Text;
+            int n = loose ? y.Length : Math.Max(x.Length, y.Length);
+            for (int i = 0; i < n; i++) {
+                int p = i < x.Length ? x[i] : 32, q = i < y.Length ? y[i] : 32;
+                if (p != q) return p < q ? -1 : 1;
+            }
+            return 0;
+        }
+        if (a.Type == 'L' && b.Type == 'L') return a.Log == b.Log ? 0 : a.Log ? 1 : -1;
+        return Num(a).CompareTo(Num(b));
+    }
+
+    static double Num(FoxValue v) {
+        if (v.Type == 'N' || v.Type == 'D') return v.Num;
+        throw new NotSupportedException("ожидалось число");
+    }
+
+    static bool Bool(FoxValue v) {
+        if (v.Type == 'L') return v.Log;
+        throw new NotSupportedException("ожидалось да/нет");
+    }
+
+    static byte[] Str(FoxValue v) {
+        if (v.Type == 'C') return v.Text;
+        throw new NotSupportedException("ожидался текст");
+    }
+
+    static int Int(FoxValue v) {
+        return (int)Num(v);
+    }
+
+    static byte[] Concat(byte[] a, byte[] b) {
+        byte[] r = new byte[a.Length + b.Length];
+        Buffer.BlockCopy(a, 0, r, 0, a.Length);
+        Buffer.BlockCopy(b, 0, r, a.Length, b.Length);
+        return r;
+    }
+
+    static byte[] Sub(byte[] s, int from, int len) {
+        if (from < 0) from = 0;
+        if (from > s.Length) from = s.Length;
+        if (len > s.Length - from) len = s.Length - from;
+        if (len < 0) len = 0;
+        byte[] r = new byte[len];
+        Buffer.BlockCopy(s, from, r, 0, len);
+        return r;
+    }
+
+    static int Find(byte[] where, byte[] what) {
+        for (int i = 0; i + what.Length <= where.Length; i++) {
+            int k = 0;
+            while (k < what.Length && where[i + k] == what[k]) k++;
+            if (k == what.Length) return i;
+        }
+        return -1;
+    }
+
+    static FoxValue FieldValue(FoxContext c, int field) {
+        DbfField f = c.Table.Fields[field];
+        int at = c.Start + f.Offset;
+        switch (f.Type) {
+            case 'C': return FoxValue.Chars(Sub(c.Rec, at, f.Length));
+            case 'N':
+            case 'F': {
+                string s = Encoding.ASCII.GetString(c.Rec, at, f.Length).Trim(' ', '\0');
+                double d;
+                if (s.Length == 0 || !double.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out d)) d = 0;
+                return FoxValue.Number(d);
+            }
+            case 'D': {
+                string s = Encoding.ASCII.GetString(c.Rec, at, Math.Min(8, f.Length)).Trim(' ', '\0');
+                DateTime d;
+                if (s.Length == 8 && DateTime.TryParseExact(s, "yyyyMMdd", CultureInfo.InvariantCulture, DateTimeStyles.None, out d))
+                    return FoxValue.Date(Julian(d));
+                return FoxValue.Date(0);
+            }
+            case 'L': return FoxValue.Logical("TtYy".IndexOf((char)c.Rec[at]) >= 0);
+        }
+        throw new NotSupportedException("поле " + f.Name + " типа " + f.Type);
+    }
+
+    public static double Julian(DateTime d) {
+        return (d.Date - new DateTime(1, 1, 1)).Days + 1721426;
+    }
+
+    static string Dtos(double julian) {
+        if (julian <= 0) return "        ";
+        try { return new DateTime(1, 1, 1).AddDays(julian - 1721426).ToString("yyyyMMdd", CultureInfo.InvariantCulture); }
+        catch (ArgumentOutOfRangeException) { return "        "; }
+    }
+
+    static readonly Dictionary<string, byte[]> caseMaps = new Dictionary<string, byte[]>();
+
+    // таблица замены букв: UPPER/LOWER в кодировке таблицы; cyrillic = false - только латиница
+    static byte[] CaseMap(Encoding enc, bool upper, bool cyrillic) {
+        string key = enc.CodePage + (upper ? "U" : "L") + (cyrillic ? "R" : "");
+        lock (caseMaps) {
+            byte[] map;
+            if (caseMaps.TryGetValue(key, out map)) return map;
+            map = new byte[256];
+            byte[] one = new byte[1];
+            for (int b = 0; b < 256; b++) {
+                map[b] = (byte)b;
+                if (b < 128) {
+                    if (upper && b >= 'a' && b <= 'z') map[b] = (byte)(b - 32);
+                    if (!upper && b >= 'A' && b <= 'Z') map[b] = (byte)(b + 32);
+                    continue;
+                }
+                if (!cyrillic) continue;
+                one[0] = (byte)b;
+                string s = enc.GetString(one);
+                string t = upper ? s.ToUpperInvariant() : s.ToLowerInvariant();
+                if (t == s) continue;
+                byte[] tb = enc.GetBytes(t);
+                if (tb.Length == 1 && enc.GetString(tb) == t) map[b] = tb[0];
+            }
+            caseMaps[key] = map;
+            return map;
+        }
+    }
+
+    FoxValue Call(FoxContext c) {
+        FoxValue[] a = new FoxValue[Args.Length];
+        if (Name != "IIF") for (int i = 0; i < a.Length; i++) a[i] = Args[i].Eval(c);
+        switch (Name) {
+            case "UPPER":
+            case "LOWER": {
+                byte[] s = Str(a[0]), map = CaseMap(c.Table.Enc, Name == "UPPER", c.CyrillicUpper);
+                byte[] r = new byte[s.Length];
+                for (int i = 0; i < s.Length; i++) r[i] = map[s[i]];
+                return FoxValue.Chars(r);
+            }
+            case "STR": {
+                double v = Num(a[0]);
+                int len = a.Length > 1 ? Int(a[1]) : 10, dec = a.Length > 2 ? Int(a[2]) : 0;
+                if (len <= 0) len = 10;
+                string s = null;
+                for (int d = Math.Max(dec, 0); d >= 0; d--) {
+                    s = Math.Round(v, d, MidpointRounding.AwayFromZero).ToString("F" + d, CultureInfo.InvariantCulture);
+                    if (s == "-0" || (s.StartsWith("-0.") && s.Trim('-', '0', '.').Length == 0)) s = s.Substring(1);
+                    if (s.Length <= len) break;
+                }
+                if (s.Length > len) s = new string('*', len);
+                return FoxValue.Chars(Encoding.ASCII.GetBytes(s.PadLeft(len)));
+            }
+            case "DTOS": return FoxValue.Chars(Encoding.ASCII.GetBytes(Dtos(Num(a[0]))));
+            case "DTOC":
+                if (a.Length > 1 && Int(a[1]) == 1) return FoxValue.Chars(Encoding.ASCII.GetBytes(Dtos(Num(a[0]))));
+                throw new NotSupportedException("DTOC без ,1 зависит от настроек даты");
+            case "LEFT": return FoxValue.Chars(Sub(Str(a[0]), 0, Int(a[1])));
+            case "RIGHT": {
+                byte[] s = Str(a[0]);
+                int n = Math.Min(Math.Max(Int(a[1]), 0), s.Length);
+                return FoxValue.Chars(Sub(s, s.Length - n, n));
+            }
+            case "SUBSTR": {
+                byte[] s = Str(a[0]);
+                int from = Int(a[1]) - 1;
+                return FoxValue.Chars(Sub(s, from, a.Length > 2 ? Int(a[2]) : s.Length));
+            }
+            case "ALLTRIM":
+            case "TRIM":
+            case "RTRIM":
+            case "LTRIM": {
+                byte[] s = Str(a[0]);
+                int from = 0, end = s.Length;
+                if (Name != "LTRIM") while (end > 0 && (s[end - 1] == ' ' || s[end - 1] == 0)) end--;
+                if (Name == "ALLTRIM" || Name == "LTRIM") while (from < end && s[from] == ' ') from++;
+                return FoxValue.Chars(Sub(s, from, end - from));
+            }
+            case "PADL":
+            case "PADR": {
+                byte[] s = Str(a[0]);
+                int n = Math.Max(Int(a[1]), 0);
+                byte fill = a.Length > 2 && Str(a[2]).Length > 0 ? Str(a[2])[0] : (byte)' ';
+                if (s.Length >= n) return FoxValue.Chars(Sub(s, 0, n));
+                byte[] r = new byte[n];
+                for (int i = 0; i < n; i++) r[i] = fill;
+                Buffer.BlockCopy(s, 0, r, Name == "PADL" ? n - s.Length : 0, s.Length);
+                return FoxValue.Chars(r);
+            }
+            case "VAL": {
+                string s = Encoding.ASCII.GetString(Str(a[0])).Trim();
+                int end = 0;
+                while (end < s.Length && (char.IsDigit(s[end]) || s[end] == '.' || (end == 0 && (s[end] == '-' || s[end] == '+')))) end++;
+                double d;
+                return FoxValue.Number(double.TryParse(s.Substring(0, end), NumberStyles.Float, CultureInfo.InvariantCulture, out d) ? d : 0);
+            }
+            case "INT": return FoxValue.Number(Math.Truncate(Num(a[0])));
+            case "SPACE": return FoxValue.Chars(Encoding.ASCII.GetBytes(new string(' ', Math.Max(Int(a[0]), 0))));
+            case "EMPTY": {
+                FoxValue v = a[0];
+                if (v.Type == 'C') { foreach (byte b in v.Text) if (b != ' ' && b != 0) return FoxValue.Logical(false); return FoxValue.Logical(true); }
+                if (v.Type == 'L') return FoxValue.Logical(!v.Log);
+                return FoxValue.Logical(v.Num == 0);
+            }
+            case "DELETED": return FoxValue.Logical(c.Rec[c.Start] == (byte)'*');
+            case "IIF": return Bool(Args[0].Eval(c)) ? Args[1].Eval(c) : Args[2].Eval(c);
+        }
+        throw new NotSupportedException("функция " + Name);
+    }
+
+    // Ключ индекса из значения: текст дополняется пробелами до длины ключа,
+    // число и дата - 8 байт, упорядоченных так, чтобы сравнение байтов давало порядок чисел
+    public static byte[] KeyBytes(FoxValue v, int keyLen) {
+        byte[] k;
+        switch (v.Type) {
+            case 'C':
+                k = new byte[keyLen];
+                for (int i = 0; i < keyLen; i++) k[i] = i < v.Text.Length ? v.Text[i] : (byte)' ';
+                return k;
+            case 'L':
+                return new byte[] { (byte)(v.Log ? 'T' : 'F') };
+        }
+        if (keyLen == 4) {
+            uint u = (uint)((int)v.Num) + 0x80000000u;
+            return new byte[] { (byte)(u >> 24), (byte)(u >> 16), (byte)(u >> 8), (byte)u };
+        }
+        double d = v.Num == 0 ? 0.0 : v.Num;   // без "минус нуля"
+        byte[] le = BitConverter.GetBytes(d);
+        if (!BitConverter.IsLittleEndian) Array.Reverse(le);
+        k = new byte[8];
+        for (int i = 0; i < 8; i++) k[i] = le[7 - i];
+        if (d >= 0) k[0] ^= 0x80;
+        else for (int i = 0; i < 8; i++) k[i] ^= 0xFF;
+        return k;
+    }
+
+    // ---- разбор ----
+
+    class Parser {
+        readonly string s;
+        readonly DbfTable t;
+        public int pos;
+
+        public Parser(string s, DbfTable t) { this.s = s; this.t = t; }
+
+        public void Space() { while (pos < s.Length && char.IsWhiteSpace(s[pos])) pos++; }
+
+        bool Word(string w) {
+            Space();
+            if (string.Compare(s, pos, w, 0, w.Length, StringComparison.OrdinalIgnoreCase) != 0) return false;
+            int end = pos + w.Length;
+            if (char.IsLetter(w[w.Length - 1]) && end < s.Length && (char.IsLetterOrDigit(s[end]) || s[end] == '_')) return false;
+            pos = end;
+            return true;
+        }
+
+        bool Sym(string w) {
+            Space();
+            if (string.CompareOrdinal(s, pos, w, 0, w.Length) != 0) return false;
+            pos += w.Length;
+            return true;
+        }
+
+        static FoxExpr Node(char op, params FoxExpr[] args) {
+            FoxExpr e = new FoxExpr();
+            e.Op = op;
+            e.Args = args;
+            return e;
+        }
+
+        public FoxExpr Or() {
+            FoxExpr e = And();
+            while (Word(".OR.") || Word("OR")) e = Node('|', e, And());
+            return e;
+        }
+
+        FoxExpr And() {
+            FoxExpr e = Not();
+            while (Word(".AND.") || Word("AND")) e = Node('&', e, Not());
+            return e;
+        }
+
+        FoxExpr Not() {
+            if (Word(".NOT.") || Word("NOT")) return Node('!', Not());
+            Space();
+            if (pos < s.Length && s[pos] == '!' && !(pos + 1 < s.Length && s[pos + 1] == '=')) { pos++; return Node('!', Not()); }
+            return Cmp();
+        }
+
+        FoxExpr Cmp() {
+            FoxExpr e = Add();
+            string[] ops = { "==", "<>", "!=", "<=", ">=", "=", "#", "<", ">", "$" };
+            char[] codes = { 'e', '#', '#', 'a', 'b', '=', '#', '<', '>', '$' };
+            for (int i = 0; i < ops.Length; i++) if (Sym(ops[i])) return Node(codes[i], e, Add());
+            return e;
+        }
+
+        FoxExpr Add() {
+            FoxExpr e = Unary();
+            while (true) {
+                if (Sym("+")) e = Node('+', e, Unary());
+                else if (Sym("-") ) e = Node('-', e, Unary());
+                else return e;
+            }
+        }
+
+        FoxExpr Unary() {
+            if (Sym("-")) return Node('m', Unary());
+            return Primary();
+        }
+
+        FoxExpr Primary() {
+            Space();
+            if (pos >= s.Length) throw new FormatException("выражение оборвалось");
+            char ch = s[pos];
+            if (ch == '(') {
+                pos++;
+                FoxExpr e = Or();
+                if (!Sym(")")) throw new FormatException("нет закрывающей скобки");
+                return e;
+            }
+            if (ch == '\'' || ch == '"' || ch == '[') {
+                char close = ch == '[' ? ']' : ch;
+                int end = s.IndexOf(close, pos + 1);
+                if (end < 0) throw new FormatException("строка без конца");
+                FoxExpr e = new FoxExpr();
+                e.Op = 'v';
+                e.Value = FoxValue.Chars(t.Enc.GetBytes(s.Substring(pos + 1, end - pos - 1)));
+                pos = end + 1;
+                return e;
+            }
+            if (Word(".T.") || Word(".F.")) {
+                FoxExpr e = new FoxExpr();
+                e.Op = 'v';
+                e.Value = FoxValue.Logical(char.ToUpperInvariant(s[pos - 2]) == 'T');
+                return e;
+            }
+            if (char.IsDigit(ch) || (ch == '.' && pos + 1 < s.Length && char.IsDigit(s[pos + 1]))) {
+                int start = pos;
+                while (pos < s.Length && (char.IsDigit(s[pos]) || s[pos] == '.')) pos++;
+                FoxExpr e = new FoxExpr();
+                e.Op = 'v';
+                e.Value = FoxValue.Number(double.Parse(s.Substring(start, pos - start), CultureInfo.InvariantCulture));
+                return e;
+            }
+            if (!(char.IsLetter(ch) || ch == '_')) throw new FormatException("непонятный знак '" + ch + "'");
+            string name = Ident();
+            // псевдоним таблицы: ABONENT.NAB или ABONENT->NAB
+            Space();
+            if (pos + 1 < s.Length && s[pos] == '-' && s[pos + 1] == '>') { pos += 2; Space(); name = Ident(); }
+            else if (pos + 1 < s.Length && s[pos] == '.' && char.IsLetter(s[pos + 1]) && t.FieldIndex(name) < 0) {
+                int save = pos;
+                pos++;
+                string inner = Ident();
+                if (pos < s.Length && s[pos] == '.') pos = save;   // это .AND. и подобное
+                else name = inner;
+            }
+            Space();
+            if (pos < s.Length && s[pos] == '(') {
+                pos++;
+                FoxExpr e = new FoxExpr();
+                e.Op = 'c';
+                e.Name = FunctionName(name);
+                List<FoxExpr> args = new List<FoxExpr>();
+                if (!Sym(")")) {
+                    do args.Add(Or()); while (Sym(","));
+                    if (!Sym(")")) throw new FormatException("нет закрывающей скобки у " + name);
+                }
+                e.Args = args.ToArray();
+                return e;
+            }
+            int f = t.FieldIndex(name);
+            if (f < 0) throw new FormatException("нет такого поля: " + name);
+            FoxExpr fe = new FoxExpr();
+            fe.Op = 'f';
+            fe.Field = f;
+            fe.Name = t.Fields[f].Name;
+            return fe;
+        }
+
+        string Ident() {
+            int start = pos;
+            while (pos < s.Length && (char.IsLetterOrDigit(s[pos]) || s[pos] == '_')) pos++;
+            if (pos == start) throw new FormatException("ожидалось имя");
+            return s.Substring(start, pos - start).ToUpperInvariant();
+        }
+
+        // FoxPro понимает имена функций, сокращённые до 4 букв: SUBS, ALLT, UPPE
+        static string FunctionName(string name) {
+            foreach (string f in Functions) {
+                if (f == name) return f;
+                if (name.Length >= 4 && f.StartsWith(name)) return f;
+            }
+            throw new NotSupportedException("функция " + name);
+        }
+    }
+}
+
+// ---- индексы FoxPro: .CDX (несколько тегов в файле) и .IDX (один индекс в файле) ----
+
+public class IndexTag {
+    public string FilePath, FileName, Name;
+    public string Expr = "", ForText;
+    public int KeyLen, Options;
+    public bool Compact, Structural, Descending;
+    public long Root;
+    public FoxExpr Key, ForExpr;
+    public char KeyType = '?';
+    public List<FoxExpr> Terms = new List<FoxExpr>();
+    public List<string> TermFields = new List<string>();   // поле каждого слагаемого ключа (null - не одно поле)
+    public string Problem;          // почему индекс не годится (null - годится)
+    public int State;               // 0 - ещё не проверен, 1 - проверен и годится, -1 - не годится
+    public string Check = "";
+    public bool CyrillicUpper = true;
+    public int MinKeys = -1;        // обычный .IDX: в узлах первые ключи (1) или последние (0); -1 - ещё не смотрели
+    public string Raw = "";         // служебные байты заголовка (порядок сортировки и т.п.) - для отчёта
+    public readonly object Lock = new object();
+
+    public string Label { get { return Name == null ? FileName : FileName + ":" + Name; } }
+    public string FirstField { get { return TermFields.Count > 0 ? TermFields[0] : null; } }
+}
+
+public class IndexNode {
+    public bool Leaf;
+    public long Right = -1;
+    public List<byte[]> Keys = new List<byte[]>();
+    public List<long> Values = new List<long>();   // в листе - номер записи, иначе - где лежит следующий узел
+}
+
+// Чтение индексного файла кусками по 512 байт (узлами), без загрузки целиком
+public class IndexReader : IDisposable {
+    readonly FileStream fs;
+    readonly Dictionary<long, byte[]> pages = new Dictionary<long, byte[]>();
+    public int Reads;
+
+    public IndexReader(string path) {
+        fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 4096, FileOptions.RandomAccess);
+    }
+
+    public long Length { get { return fs.Length; } }
+
+    public byte[] Read(long offset, int size) {
+        if (offset < 0 || offset + size > fs.Length) throw new InvalidDataException("ссылка за концом файла индекса");
+        byte[] b = new byte[size];
+        fs.Seek(offset, SeekOrigin.Begin);
+        if (DbfTable.ReadUpTo(fs, b, size) < size) throw new InvalidDataException("файл индекса обрезан");
+        Reads++;
+        return b;
+    }
+
+    // узел индекса (512 байт); прочитанные узлы запоминаются до конца поиска
+    byte[] Page(long offset) {
+        byte[] b;
+        if (pages.TryGetValue(offset, out b)) return b;
+        if (offset <= 0) throw new InvalidDataException("неверная ссылка в индексе");
+        b = Read(offset, 512);
+        pages[offset] = b;
+        return b;
+    }
+
+    public void Dispose() { fs.Close(); }
+
+    static int LE16(byte[] b, int at) { return b[at] | (b[at + 1] << 8); }
+    static long LE32(byte[] b, int at) { return (uint)(b[at] | (b[at + 1] << 8) | (b[at + 2] << 16) | (b[at + 3] << 24)); }
+    static long BE32(byte[] b, int at) { return (uint)((b[at] << 24) | (b[at + 1] << 16) | (b[at + 2] << 8) | b[at + 3]); }
+
+    static string CString(byte[] b, int at, int max, Encoding enc) {
+        int end = at;
+        while (end < b.Length && end < at + max && b[end] != 0) end++;
+        return enc.GetString(b, at, end - at).Trim();
+    }
+
+    public IndexNode Node(IndexTag tag, long offset) {
+        byte[] p = Page(offset);
+        IndexNode node = new IndexNode();
+        int attr = LE16(p, 0), n = LE16(p, 2);
+        node.Leaf = (attr & 2) != 0;
+        long right = LE32(p, 8);
+        node.Right = right == 0xFFFFFFFFL || right == 0 ? -1 : right;
+        int keyLen = tag.KeyLen;
+        if (tag.Compact && node.Leaf) {
+            DecodeLeaf(p, n, keyLen, tag.KeyType == 'C' ? (byte)' ' : (byte)0, node);
+            return node;
+        }
+        int size = keyLen + (tag.Compact ? 8 : 4);
+        if (12 + n * size > 512) throw new InvalidDataException("узел индекса повреждён");
+        for (int i = 0; i < n; i++) {
+            int at = 12 + i * size;
+            byte[] k = new byte[keyLen];
+            Buffer.BlockCopy(p, at, k, 0, keyLen);
+            node.Keys.Add(k);
+            // компактный: номер записи и ссылка на узел; обычный .IDX: одно число (в листе - запись, иначе - узел)
+            node.Values.Add(tag.Compact ? BE32(p, at + keyLen + 4) : BE32(p, at + keyLen));
+        }
+        return node;
+    }
+
+    // Лист компактного индекса: в начале - номера записей и счётчики сжатия, сами ключи - с конца узла.
+    // Ключ = первые dup байт предыдущего ключа + свои байты + trail байт-заполнителей.
+    static void DecodeLeaf(byte[] p, int n, int keyLen, byte trail, IndexNode node) {
+        long recMask = LE32(p, 14);
+        int dupMask = p[18], trlMask = p[19], recBits = p[20], dupBits = p[21], req = p[23];
+        if (req < 1 || req > 8 || 24 + n * req > 512) throw new InvalidDataException("лист индекса повреждён");
+        int pos = 512;
+        byte[] prev = new byte[keyLen];
+        for (int i = 0; i < n; i++) {
+            ulong v = 0;
+            for (int b = 0; b < req; b++) v |= (ulong)p[24 + i * req + b] << (8 * b);
+            long rec = (long)(v & (ulong)recMask);
+            int dup = (int)((v >> recBits) & (ulong)dupMask);
+            int trl = (int)((v >> (recBits + dupBits)) & (ulong)trlMask);
+            if (i == 0) dup = 0;
+            int len = keyLen - dup - trl;
+            if (len < 0 || dup > keyLen || pos - len < 24 + n * req) throw new InvalidDataException("лист индекса повреждён");
+            byte[] k = new byte[keyLen];
+            Buffer.BlockCopy(prev, 0, k, 0, dup);
+            pos -= len;
+            Buffer.BlockCopy(p, pos, k, dup, len);
+            for (int j = keyLen - trl; j < keyLen; j++) k[j] = trail;
+            node.Keys.Add(k);
+            node.Values.Add(rec);
+            prev = k;
+        }
+    }
+
+    // ключ из индекса сравнивается с искомым только по длине искомого (так ищется и начало)
+    public static int Compare(byte[] entry, byte[] key) {
+        int n = Math.Min(entry.Length, key.Length);
+        for (int i = 0; i < n; i++) if (entry[i] != key[i]) return entry[i] < key[i] ? -1 : 1;
+        return key.Length > entry.Length ? -1 : 0;
+    }
+
+    // Все записи, у которых ключ начинается с key (или равен ему, если key полной длины)
+    public List<int> Seek(IndexTag tag, byte[] key, int limit, out bool more) {
+        more = false;
+        List<int> found = new List<int>();
+        if (!tag.Compact && tag.MinKeys < 0) DetectMinKeys(tag);
+        IndexNode node = Node(tag, tag.Root);
+        for (int depth = 0; !node.Leaf; depth++) {
+            if (depth > 40 || node.Keys.Count == 0) return found;
+            int pick;
+            if (tag.MinKeys == 1) {
+                // в узле первые ключи потомков: берём последнего потомка, чей первый ключ меньше искомого
+                pick = 0;
+                for (int i = 1; i < node.Keys.Count; i++) if (Compare(node.Keys[i], key) < 0) pick = i; else break;
+            } else {
+                // в узле последние ключи потомков: первый потомок, чей последний ключ не меньше искомого
+                pick = node.Keys.Count - 1;
+                for (int i = 0; i < node.Keys.Count; i++) if (Compare(node.Keys[i], key) >= 0) { pick = i; break; }
+            }
+            node = Node(tag, node.Values[pick]);
+        }
+        for (int guard = 0; guard < 1000000; guard++) {
+            for (int i = 0; i < node.Keys.Count; i++) {
+                int c = Compare(node.Keys[i], key);
+                if (c < 0) continue;
+                if (c > 0) return found;
+                if (found.Count >= limit) { more = true; return found; }
+                found.Add((int)node.Values[i]);
+            }
+            if (node.Right < 0) return found;
+            node = Node(tag, node.Right);
+        }
+        return found;
+    }
+
+    // Самый левый лист - для обхода индекса по порядку
+    public IndexNode First(IndexTag tag) {
+        if (!tag.Compact && tag.MinKeys < 0) DetectMinKeys(tag);
+        IndexNode node = Node(tag, tag.Root);
+        for (int depth = 0; !node.Leaf && node.Values.Count > 0 && depth < 40; depth++) node = Node(tag, node.Values[0]);
+        return node;
+    }
+
+    void DetectMinKeys(IndexTag tag) {
+        tag.MinKeys = 0;
+        IndexNode root = Node(tag, tag.Root);
+        if (root.Leaf || root.Keys.Count == 0) return;
+        IndexNode child = Node(tag, root.Values[0]);
+        if (child.Keys.Count == 0) return;
+        if (Compare(root.Keys[0], child.Keys[child.Keys.Count - 1]) == 0) return;
+        if (Compare(root.Keys[0], child.Keys[0]) == 0) tag.MinKeys = 1;
+    }
+
+    // ---- заголовки: список тегов файла ----
+
+    public static List<IndexTag> ReadTags(string path, Encoding enc) {
+        List<IndexTag> tags = new List<IndexTag>();
+        using (IndexReader r = new IndexReader(path)) {
+            bool cdx = string.Compare(Path.GetExtension(path), ".cdx", StringComparison.OrdinalIgnoreCase) == 0;
+            if (r.Length < 1024) throw new InvalidDataException("файл слишком короткий для индекса");
+            byte[] h = r.Read(0, 1024);
+            if (cdx) {
+                // в начале .CDX - список тегов: такой же индекс, где ключ - имя тега, а "номер записи" - где лежит его заголовок
+                IndexTag dir = new IndexTag();
+                dir.Compact = true;
+                dir.KeyType = 'C';
+                dir.KeyLen = LE16(h, 12);
+                dir.Root = LE32(h, 0);
+                if (dir.KeyLen < 1 || dir.KeyLen > 64) throw new InvalidDataException("не похоже на индекс FoxPro");
+                IndexNode node = r.First(dir);
+                for (int guard = 0; guard < 1000; guard++) {
+                    for (int i = 0; i < node.Keys.Count; i++) {
+                        IndexTag t = ReadCompactHeader(r, node.Values[i], enc);
+                        t.Name = enc.GetString(node.Keys[i]).Trim(' ', '\0');
+                        t.FilePath = path;
+                        t.FileName = Path.GetFileName(path);
+                        tags.Add(t);
+                    }
+                    if (node.Right < 0) break;
+                    node = r.Node(dir, node.Right);
+                }
+            } else if ((h[14] & 0x20) != 0) {
+                IndexTag t = ReadCompactHeader(r, 0, enc);
+                t.FilePath = path;
+                t.FileName = Path.GetFileName(path);
+                tags.Add(t);
+            } else {
+                // обычный (некомпактный) .IDX: заголовок 512 байт, выражение - с 16-го байта
+                IndexTag t = new IndexTag();
+                t.FilePath = path;
+                t.FileName = Path.GetFileName(path);
+                t.Root = LE32(h, 0);
+                t.KeyLen = LE16(h, 12);
+                t.Options = h[14];
+                t.Expr = CString(h, 16, 220, enc);
+                if ((t.Options & 8) != 0) t.ForText = CString(h, 236, 220, enc);
+                tags.Add(t);
+            }
+        }
+        return tags;
+    }
+
+    static IndexTag ReadCompactHeader(IndexReader r, long at, Encoding enc) {
+        byte[] h = r.Read(at, 1024);
+        IndexTag t = new IndexTag();
+        t.Compact = true;
+        StringBuilder raw = new StringBuilder("сигн. " + h[15].ToString("X2") + ", байты 480-511:");
+        for (int i = 480; i < 512; i++) raw.Append(" " + h[i].ToString("X2"));
+        t.Raw = raw.ToString();
+        t.Root = LE32(h, 0);
+        t.KeyLen = LE16(h, 12);
+        t.Options = h[14];
+        t.Descending = LE16(h, 502) != 0;
+        int forPos = LE16(h, 504), forLen = LE16(h, 506), keyPos = LE16(h, 508), keyLen = LE16(h, 510);
+        if (keyPos == 0 && keyLen != 0 && forPos == 0 && forLen != 0) forPos = keyLen;
+        if (keyPos < 512) t.Expr = CString(h, 512 + keyPos, keyLen == 0 ? 512 - keyPos : keyLen, enc);
+        if ((t.Options & 8) != 0 && forPos < 512 && h[512 + forPos] != 0)
+            t.ForText = CString(h, 512 + forPos, forLen == 0 ? 512 - forPos : forLen, enc);
+        return t;
+    }
+}
+
+// Итог одного поиска
+public class SearchResult {
+    public string Text;
+    public SearchMode Mode;
+    public DbfTable Table;
+    public AbonentQuery Query;
+    public List<int> Rows = new List<int>();
+    public int Hidden;          // нашлись, но в невыбранных сельсоветах
+    public bool NoIndex;        // нет подходящего индекса - можно только перебором
+    public bool TooMany;        // нашлось слишком много - показана часть
+    public bool Scanned;        // искали перебором всей базы
+    public string Error;
+    public string Note = "";    // пояснение для строки состояния
+    public string How = "";     // как искали - для отчёта
+    public double Seconds;
+}
+
+public delegate bool CancelCheck();
+
+// База абонентов "вживую": при запуске читаются только заголовок, начало таблицы и список индексов.
+// Каждый поиск идёт по индексу FoxPro прямо в файлах базы - данные всегда свежие.
+public class LiveBase {
+    public string FilePath;
+    public DbfTable Header;      // поля и кодировка
+    public DbfTable Sample;      // первые записи - чтобы понять, как записаны номера и ФИО
+    public StreetDirectory Dir;
+    public List<IndexTag> Tags = new List<IndexTag>();
+    public List<string> IndexFiles = new List<string>();
+    public int RecordCount;
+
+    public const int FetchLimit = 300;    // больше записей за один поиск не показываем (адрес - до 5000: потом отбор по дому)
+    const int SeekLimit = 5000;
+
+    static readonly string[] AccountFields = { "NAB", "LS", "LIC", "LSCH", "LS_ERIP" };
+
+    public static LiveBase Open(string path) {
+        LiveBase b = new LiveBase();
+        b.FilePath = path;
+        b.Header = DbfTable.LoadHeader(path);
+        b.RecordCount = b.Header.Expected;
+        b.Sample = DbfTable.Load(path, null, null, 500);
+        b.FindIndexes();
+        return b;
+    }
+
+    // Индексы рядом с таблицей: свой .CDX (с тем же именем, FoxPro открывает его сам) и прочие .CDX/.IDX,
+    // если их выражения состоят из полей этой таблицы
+    void FindIndexes() {
+        string folder = Path.GetDirectoryName(FilePath);
+        string own = Path.GetFileNameWithoutExtension(FilePath);
+        List<string> files = new List<string>();
+        foreach (string f in Directory.GetFiles(folder)) {
+            string ext = Path.GetExtension(f).ToLowerInvariant();
+            if (ext == ".cdx" || ext == ".idx") files.Add(f);
+        }
+        files.Sort(delegate(string a, string b) {
+            bool oa = string.Compare(Path.GetFileNameWithoutExtension(a), own, StringComparison.OrdinalIgnoreCase) == 0;
+            bool ob = string.Compare(Path.GetFileNameWithoutExtension(b), own, StringComparison.OrdinalIgnoreCase) == 0;
+            if (oa != ob) return oa ? -1 : 1;
+            return string.Compare(a, b, StringComparison.OrdinalIgnoreCase);
+        });
+        foreach (string f in files) {
+            IndexFiles.Add(Path.GetFileName(f));
+            bool structural = string.Compare(Path.GetFileNameWithoutExtension(f), own, StringComparison.OrdinalIgnoreCase) == 0
+                && string.Compare(Path.GetExtension(f), ".cdx", StringComparison.OrdinalIgnoreCase) == 0;
+            List<IndexTag> tags;
+            try {
+                tags = IndexReader.ReadTags(f, Header.Enc);
+            } catch (Exception ex) {
+                if (structural) Report.Line("    " + Path.GetFileName(f) + ": не прочитался - " + ex.Message);
+                continue;
+            }
+            foreach (IndexTag t in tags) {
+                t.Structural = structural;
+                Prepare(t);
+                // чужой индекс (другой таблицы) - выражение не из наших полей; такие не показываем
+                if (!structural && t.Key == null) continue;
+                Tags.Add(t);
+            }
+        }
+    }
+
+    void Prepare(IndexTag t) {
+        try {
+            t.Key = FoxExpr.Parse(t.Expr, Header);
+        } catch (Exception ex) {
+            t.Problem = "выражение не разобрать (" + ex.Message + ")";
+            return;
+        }
+        if (t.ForText != null && t.ForText.Length > 0) {
+            try { t.ForExpr = FoxExpr.Parse(t.ForText, Header); }
+            catch (Exception ex) { t.Problem = "условие FOR не разобрать (" + ex.Message + ")"; return; }
+        }
+        if ((t.Options & 1) != 0) { t.Problem = "UNIQUE - в индексе только первая запись с каждым ключом"; return; }
+        try {
+            byte[] blank = BlankRecord();
+            FoxContext c = Context(blank, t);
+            t.KeyType = t.Key.Eval(c).Type;
+            if (t.ForExpr != null && t.ForExpr.Eval(c).Type != 'L') { t.Problem = "условие FOR - не да/нет"; return; }
+        } catch (Exception ex) {
+            t.Problem = "выражение не посчитать (" + ex.Message + ")";
+            return;
+        }
+        if ((t.KeyType == 'N' || t.KeyType == 'D') && t.KeyLen != 8 && t.KeyLen != 4) { t.Problem = "непонятная длина числового ключа " + t.KeyLen; return; }
+        if (t.KeyLen < 1 || t.KeyLen > 240) { t.Problem = "непонятная длина ключа " + t.KeyLen; return; }
+        t.Terms = t.KeyType == 'C' ? t.Key.Terms() : new List<FoxExpr>(new FoxExpr[] { t.Key });
+        foreach (FoxExpr term in t.Terms) {
+            List<int> fields = new List<int>();
+            term.CollectFields(fields);
+            t.TermFields.Add(fields.Count == 1 ? Header.Fields[fields[0]].Name.ToUpperInvariant() : null);
+        }
+    }
+
+    public byte[] BlankRecord() {
+        byte[] r = new byte[Header.RecordLength];
+        for (int i = 0; i < r.Length; i++) r[i] = (byte)' ';
+        return r;
+    }
+
+    FoxContext Context(byte[] rec, IndexTag t) {
+        FoxContext c = new FoxContext();
+        c.Table = Header;
+        c.Rec = rec;
+        c.CyrillicUpper = t == null || t.CyrillicUpper;
+        return c;
+    }
+
+    // ---- чтение записей по номерам ----
+
+    public FileStream OpenTable() {
+        return new FileStream(FilePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 4096, FileOptions.RandomAccess);
+    }
+
+    public int CurrentCount(FileStream fs) {
+        byte[] h = new byte[8];
+        fs.Seek(0, SeekOrigin.Begin);
+        if (DbfTable.ReadUpTo(fs, h, 8) == 8) RecordCount = BitConverter.ToInt32(h, 4);
+        return RecordCount;
+    }
+
+    public byte[] ReadRecord(FileStream fs, int recNo) {
+        long at = Header.HeaderLength + (long)(recNo - 1) * Header.RecordLength;
+        if (recNo < 1 || at + Header.RecordLength > fs.Length) return null;
+        byte[] r = new byte[Header.RecordLength];
+        fs.Seek(at, SeekOrigin.Begin);
+        return DbfTable.ReadUpTo(fs, r, r.Length) == r.Length ? r : null;
+    }
+
+    // Записи по номерам; соседние читаются одним куском. Удалённые пропускаются.
+    public DbfTable Fetch(FileStream fs, List<int> recNos, int limit, out int deleted) {
+        deleted = 0;
+        DbfTable part = DbfTable.CreateLike(Header);
+        part.FilePath = FilePath;
+        List<int> list = new List<int>(recNos);
+        list.Sort();
+        int len = Header.RecordLength;
+        byte[] buf = new byte[65536 + len];
+        int i = 0;
+        while (i < list.Count && part.Count < limit) {
+            int first = list[i], j = i;
+            while (j + 1 < list.Count && (long)(list[j + 1] - first + 1) * len <= 65536 && list[j + 1] - list[j] <= 16) j++;
+            int last = list[j];
+            fs.Seek(Header.HeaderLength + (long)(first - 1) * len, SeekOrigin.Begin);
+            int got = DbfTable.ReadUpTo(fs, buf, (last - first + 1) * len);
+            for (int k = i; k <= j && part.Count < limit; k++) {
+                if (k > i && list[k] == list[k - 1]) continue;
+                int pos = (list[k] - first) * len;
+                if (pos + len > got) continue;
+                if (buf[pos] == (byte)'*') { deleted++; continue; }
+                part.AddRecord(buf, pos, list[k]);
+            }
+            i = j + 1;
+        }
+        return part;
+    }
+
+    // ---- проверка индекса: ключи в нём такие же, как считает программа? ----
+
+    // Берём записи из разных мест таблицы, считаем их ключ и ищем его в индексе - запись должна найтись.
+    // Так заодно видно, что индекс от этой таблицы и что он не устарел.
+    public bool Verify(IndexTag t) {
+        lock (t.Lock) {
+            if (t.State != 0) return t.State > 0;
+            if (t.Problem != null) { t.State = -1; t.Check = t.Problem; return false; }
+            bool[] variants = t.Key.UsesCase() ? new bool[] { true, false } : new bool[] { true };
+            string last = "";
+            foreach (bool cyr in variants) {
+                t.CyrillicUpper = cyr;
+                string note;
+                int result = TryVerify(t, out note);
+                last = note;
+                if (result > 0) {
+                    t.State = 1;
+                    t.Check = "годится: " + note + (t.Key.UsesCase() ? (cyr ? " (UPPER - и русские буквы)" : " (UPPER - только латиница)") : "");
+                    return true;
+                }
+                if (result == 0) { t.State = 0; t.Check = "не проверен: " + note; t.CyrillicUpper = true; return false; }
+            }
+            t.CyrillicUpper = true;
+            t.State = -1;
+            t.Check = "не годится: " + last;
+            return false;
+        }
+    }
+
+    // 1 - годится, -1 - нет, 0 - не удалось проверить (ошибка чтения)
+    int TryVerify(IndexTag t, out string note) {
+        int tried = 0, ok = 0;
+        string sample = "";
+        try {
+            using (FileStream fs = OpenTable())
+            using (IndexReader r = new IndexReader(t.FilePath)) {
+                int count = CurrentCount(fs);
+                if (count == 0) { note = "таблица пуста"; return 0; }
+                for (int step = 1; step <= 40 && tried < 8; step++) {
+                    int recNo = (int)Math.Max(1, Math.Min(count, (long)count * step / 41));
+                    byte[] rec = ReadRecord(fs, recNo);
+                    if (rec == null || rec[0] == (byte)'*') continue;
+                    FoxContext c = Context(rec, t);
+                    if (t.ForExpr != null && !t.ForExpr.Eval(c).Log) continue;
+                    byte[] key = FoxExpr.KeyBytes(t.Key.Eval(c), t.KeyLen);
+                    if (t.KeyType == 'C' && IsBlank(key)) continue;   // пустой ключ есть у многих - не показательно
+                    bool more;
+                    List<int> found = r.Seek(t, key, SeekLimit, out more);
+                    if (more && !found.Contains(recNo)) continue;      // слишком много одинаковых - не показательно
+                    tried++;
+                    if (found.Contains(recNo)) ok++;
+                    else if (sample.Length == 0) sample = "; ключ записи: " + Report.Shape(Header.Enc.GetString(key), false)
+                        + ", нашлось по нему записей: " + found.Count;
+                }
+                note = "нашлись " + ok + " из " + tried + " проверочных записей (чтений индекса " + r.Reads + ")" + sample;
+            }
+        } catch (Exception ex) {
+            note = "ошибка при проверке: " + ex.Message;
+            return 0;
+        }
+        if (tried < 2) { note = "мало записей для проверки (" + tried + ")"; return ok == tried && tried > 0 ? 1 : 0; }
+        return ok >= tried * 0.75 ? 1 : -1;
+    }
+
+    static bool IsBlank(byte[] k) {
+        foreach (byte b in k) if (b != ' ' && b != 0) return false;
+        return true;
+    }
+
+    // Подходящий проверенный индекс, ключ которого начинается с поля field
+    public IndexTag TagFor(string field) {
+        return TagFor(field, false);
+    }
+
+    // preferLong - лучше индекс из нескольких полей (улица + дом: сразу находится нужный дом)
+    public IndexTag TagFor(string field, bool preferLong) {
+        List<IndexTag> list = new List<IndexTag>();
+        foreach (IndexTag t in Tags) if (t.Problem == null && string.Compare(t.FirstField, field, StringComparison.OrdinalIgnoreCase) == 0) list.Add(t);
+        list.Sort(delegate(IndexTag a, IndexTag b) {
+            if (a.Structural != b.Structural) return a.Structural ? -1 : 1;
+            if ((a.ForExpr == null) != (b.ForExpr == null)) return a.ForExpr == null ? -1 : 1;
+            if (preferLong && a.Terms.Count != b.Terms.Count) return b.Terms.Count.CompareTo(a.Terms.Count);
+            return a.Expr.Length.CompareTo(b.Expr.Length);
+        });
+        foreach (IndexTag t in list) if (Verify(t)) return t;
+        return null;
+    }
+
+    // проверить все индексы по нужным полям сразу после запуска (итог - в отчёт)
+    public void VerifyMain() {
+        foreach (string f in new string[] { "NAB", "LS_ERIP", "NCH", "NSC", "FIO" }) TagFor(f);
+        TagFor("UL", true);
+    }
+
+    // ---- ключи для поиска ----
+
+    void Put(byte[] rec, string fieldName, string value) {
+        int i = Header.FieldIndex(fieldName);
+        if (i < 0) throw new ArgumentException(fieldName);
+        DbfField f = Header.Fields[i];
+        byte[] b;
+        switch (f.Type) {
+            case 'N':
+            case 'F': {
+                double d;
+                if (!double.TryParse(value.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out d)) throw new FormatException("не число");
+                string s = d.ToString("F" + f.Decimals, CultureInfo.InvariantCulture);
+                if (s.Length > f.Length) throw new FormatException("не помещается");
+                b = Encoding.ASCII.GetBytes(s.PadLeft(f.Length));
+                break;
+            }
+            default:
+                b = Header.Enc.GetBytes(value);
+                break;
+        }
+        for (int k = 0; k < f.Length; k++) rec[f.Offset + k] = k < b.Length ? b[k] : (byte)' ';
+    }
+
+    // Ключ (или его начало) по значениям первых полей ключа. prefixLast - последнее значение может быть началом поля.
+    public byte[] KeyFor(IndexTag t, string[] values, bool prefixLast) {
+        if (values.Length == 0 || values.Length > t.Terms.Count) return null;
+        byte[] rec = BlankRecord();
+        try {
+            for (int i = 0; i < values.Length; i++) {
+                if (t.TermFields[i] == null) return null;
+                Put(rec, t.TermFields[i], values[i]);
+            }
+            FoxContext c = Context(rec, t);
+            if (t.KeyType != 'C') {
+                if (prefixLast || values.Length != 1) return null;
+                return FoxExpr.KeyBytes(t.Key.Eval(c), t.KeyLen);
+            }
+            List<byte> key = new List<byte>();
+            for (int i = 0; i < values.Length; i++) {
+                FoxValue v = t.Terms[i].Eval(c);
+                if (v.Type != 'C') return null;
+                int len = v.Text.Length;
+                if (i == values.Length - 1 && prefixLast) {
+                    if (!t.Terms[i].PrefixSafe()) return null;
+                    while (len > 0 && v.Text[len - 1] == ' ') len--;
+                }
+                for (int k = 0; k < len; k++) key.Add(v.Text[k]);
+            }
+            if (key.Count == 0) return null;
+            if (key.Count > t.KeyLen) key.RemoveRange(t.KeyLen, key.Count - t.KeyLen);
+            return key.ToArray();
+        } catch (FormatException) {
+            return null;
+        }
+    }
+
+    // ---- поиск ----
+
+    class Seeker {
+        public readonly Dictionary<int, bool> Found = new Dictionary<int, bool>();
+        public bool More;
+        public int Seeks, Reads;
+        public readonly List<string> Tags = new List<string>();
+        readonly Dictionary<string, IndexReader> readers = new Dictionary<string, IndexReader>();
+
+        public int Seek(IndexTag t, byte[] key) {
+            if (key == null) return 0;
+            IndexReader r;
+            if (!readers.TryGetValue(t.FilePath, out r)) { r = new IndexReader(t.FilePath); readers[t.FilePath] = r; }
+            if (!Tags.Contains(t.Label)) Tags.Add(t.Label);
+            Seeks++;
+            int before = r.Reads;
+            bool more;
+            List<int> list = r.Seek(t, key, SeekLimit, out more);
+            Reads += r.Reads - before;
+            if (more) More = true;
+            int added = 0;
+            foreach (int n in list) if (!Found.ContainsKey(n)) { Found[n] = true; added++; }
+            return list.Count;
+        }
+
+        public void Close() { foreach (IndexReader r in readers.Values) r.Dispose(); }
+    }
+
+    public SearchResult Search(string text, SearchMode mode, Dictionary<string, bool> selsovety) {
+        return Search(text, mode, selsovety, FetchLimit);
+    }
+
+    // Ошибка чтения бывает, если программа базы как раз дописывает индекс - тогда пробуем ещё раз
+    public SearchResult Search(string text, SearchMode mode, Dictionary<string, bool> selsovety, int limit) {
+        SearchResult r = SearchOnce(text, mode, selsovety, limit);
+        if (r.Error != null) {
+            System.Threading.Thread.Sleep(300);
+            SearchResult again = SearchOnce(text, mode, selsovety, limit);
+            again.How += "; (со второй попытки, первая: " + r.Error + ")";
+            return again;
+        }
+        return r;
+    }
+
+    SearchResult SearchOnce(string text, SearchMode mode, Dictionary<string, bool> selsovety, int limit) {
+        DateTime started = DateTime.Now;
+        SearchResult res = new SearchResult();
+        res.Text = text;
+        res.Mode = mode;
+        Seeker s = new Seeker();
+        try {
+            bool ok;
+            switch (mode) {
+                case SearchMode.Account: ok = SeekAccount(text, s, res); break;
+                case SearchMode.Meter: ok = SeekMeter(text, s, res); break;
+                case SearchMode.Name: ok = SeekName(text, s, res); break;
+                default: ok = SeekAddress(text, s, res, selsovety); break;
+            }
+            if (!ok) { res.NoIndex = res.Error == null && res.Note.Length == 0; return Finish(res, null, selsovety, started); }
+            List<int> recNos = new List<int>(s.Found.Keys);
+            if (mode == SearchMode.Address) limit = Math.Max(limit, SeekLimit);
+            if (recNos.Count > limit || s.More) res.TooMany = true;
+            int deleted;
+            DbfTable part;
+            using (FileStream fs = OpenTable()) part = Fetch(fs, recNos, limit, out deleted);
+            res.How = "индекс " + string.Join(", ", s.Tags.ToArray()) + ": поисков " + s.Seeks + ", чтений индекса " + s.Reads
+                + ", ключей нашлось " + recNos.Count + (s.More ? "+" : "") + ", прочитано записей " + part.Count
+                + (deleted > 0 ? ", удалённых пропущено " + deleted : "") + (res.How.Length > 0 ? "; " + res.How : "");
+            return Finish(res, part, selsovety, started);
+        } catch (Exception ex) {
+            res.Error = ex.Message;
+            res.How += " ОШИБКА: " + ex.GetType().Name + ": " + ex.Message;
+            return Finish(res, null, selsovety, started);
+        } finally {
+            s.Close();
+        }
+    }
+
+    // Перебор всей таблицы - если нужного индекса нет (долго, но находит всё)
+    public SearchResult Scan(string text, SearchMode mode, Dictionary<string, bool> selsovety, LoadProgress progress) {
+        DateTime started = DateTime.Now;
+        SearchResult res = new SearchResult();
+        res.Text = text;
+        res.Mode = mode;
+        res.Scanned = true;
+        DbfTable part;
+        if (mode == SearchMode.Address && Dir != null && Header.FieldIndex("UL") >= 0) {
+            AddressParts a = AddressParts.Parse(text);
+            Dictionary<string, bool> codes = new Dictionary<string, bool>();
+            int best;
+            foreach (string c in Dir.BestStreets(a.Words, null, out best)) codes[c] = true;
+            DbfField ul = Header.Fields[Header.FieldIndex("UL")];
+            part = DbfTable.Load(FilePath, null, delegate(byte[] rec, int start) {
+                return codes.ContainsKey(StreetDirectory.NormalizeCode(Encoding.ASCII.GetString(rec, start + ul.Offset, ul.Length)));
+            }, progress, 20000);
+        } else {
+            string words = mode == SearchMode.Account ? Digits(text) : text;
+            part = DbfTable.Load(FilePath, words, null, progress, 20000);
+        }
+        res.TooMany = part.Truncated;
+        double mb = part.BytesRead / 1048576.0;
+        res.How = "перебор всей таблицы: " + mb.ToString("0") + " МБ за " + part.Seconds.ToString("0") + " с, записей " + part.Total + ", подошло " + part.Count;
+        return Finish(res, part, selsovety, started);
+    }
+
+    SearchResult Finish(SearchResult res, DbfTable part, Dictionary<string, bool> selsovety, DateTime started) {
+        if (part == null) part = DbfTable.CreateLike(Header);
+        part.FilePath = FilePath;
+        res.Table = part;
+        res.Query = new AbonentQuery(part, Dir);
+        if (part.Count > 0) {
+            List<int> rows = res.Query.Find(res.Text, res.Mode);
+            int ul = part.FieldIndex("UL");
+            foreach (int row in rows) {
+                if (Dir != null && ul >= 0 && selsovety != null
+                    && !Dir.InSelsovety(DbfTable.Format(part.GetValue(row, ul, null), true), selsovety)) { res.Hidden++; continue; }
+                res.Rows.Add(row);
+            }
+        }
+        res.Seconds = (DateTime.Now - started).TotalSeconds;
+        return res;
+    }
+
+    static string Digits(string s) {
+        StringBuilder sb = new StringBuilder();
+        foreach (char c in s) if (c >= '0' && c <= '9') sb.Append(c);
+        return sb.ToString();
+    }
+
+    // Как в этой таблице обычно записано поле: длина числа, нули впереди, прижато вправо, заглавные буквы
+    class Style {
+        public int Digits;
+        public bool Zeros, Right, Upper;
+    }
+
+    Style StyleOf(string field) {
+        Style st = new Style();
+        int f = Sample.FieldIndex(field);
+        if (f < 0 || Sample.Count == 0) return st;
+        Dictionary<int, int> lengths = new Dictionary<int, int>();
+        int filled = 0, zeros = 0, right = 0, upper = 0, letters = 0;
+        for (int r = 0; r < Sample.Count; r++) {
+            int start;
+            byte[] buf = Sample.RecordBuffer(r, out start);
+            string raw = Sample.Enc.GetString(buf, start + Sample.Fields[f].Offset, Sample.Fields[f].Length);
+            string v = raw.Trim();
+            if (v.Length == 0) continue;
+            filled++;
+            if (raw.StartsWith(" ")) right++;
+            if (v.StartsWith("0")) zeros++;
+            int n;
+            lengths.TryGetValue(v.Length, out n);
+            lengths[v.Length] = n + 1;
+            foreach (char c in v) if (char.IsLetter(c)) { letters++; if (char.IsUpper(c)) upper++; }
+        }
+        int best = 0;
+        foreach (KeyValuePair<int, int> kv in lengths) if (kv.Value > best) { best = kv.Value; st.Digits = kv.Key; }
+        st.Zeros = filled > 0 && zeros * 2 > filled;
+        st.Right = filled > 0 && right * 2 > filled;
+        st.Upper = letters > 0 && upper * 10 > letters * 7;
+        return st;
+    }
+
+    static void AddVariant(List<string> list, string v) {
+        if (v != null && v.Length > 0 && !list.Contains(v)) list.Add(v);
+    }
+
+    // текст как записан в поле: прижат вправо, если так принято в таблице
+    string Aligned(string field, string v, Style st) {
+        int f = Header.FieldIndex(field);
+        if (f < 0 || !st.Right || Header.Fields[f].Type != 'C') return v;
+        return v.PadLeft(Header.Fields[f].Length);
+    }
+
+    // Лицевой: точный номер в нескольких видах (с нулями впереди и без), потом - номера, начинающиеся так
+    bool SeekAccount(string text, Seeker s, SearchResult res) {
+        string digits = Digits(text);
+        if (digits.Length == 0) { res.Note = "Впишите номер."; return false; }
+        string core = digits.TrimStart('0');
+        if (core.Length == 0) core = "0";
+        bool any = false;
+        foreach (string field in AccountFields) {
+            IndexTag t = TagFor(field);
+            if (t == null) continue;
+            any = true;
+            Style st = StyleOf(field);
+            int f = Header.FieldIndex(field);
+            int width = Header.Fields[f].Length;
+            List<string> exact = new List<string>();
+            AddVariant(exact, digits);
+            AddVariant(exact, core);
+            if (st.Digits > core.Length) AddVariant(exact, core.PadLeft(st.Digits, '0'));
+            if (Header.Fields[f].Type == 'C' && width > core.Length) AddVariant(exact, core.PadLeft(width, '0'));
+            foreach (string v in exact) {
+                s.Seek(t, KeyFor(t, new string[] { v }, false));
+                if (Header.Fields[f].Type == 'C') s.Seek(t, KeyFor(t, new string[] { v.PadLeft(width) }, false));
+            }
+            if (s.Found.Count > 0) { res.How = "точный номер (поле " + field + ")"; return true; }
+        }
+        if (!any) return false;
+        // начало номера (только если номер не короче 4 цифр - иначе слишком много)
+        if (digits.Length >= 4) {
+            foreach (string field in AccountFields) {
+                IndexTag t = TagFor(field);
+                if (t == null || Header.Fields[Header.FieldIndex(field)].Type != 'C') continue;
+                s.Seek(t, KeyFor(t, new string[] { digits }, true));
+                if (core != digits) s.Seek(t, KeyFor(t, new string[] { core }, true));
+                // в таблице номера с нулями впереди (044060216) - "4406021" ищем и как "04406021"
+                Style st = StyleOf(field);
+                if (st.Zeros) for (string z = "0" + core; z.Length < st.Digits; z = "0" + z) if (z != digits) s.Seek(t, KeyFor(t, new string[] { z }, true));
+                if (s.Found.Count > 0) { res.How = "начало номера (поле " + field + ")"; return true; }
+            }
+        }
+        // длинный Л/С, внутри которого номер абонента
+        IndexTag nab = TagFor("NAB");
+        if (nab != null && core.Length >= 8) {
+            Style st = StyleOf("NAB");
+            int len = st.Digits > 0 ? st.Digits : 9;
+            for (int from = 0; from + len <= digits.Length && from < 12; from++) {
+                string piece = digits.Substring(from, len);
+                if (piece.TrimStart('0').Length < 5) continue;
+                s.Seek(nab, KeyFor(nab, new string[] { piece }, false));
+                s.Seek(nab, KeyFor(nab, new string[] { piece.TrimStart('0') }, false));
+            }
+            if (s.Found.Count > 0) res.How = "номер абонента внутри длинного номера";
+        }
+        return true;
+    }
+
+    // Счётчик: точный номер, потом начало номера; если не нашлось - то же по снятому счётчику (NSC)
+    bool SeekMeter(string text, Seeker s, SearchResult res) {
+        string typed = text.Trim();
+        if (typed.Length == 0) { res.Note = "Впишите номер."; return false; }
+        string digits = Digits(typed);
+        bool any = false;
+        foreach (string field in new string[] { "NCH", "NSC" }) {
+            IndexTag t = TagFor(field);
+            if (t == null) continue;
+            any = true;
+            Style st = StyleOf(field);
+            List<string> variants = new List<string>();
+            AddVariant(variants, typed);
+            AddVariant(variants, typed.ToUpperInvariant());
+            if (digits.Length >= 4) { AddVariant(variants, digits); AddVariant(variants, digits.TrimStart('0')); }
+            foreach (string v in variants) s.Seek(t, KeyFor(t, new string[] { Aligned(field, v, st) }, false));
+            if (s.Found.Count == 0 && !st.Right) foreach (string v in variants) if (v.Length >= 3) s.Seek(t, KeyFor(t, new string[] { v }, true));
+            if (s.Found.Count > 0) { res.How = field == "NSC" ? "по снятому счётчику (NSC)" : "поле " + field; return true; }
+        }
+        return any;
+    }
+
+    static string Title(string s) {
+        StringBuilder sb = new StringBuilder();
+        bool start = true;
+        foreach (char c in s) {
+            sb.Append(start ? char.ToUpperInvariant(c) : char.ToLowerInvariant(c));
+            start = c == ' ' || c == '-' || c == '.';
+        }
+        return sb.ToString();
+    }
+
+    // ФИО: начало ФИО целиком ("иванов иван"), если не нашлось - по фамилии
+    bool SeekName(string text, Seeker s, SearchResult res) {
+        string[] words = DbfTable.SplitWords(text.Replace('.', ' '));
+        if (words.Length == 0) { res.Note = "Впишите фамилию."; return false; }
+        IndexTag t = TagFor("FIO");
+        if (t == null) return false;
+        Style st = StyleOf("FIO");
+        for (int n = words.Length; n >= 1; n = n > 1 ? 1 : 0) {
+            string q = string.Join(" ", words, 0, n);
+            List<string> variants = new List<string>();
+            if (st.Upper) AddVariant(variants, q.ToUpperInvariant());
+            AddVariant(variants, Title(q));
+            AddVariant(variants, q.ToUpperInvariant());
+            AddVariant(variants, q);
+            foreach (string v in variants) s.Seek(t, KeyFor(t, new string[] { v }, true));
+            if (s.Found.Count > 0) { res.How = n == words.Length ? "начало ФИО" : "по фамилии"; return true; }
+        }
+        return true;
+    }
+
+    // Адрес: по справочнику улиц находим улицы, подходящие по словам (населённый пункт, улица),
+    // и по индексу берём абонентов этих улиц (сразу с домом, если индекс по улице и дому)
+    bool SeekAddress(string text, Seeker s, SearchResult res, Dictionary<string, bool> selsovety) {
+        AddressParts a = AddressParts.Parse(text);
+        if (a.Words.Count == 0) { res.Note = a.House != null ? "Впишите улицу или населённый пункт, не только номер дома." : "Впишите адрес."; return false; }
+        IndexTag t = TagFor("UL", true);
+        if (t == null) return false;
+        if (Dir == null) {
+            // в UL названия улиц: ищем по началу названия
+            foreach (string w in a.Words) {
+                if (w.Length < 3) continue;
+                s.Seek(t, KeyFor(t, new string[] { w.ToUpperInvariant() }, true));
+                s.Seek(t, KeyFor(t, new string[] { Title(w) }, true));
+                s.Seek(t, KeyFor(t, new string[] { w }, true));
+            }
+            res.How = "по началу названия улицы";
+            return true;
+        }
+        int best;
+        // улицы ищем во всех сельсоветах: если адрес в невыбранном, покажем, что он там есть (скрытым)
+        List<string> codes = Dir.BestStreets(a.Words, null, out best);
+        res.How = "улиц по справочнику: " + codes.Count + " (совпало слов " + best + " из " + a.Words.Count + ")";
+        if (codes.Count == 0) { res.Note = "Такой улицы или населённого пункта нет в справочнике улиц."; return false; }
+        if (codes.Count > 300) { res.Note = "Подходит слишком много улиц (" + codes.Count + ") - уточните адрес."; return false; }
+        bool withHouse = a.House != null && t.Terms.Count > 1 && t.TermFields[1] == "DOM";
+        foreach (string code in codes) {
+            int got = 0;
+            if (withHouse) {
+                got = s.Seek(t, KeyFor(t, new string[] { code, a.House.ToUpperInvariant() }, false));
+                if (got == 0 && a.House.ToUpperInvariant() != a.House) got = s.Seek(t, KeyFor(t, new string[] { code, a.House }, false));
+            }
+            if (got == 0) s.Seek(t, KeyFor(t, new string[] { code }, false));
+        }
+        return true;
+    }
+}
+
+// Адрес, разобранный на части: слова (населённый пункт, улица), дом, корпус, квартира
+public class AddressParts {
+    public List<string> Words = new List<string>();
+    public string House, Korp, Flat;
+    public int Skipped;
+
+    static readonly string[] Skip = {
+        "ул", "улица", "пер", "переулок", "пр", "пр-т", "просп", "проспект", "пл", "площадь", "б-р", "бульвар",
+        "ш", "шоссе", "туп", "тупик", "проезд", "мкр", "микрорайон", "наб", "набережная", "тракт",
+        "г", "город", "аг", "агрогородок", "п", "пос", "поселок", "посёлок", "гп", "рп", "дер", "деревня",
+        "с", "село", "х", "хутор", "с/с", "сс", "сельсовет", "р-н", "район", "обл", "область" };
+
+    // "Острошицкий Городок Заводская ул. 18", "аг. Острошицкий Городок, ул. Заводская, д. 18, кв. 5", "заводская 18 5"
+    public static AddressParts Parse(string query) {
+        AddressParts a = new AddressParts();
+        List<string> numbers = new List<string>();
+        List<string> early = new List<string>();   // числа до названия: номер строки из списка или сам дом
+        string pending = null;                     // "дом", "корп" или "кв" перед числом
+        foreach (string raw in DbfTable.SplitWords(query.Replace('.', ' '))) {
+            string w = raw;
+            // слитно: "кв5", "д18", "к2"
+            string marker = null;
+            if (w.Length > 2 && w.StartsWith("кв") && IsDigitAt(w, 2)) { marker = "кв"; w = w.Substring(2); }
+            else if (w.Length > 1 && (w[0] == 'д' || w[0] == 'к') && IsDigitAt(w, 1)) { marker = w[0] == 'д' ? "дом" : "корп"; w = w.Substring(1); }
+            if (marker != null) pending = marker;
+
+            if (w == "д" || w == "дом") { pending = "дом"; continue; }
+            if (w == "к" || w == "корп" || w == "корпус") { pending = "корп"; continue; }
+            if (w == "кв" || w == "квартира") { pending = "кв"; continue; }
+            if (Array.IndexOf(Skip, w) >= 0) { pending = null; a.Skipped++; continue; }
+
+            if (IsDigitAt(w, 0)) {
+                if (IsDigits(w) && w.Length >= 5) { pending = null; a.Skipped++; continue; }   // лицевой или код - не адрес
+                if (pending == "корп" && a.Korp == null) a.Korp = w;
+                else if (pending == "кв" && a.Flat == null) a.Flat = w;
+                else if (pending == "дом" && a.House == null) a.House = w;
+                else if (a.Words.Count > 0) numbers.Add(w);
+                else early.Add(w);
+                pending = null;
+                continue;
+            }
+            pending = null;
+            if (HasDigit(w)) { a.Skipped++; continue; }
+            a.Words.Add(w);
+        }
+        // числа до названия улицы - обычно номер строки из списка, их пропускаем;
+        // но если слов нет совсем ("18"), это и есть дом
+        if (a.Words.Count == 0) numbers.InsertRange(0, early);
+        else a.Skipped += early.Count;
+        // числа без пояснений: первое - дом, второе - квартира
+        foreach (string n in numbers) {
+            if (a.House == null) a.House = n;
+            else if (a.Flat == null) a.Flat = n;
+            else if (a.Korp == null) a.Korp = n;
+        }
+        return a;
+    }
+
+    static bool IsDigitAt(string s, int i) {
+        return i < s.Length && s[i] >= '0' && s[i] <= '9';
+    }
+
+    static bool IsDigits(string s) {
+        foreach (char c in s) if (c < '0' || c > '9') return false;
+        return s.Length > 0;
+    }
+
+    static bool HasDigit(string s) {
+        foreach (char c in s) if (c >= '0' && c <= '9') return true;
+        return false;
     }
 }
 
@@ -1321,8 +2841,10 @@ public static class Report {
 public class StreetDirectory {
     public string TableName;
     public string KeyField;
+    public Dictionary<string, string> Links = new Dictionary<string, string>();   // поле-ссылка -> таблица (IDNP -> SPRNP.DBF)
     readonly Dictionary<string, string> names = new Dictionary<string, string>();
     readonly Dictionary<string, string> lowerNames = new Dictionary<string, string>();
+    readonly Dictionary<string, string> ssOf = new Dictionary<string, string>();  // код улицы -> сельсовет
 
     public int Count { get { return names.Count; } }
 
@@ -1341,6 +2863,47 @@ public class StreetDirectory {
         int hit = 0;
         foreach (string c in codes) if (names.ContainsKey(c)) hit++;
         return (double)hit / codes.Count;
+    }
+
+    // сельсоветы, к которым относятся улицы справочника
+    public List<string> Selsovety {
+        get {
+            List<string> list = new List<string>();
+            foreach (string v in ssOf.Values) if (v.Length > 0 && !list.Contains(v)) list.Add(v);
+            list.Sort(StringComparer.CurrentCultureIgnoreCase);
+            return list;
+        }
+    }
+
+    // улица в одном из выбранных сельсоветов (selected = null - выбраны все; сельсовет неизвестен - показываем)
+    public bool InSelsovety(string code, Dictionary<string, bool> selected) {
+        if (selected == null) return true;
+        string ss;
+        if (!ssOf.TryGetValue(NormalizeCode(code), out ss) || ss.Length == 0) return true;
+        return selected.ContainsKey(ss);
+    }
+
+    // Улицы, в названии которых (с населённым пунктом и сельсоветом) больше всего слов адреса
+    public List<string> BestStreets(List<string> words, Dictionary<string, bool> selected, out int best) {
+        best = 0;
+        List<string> codes = new List<string>();
+        List<string> norm = new List<string>();
+        foreach (string w in words) norm.Add(w.ToLowerInvariant().Replace('ё', 'е'));
+        foreach (KeyValuePair<string, string> kv in lowerNames) {
+            int score = 0;
+            foreach (string w in norm) if (kv.Value.IndexOf(w, StringComparison.Ordinal) >= 0) score++;
+            if (score == 0 || score < best || !InSelsovety(kv.Key, selected)) continue;
+            if (score > best) { best = score; codes.Clear(); }
+            codes.Add(kv.Key);
+        }
+        return codes;
+    }
+
+    static string CleanSs(string ss) {
+        string s = ss.Trim();
+        foreach (string tail in new string[] { "с/с", "сельсовет", "с/с.", "сс" })
+            if (s.EndsWith(" " + tail, StringComparison.OrdinalIgnoreCase)) s = s.Substring(0, s.Length - tail.Length - 1).Trim();
+        return s;
     }
 
     public static string NormalizeCode(string s) {
@@ -1389,11 +2952,42 @@ public class StreetDirectory {
         public Dictionary<string, string> Nested = new Dictionary<string, string>();
     }
 
+    // Где искать таблицы-ссылки: сначала запомненная с прошлого раза, потом все таблицы папки
+    class TableSource {
+        readonly string folder;
+        readonly Dictionary<string, string> hints;
+        List<TableInfo> all;
+        public readonly Dictionary<string, string> Found = new Dictionary<string, string>();
+
+        public TableSource(string folder, Dictionary<string, string> hints) {
+            this.folder = folder;
+            this.hints = hints;
+        }
+
+        public IEnumerable<TableInfo> Candidates(string field) {
+            string name = null;
+            if (hints != null && hints.TryGetValue(field.ToUpperInvariant(), out name) && File.Exists(Path.Combine(folder, name))) {
+                TableInfo info = null;
+                try {
+                    info = new TableInfo();
+                    info.Name = name;
+                    info.Records = DbfTable.LoadHeader(Path.Combine(folder, name)).Expected;
+                } catch (Exception) {
+                    info = null;
+                }
+                if (info != null) yield return info;
+            }
+            if (all == null) all = TableInfo.List(folder, null);
+            foreach (TableInfo info in all)
+                if (name == null || string.Compare(info.Name, name, StringComparison.OrdinalIgnoreCase) != 0) yield return info;
+        }
+    }
+
     // Найти таблицу, где поле field - уникальный код с текстом при нём (например, IDNP в таблице населённых пунктов)
-    static Dictionary<string, LinkRow> FindLink(string folder, List<TableInfo> tables, string field, List<string> needed,
+    static Dictionary<string, LinkRow> FindLink(string folder, TableSource tables, string field, List<string> needed,
                                                 string exclude, bool nested, out string found) {
         found = null;
-        foreach (TableInfo info in tables) {
+        foreach (TableInfo info in tables.Candidates(field)) {
             if (info.Records < 1 || info.Records > 50000) continue;
             if (string.Compare(info.Name, exclude, StringComparison.OrdinalIgnoreCase) == 0) continue;
             string path = Path.Combine(folder, info.Name);
@@ -1437,6 +3031,7 @@ public class StreetDirectory {
             foreach (string c in needed) if (map.ContainsKey(c)) hit++;
             if (needed.Count > 0 && hit < needed.Count * 0.9) continue;                            // и покрывать почти все коды
             found = info.Name;
+            tables.Found[field.ToUpperInvariant()] = info.Name;
             Report.Line("    поле " + field + " -> " + info.Name + " (записей " + t.Count + ", кодов нашлось " + hit + " из " + needed.Count + "). Поля:");
             Report.Fields(t, "        ");
             if (nested) {
@@ -1468,6 +3063,11 @@ public class StreetDirectory {
     }
 
     public static StreetDirectory Load(string folder, string tableName, string keyField) {
+        return Load(folder, tableName, keyField, null);
+    }
+
+    // links - запомненные с прошлого раза таблицы-ссылки (чтобы не перебирать все таблицы папки)
+    public static StreetDirectory Load(string folder, string tableName, string keyField, Dictionary<string, string> links) {
         string path = Path.Combine(folder, tableName);
         DbfTable d = DbfTable.Load(path, false);
         int key = d.FieldIndex(keyField);
@@ -1479,8 +3079,8 @@ public class StreetDirectory {
         Report.Fields(d, "    ");
 
         // числовые поля справочника - ссылки на другие справочники (населённый пункт, сельсовет)
-        List<TableInfo> tables = null;
-        Dictionary<int, Dictionary<string, LinkRow>> links = new Dictionary<int, Dictionary<string, LinkRow>>();
+        TableSource tables = new TableSource(folder, links);
+        Dictionary<int, Dictionary<string, LinkRow>> found = new Dictionary<int, Dictionary<string, LinkRow>>();
         for (int j = 0; j < d.Fields.Count; j++) {
             if (j == key || d.Fields[j].Type != 'N') continue;
             List<string> codes = new List<string>();
@@ -1490,12 +3090,12 @@ public class StreetDirectory {
                 if (c.Length > 0 && c != "0" && !seen.ContainsKey(c)) { seen[c] = true; codes.Add(c); }
             }
             if (codes.Count == 0) continue;
-            if (tables == null) tables = TableInfo.List(folder, null);
-            string found;
-            Dictionary<string, LinkRow> map = FindLink(folder, tables, d.Fields[j].Name, codes, dir.TableName, true, out found);
-            if (map != null) links[j] = map;
+            string table;
+            Dictionary<string, LinkRow> map = FindLink(folder, tables, d.Fields[j].Name, codes, dir.TableName, true, out table);
+            if (map != null) found[j] = map;
             else Report.Line("    поле " + d.Fields[j].Name + ": справочник к нему не нашёлся");
         }
+        dir.Links = tables.Found;
 
         for (int r = 0; r < d.Count; r++) {
             string code = NormalizeCode(Value(d, r, key));
@@ -1512,7 +3112,7 @@ public class StreetDirectory {
             // по ссылкам: населённый пункт, сельсовет и прочее
             Dictionary<string, string> parts = new Dictionary<string, string>();
             List<string> order = new List<string>();
-            foreach (KeyValuePair<int, Dictionary<string, LinkRow>> link in links) {
+            foreach (KeyValuePair<int, Dictionary<string, LinkRow>> link in found) {
                 LinkRow row;
                 if (!link.Value.TryGetValue(NormalizeCode(Value(d, r, link.Key)), out row) || row.Text.Length == 0) continue;
                 string name = d.Fields[link.Key].Name.ToUpperInvariant();
@@ -1538,7 +3138,8 @@ public class StreetDirectory {
             }
             if (other.Length > 0) display.Append((display.Length > 0 ? ", " : "") + other);
             dir.names[code] = display.ToString();
-            dir.lowerNames[code] = display.ToString().ToLowerInvariant();
+            dir.lowerNames[code] = display.ToString().ToLowerInvariant().Replace('ё', 'е');
+            dir.ssOf[code] = CleanSs(ss);
         }
         return dir;
     }
@@ -1650,13 +3251,6 @@ public class AbonentQuery {
     readonly string[] street;        // адрес по справочнику улиц для каждой записи (если справочник есть)
     readonly string[] streetLower;
     readonly string streetSource;
-
-    // слова, которые в адресе ничего не значат: тип улицы и населённого пункта
-    static readonly string[] Skip = {
-        "ул", "улица", "пер", "переулок", "пр", "пр-т", "просп", "проспект", "пл", "площадь", "б-р", "бульвар",
-        "ш", "шоссе", "туп", "тупик", "проезд", "мкр", "микрорайон", "наб", "набережная", "тракт",
-        "г", "город", "аг", "агрогородок", "п", "пос", "поселок", "посёлок", "гп", "рп", "дер", "деревня",
-        "с", "село", "х", "хутор", "с/с", "сс", "сельсовет", "р-н", "район", "обл", "область" };
 
     public AbonentQuery(DbfTable t, StreetDirectory dir) {
         this.t = t;
@@ -1822,10 +3416,13 @@ public class AbonentQuery {
         if (digits.Length == 0) return found;
         string q = digits.ToString();
         SearchWord w = Part(q);
+        string core = q.TrimStart('0');
         foreach (int f in accountFields) {
             for (int i = 0; i < RowCount; i++) {
                 int row = RowAt(i);
-                if (t.FieldEquals(row, f, w)) found.Add(row);
+                if (t.FieldEquals(row, f, w)) { found.Add(row); continue; }
+                string v = DbfTable.Format(t.GetValue(row, f, null), true).Trim().TrimStart('0');
+                if (core.Length > 0 && v == core) found.Add(row);
             }
         }
         if (found.Count > 0) { LastExplain += ", точное совпадение"; return found; }
@@ -1929,55 +3526,16 @@ public class AbonentQuery {
     // показываем записи, где их совпало больше всего - лишние слова не мешают.
     List<int> FindAddress(string query) {
         List<int> found = new List<int>();
+        AddressParts a = AddressParts.Parse(query);
         List<SearchWord> text = new List<SearchWord>();
         List<string> textLower = new List<string>();
-        List<string> numbers = new List<string>();
-        List<string> early = new List<string>();   // числа до названия: номер строки из списка или сам дом
-        SearchWord house = null, korp = null, flat = null;
-        string pending = null;   // "дом", "корп" или "кв" перед числом
-        bool seenText = false;
-        int skipped = 0;
-        foreach (string raw in DbfTable.SplitWords(query.Replace('.', ' '))) {
-            string w = raw;
-            // слитно: "кв5", "д18", "к2"
-            string marker = null;
-            if (w.Length > 2 && w.StartsWith("кв") && IsDigitAt(w, 2)) { marker = "кв"; w = w.Substring(2); }
-            else if (w.Length > 1 && (w[0] == 'д' || w[0] == 'к') && IsDigitAt(w, 1)) { marker = w[0] == 'д' ? "дом" : "корп"; w = w.Substring(1); }
-            if (marker != null) pending = marker;
-
-            if (w == "д" || w == "дом") { pending = "дом"; continue; }
-            if (w == "к" || w == "корп" || w == "корпус") { pending = "корп"; continue; }
-            if (w == "кв" || w == "квартира") { pending = "кв"; continue; }
-            if (Array.IndexOf(Skip, w) >= 0) { pending = null; skipped++; continue; }
-
-            if (IsDigitAt(w, 0)) {
-                if (IsDigits(w) && w.Length >= 5) { pending = null; skipped++; continue; }   // лицевой или код - не адрес
-                if (pending == "корп" && korp == null) korp = t.PrepareWord(w);
-                else if (pending == "кв" && flat == null) flat = t.PrepareWord(w);
-                else if (pending == "дом" && house == null) house = t.PrepareWord(w);
-                else if (seenText) numbers.Add(w);
-                else early.Add(w);
-                pending = null;
-                continue;
-            }
-            pending = null;
-            if (HasDigit(w)) { skipped++; continue; }
-            text.Add(Part(w));
-            textLower.Add(w);
-            seenText = true;
-        }
-        // числа до названия улицы - обычно номер строки из списка, их пропускаем;
-        // но если слов нет совсем ("18"), это и есть дом
-        if (text.Count == 0) numbers.InsertRange(0, early);
-        // числа без пояснений: первое - дом, второе - квартира
-        foreach (string n in numbers) {
-            if (house == null) house = t.PrepareWord(n);
-            else if (flat == null) flat = t.PrepareWord(n);
-            else if (korp == null) korp = t.PrepareWord(n);
-        }
+        foreach (string w in a.Words) { text.Add(Part(w)); textLower.Add(w.Replace('ё', 'е')); }
+        SearchWord house = a.House == null ? null : t.PrepareWord(a.House);
+        SearchWord korp = a.Korp == null ? null : t.PrepareWord(a.Korp);
+        SearchWord flat = a.Flat == null ? null : t.PrepareWord(a.Flat);
         StringBuilder explain = new StringBuilder();
         explain.Append("слов адреса: " + text.Count + ", дом: " + (house != null ? "да" : "нет") + ", корпус: " + (korp != null ? "да" : "нет")
-            + ", квартира: " + (flat != null ? "да" : "нет") + ", пропущено служебных слов и номеров: " + (skipped + (text.Count > 0 ? early.Count : 0)));
+            + ", квартира: " + (flat != null ? "да" : "нет") + ", пропущено служебных слов и номеров: " + a.Skipped);
         if (text.Count == 0 && house == null && korp == null && flat == null) { LastExplain = explain.ToString(); return found; }
 
         // где нашлось каждое слово: в каком поле абонента или в справочнике
@@ -2087,42 +3645,36 @@ public class AbonentQuery {
     }
 }
 
-// Главное окно: одна строка поиска по базе абонентов
+// Главное окно: одна строка поиска. Каждый поиск идёт по индексам прямо в базе - данные всегда свежие.
 public class AbonentSearch : Form {
     readonly string settingsFile;
     readonly string viewerSettings;
     string folder;
     string tableName;
-    DbfTable table;
-    AbonentQuery query;
-    StreetDirectory directory;
-    bool streetCodes;    // в UL у абонентов коды улиц, а не названия
-    int[] mine;          // абоненты выбранных сельсоветов, если улицы записаны названиями (отбор после чтения)
-    string mineNote = "";
-    readonly CheckBox onlyMine = new CheckBox();
-    Dictionary<string, bool> allowed;   // коды улиц моих сельсоветов - читаем только их абонентов (null - всю базу)
-    DbfField ulField;
-    int totalInBase;
-    DateTime dataTime;
-    string dataNote = "";
-    bool refreshing;
-    bool suppressMine;
-    int generation;      // номер загрузки: фоновое обновление от старой загрузки не подменяет новую
+    LiveBase live;                       // открытая база (null - ещё не открыта)
+    bool opening;
+    SearchResult current;
+    bool searching, again;               // идёт поиск; пока он шёл, запрос поменялся
+    bool scanning;
+    volatile bool cancelScan;
+    bool cardWhenDone;                   // Enter: нашёлся один - сразу карточка
+    Dictionary<string, bool> selected;   // выбранные сельсоветы (null - все)
+    string baseInfo = "";
 
     static readonly string[] DefaultSelsovety = { "Шершунский", "Папернянский", "Юзуфовский", "Острошицкий", "Боровлянский", "Колодищанский" };
-    bool loading;
-    List<int> found = new List<int>();
     internal SearchMode mode = SearchMode.Account;
-    readonly RadioButton[] modeButtons = new RadioButton[4];
+    internal readonly RadioButton[] modeButtons = new RadioButton[4];
     readonly Label hint = new Label();
+    readonly Button ssButton = new Button();
+    readonly Button scanButton = new Button();
 
     static readonly string[] ModeNames = { "&Лицевой счёт", "&Адрес", "№ &счётчика", "&ФИО" };
     static readonly string[] Prompts = { "лицевой счёт", "адрес", "номер счётчика", "фамилию" };
     static readonly string[] Hints = {
-        "Например:  044060216   (нули впереди можно не писать)",
+        "Например:  044060216   (нули впереди можно не писать; можно начало номера)",
         "Вставьте адрес целиком:  Острошицкий Городок Заводская ул. 18   или коротко:  заводская 18 кв 5",
-        "Номер счётчика целиком или его часть",
-        "Например:  иванов   или   иванов иван" };
+        "Номер счётчика целиком или его начало",
+        "С фамилии:  иванов   или   иванов иван" };
 
     internal readonly TextBox queryBox = new TextBox();
     readonly DataGridView grid = new DataGridView();
@@ -2167,6 +3719,20 @@ public class AbonentSearch : Form {
             modeButtons[i] = rb;
             row.Controls.Add(rb);
         }
+        Button listButton = new Button();
+        listButton.Text = "Поиск по списку...";
+        listButton.AutoSize = true;
+        listButton.Margin = new Padding(12, 3, 3, 0);
+        listButton.Click += delegate { OpenBatch(); };
+        row.Controls.Add(listButton);
+        ssButton.Text = "Сельсоветы ▼";
+        ssButton.AutoSize = true;
+        ssButton.Margin = new Padding(6, 3, 3, 0);
+        ssButton.Click += delegate { ShowSelsovety(); };
+        row.Controls.Add(ssButton);
+        top.Controls.Add(row);
+        Load += delegate { Width = Math.Max(Width, row.PreferredSize.Width + 60); };
+
         queryBox.Font = new Font(Font.FontFamily, 14f);
         queryBox.Location = new Point(12, 38);
         queryBox.Width = top.Width - 24;
@@ -2176,26 +3742,6 @@ public class AbonentSearch : Form {
         hint.ForeColor = SystemColors.GrayText;
         hint.AutoSize = true;
         hint.Location = new Point(12, 76);
-        Button listButton = new Button();
-        listButton.Text = "Поиск по списку...";
-        listButton.AutoSize = true;
-        listButton.Margin = new Padding(12, 3, 3, 0);
-        listButton.Click += delegate { OpenBatch(); };
-        row.Controls.Add(listButton);
-        onlyMine.Text = "Только мои сельсоветы";
-        onlyMine.AutoSize = true;
-        onlyMine.Checked = true;
-        onlyMine.Margin = new Padding(14, 7, 3, 0);
-        onlyMine.CheckedChanged += delegate { OnOnlyMineChanged(); };
-        row.Controls.Add(onlyMine);
-        Button ssButton = new Button();
-        ssButton.Text = "Сельсоветы...";
-        ssButton.AutoSize = true;
-        ssButton.Margin = new Padding(6, 3, 3, 0);
-        ssButton.Click += delegate { EditSelsovety(); };
-        row.Controls.Add(ssButton);
-        top.Controls.Add(row);
-        Load += delegate { Width = Math.Max(Width, row.PreferredSize.Width + 60); };
         top.Controls.Add(queryBox);
         top.Controls.Add(hint);
 
@@ -2222,10 +3768,15 @@ public class AbonentSearch : Form {
         bottom.Controls.Add(BottomButton("Отчёт", delegate { OpenReport(); }));
         bottom.Controls.Add(BottomButton("Все таблицы...", delegate { new DbfViewer(this.viewerSettings).Show(); }));
         bottom.Controls.Add(BottomButton("Где искать...", delegate { ChooseBase(); }));
-        bottom.Controls.Add(BottomButton("Обновить", delegate { if (allowed != null && table != null) RefreshInBackground(); else LoadTable(); }));
+        scanButton.Text = "Искать перебором";
+        scanButton.Dock = DockStyle.Right;
+        scanButton.Width = 150;
+        scanButton.Visible = false;
+        scanButton.Click += delegate { if (scanning) cancelScan = true; else StartScan(); };
+        bottom.Controls.Add(scanButton);
 
-        timer.Interval = 300;
-        timer.Tick += delegate { timer.Stop(); ApplySearch(); };
+        timer.Interval = 400;
+        timer.Tick += delegate { timer.Stop(); StartSearch(); };
         logTimer.Interval = 2000;
         logTimer.Tick += delegate { logTimer.Stop(); LogSearch(); };
 
@@ -2234,6 +3785,7 @@ public class AbonentSearch : Form {
         Controls.Add(top);
 
         Shown += delegate { Start(); };
+        FormClosing += delegate { cancelScan = true; };
     }
 
     Button BottomButton(string text, EventHandler click) {
@@ -2243,6 +3795,15 @@ public class AbonentSearch : Form {
         b.Width = 120;
         b.Click += click;
         return b;
+    }
+
+    // из фонового потока - в окно
+    void Post(MethodInvoker m) {
+        try { if (!IsDisposed) BeginInvoke(m); } catch (Exception) { }
+    }
+
+    void PostStatus(string text) {
+        Post(delegate { status.Text = text; });
     }
 
     // адрес, скопированный из Excel, приходит с табуляциями - показываем их пробелами
@@ -2266,14 +3827,17 @@ public class AbonentSearch : Form {
         SaveSettings();
         queryBox.Focus();
         queryBox.SelectAll();
-        ApplySearch();
+        StartSearch();
     }
 
     void SaveSettings() {
         if (folder == null) return;
+        StreetDirectory d = live == null ? null : live.Dir;
+        List<string> links = new List<string>();
+        if (d != null) foreach (KeyValuePair<string, string> kv in d.Links) links.Add(kv.Key + "=" + kv.Value);
         Places.SaveSettings(settingsFile, new string[] {
             folder, tableName == null ? "" : tableName, ((int)mode).ToString(),
-            directory == null ? "" : directory.TableName, directory == null ? "" : directory.KeyField });
+            d == null ? "" : d.TableName, d == null ? "" : d.KeyField, string.Join(";", links.ToArray()) });
     }
 
     void OpenReport() {
@@ -2290,15 +3854,25 @@ public class AbonentSearch : Form {
 
     void LogSearch() {
         logTimer.Stop();
-        if (query == null || DbfTable.SplitWords(queryBox.Text).Length == 0) return;
-        string line = "Поиск по: " + Prompts[(int)mode] + "; " + query.LastExplain + " -> найдено " + found.Count;
+        SearchResult r = current;
+        if (r == null) return;
+        string line = "Поиск по: " + Prompts[(int)r.Mode] + (r.Scanned ? " (перебором)" : "") + "; "
+            + (r.NoIndex ? "нет подходящего индекса" : r.How) + (r.Query != null && r.Query.LastExplain.Length > 0 ? "; " + r.Query.LastExplain : "")
+            + (r.Note.Length > 0 ? "; " + r.Note : "") + " -> найдено " + r.Rows.Count + (r.Hidden > 0 ? ", скрыто (другие сельсоветы) " + r.Hidden : "")
+            + (r.TooMany ? ", показана часть" : "") + ", " + r.Seconds.ToString("0.00") + " с";
         if (line == lastLogged) return;
         lastLogged = line;
         Report.Search(line);
     }
 
+    string Dir { get { return Path.GetDirectoryName(Path.GetFullPath(settingsFile)); } }
+
     void Start() {
-        Report.Start(Path.Combine(Path.GetDirectoryName(Path.GetFullPath(settingsFile)), "otchet.txt"));
+        Report.Start(Path.Combine(Dir, "otchet.txt"));
+        // выборка абонентов прошлой версии больше не нужна (в ней были данные абонентов)
+        foreach (string old in new string[] { "kesh_abonenty.dbf", "kesh_abonenty.txt", "kesh_abonenty.dbf.tmp" }) {
+            try { if (File.Exists(Path.Combine(Dir, old))) File.Delete(Path.Combine(Dir, old)); } catch (Exception) { }
+        }
         int saved;
         if (int.TryParse(Places.ReadSetting(settingsFile, 2), out saved) && saved >= 0 && saved < modeButtons.Length) mode = (SearchMode)saved;
         modeButtons[(int)mode].Checked = true;
@@ -2336,250 +3910,161 @@ public class AbonentSearch : Form {
             status.Text = "Не нашёл таблицу абонентов в папке " + folder + ". Нажмите \"Где искать...\" и выберите её.";
             return;
         }
-        LoadTable();
+        OpenBase();
     }
 
-    // ---- загрузка: справочники -> коды улиц моих сельсоветов -> только их абоненты ----
+    // ---- открытие базы: заголовок, индексы и справочники; самих абонентов не читаем ----
 
-    string Dir { get { return Path.GetDirectoryName(Path.GetFullPath(settingsFile)); } }
-    string CacheFile { get { return Path.Combine(Dir, "kesh_abonenty.dbf"); } }
-    string CacheInfo { get { return Path.Combine(Dir, "kesh_abonenty.txt"); } }
-
-    // что лежит в сохранённой выборке: база, справочник и список сельсоветов
-    string CacheKey() {
-        return Path.Combine(folder, tableName) + "|" + (directory == null ? "" : directory.TableName + "." + directory.KeyField)
-            + "|" + string.Join(";", ReadSelsovety());
-    }
-
-    internal void LoadTable() {
-        if (loading || tableName == null) return;
+    internal void OpenBase() {
+        if (opening || tableName == null) return;
+        opening = true;
+        live = null;
+        current = null;
+        grid.RowCount = 0;
         string path = Path.Combine(folder, tableName);
-        generation++;
-        SetBusy(true, "Готовлю справочники...");
-        try {
-            DbfTable header = DbfTable.LoadHeader(path);
-            totalInBase = header.Expected;
-            Report.Line("Таблица абонентов " + tableName + ": записей по заголовку " + header.Expected);
-            directory = PrepareDirectory(path, header);
-            PrepareFilter(header);
-            if (allowed != null && TryLoadCache(path)) {
-                AfterLoad();
-                if (DateTime.Now - dataTime > TimeSpan.FromHours(1)) RefreshInBackground();
-                return;
+        string dirTable = Places.ReadSetting(settingsFile, 3), dirKey = Places.ReadSetting(settingsFile, 4);
+        Dictionary<string, string> links = new Dictionary<string, string>();
+        string linkLine = Places.ReadSetting(settingsFile, 5);
+        if (linkLine != null)
+            foreach (string pair in linkLine.Split(';')) {
+                int eq = pair.IndexOf('=');
+                if (eq > 0) links[pair.Substring(0, eq).Trim().ToUpperInvariant()] = pair.Substring(eq + 1).Trim();
             }
-            SetBusy(true, allowed != null ? "Читаю базу и отбираю абонентов моих сельсоветов..." : "Читаю всю базу абонентов...");
-            table = DbfTable.Load(path, MakeFilter(), delegate(int done, int expected) {
-                if (IsDisposed) throw new OperationCanceledException();
-                status.Text = "Читаю базу " + tableName + ": " + done + " из " + expected + " записей"
-                    + (allowed != null ? " (оставляю только мои сельсоветы)" : "") + "...";
-                Application.DoEvents();
-            }, 0);
-            dataTime = DateTime.Now;
-            ReportRead("Прочитана база", table);
-            if (allowed != null) SaveCache(table, CacheKey(), dataTime);
-            AfterLoad();
-        } catch (OperationCanceledException) {
-            return;
-        } catch (Exception ex) {
-            table = null;
-            query = null;
-            Report.Line("ОШИБКА чтения " + path + ": " + ex.Message);
-            SetBusy(false, "Не удалось прочитать " + path + ": " + ex.Message);
+        string table = tableName, dirFolder = folder;
+        SetBusy(true, "Открываю базу " + tableName + "...");
+        System.Threading.Thread th = new System.Threading.Thread(delegate() {
+            LiveBase b = null;
+            string error = null;
+            Dictionary<string, bool> sel = null;
+            DateTime t0 = DateTime.Now;
+            try {
+                b = LiveBase.Open(path);
+                double opened = (DateTime.Now - t0).TotalSeconds;
+                ReportBase(b);
+                PostStatus("Читаю справочники улиц...");
+                DateTime t1 = DateTime.Now;
+                b.Dir = PrepareDirectory(b, dirFolder, table, dirTable, dirKey, links);
+                Report.Line("Время открытия: таблица и индексы - " + opened.ToString("0.0") + " с, справочники - "
+                    + (DateTime.Now - t1).TotalSeconds.ToString("0.0") + " с");
+                sel = LoadSelection(b);
+            } catch (Exception ex) {
+                error = ex.Message;
+                Report.Line("ОШИБКА открытия " + path + ": " + ex.Message);
+            }
+            double seconds = (DateTime.Now - t0).TotalSeconds;
+            Post(delegate { AfterOpen(b, sel, error, seconds); });
+            if (error != null) return;
+            // заранее проверяем индексы по нужным полям - итог в отчёт
+            try {
+                b.VerifyMain();
+                Report.Line("Проверка индексов (ищем по индексу записи из разных мест таблицы):");
+                foreach (IndexTag t in b.Tags)
+                    if (t.State != 0 || t.Check.Length > 0) Report.Line("    " + t.Label + ": " + t.Check);
+                Report.Line("Чем ищется: лицевой - " + TagName(b, "NAB", false) + ", Л/С ЕРИП - " + TagName(b, "LS_ERIP", false)
+                    + ", счётчик - " + TagName(b, "NCH", false) + ", снятый счётчик - " + TagName(b, "NSC", false)
+                    + ", ФИО - " + TagName(b, "FIO", false) + ", адрес - " + TagName(b, "UL", true));
+                Report.Line("--- поиски (сами слова не записываются) ---");
+            } catch (Exception ex) {
+                Report.Line("Проверка индексов прервалась: " + ex.Message);
+            }
+        });
+        th.IsBackground = true;
+        th.Start();
+    }
+
+    static string TagName(LiveBase b, string field, bool preferLong) {
+        if (b.Header.FieldIndex(field) < 0) return "нет поля";
+        IndexTag t = b.TagFor(field, preferLong);
+        return t == null ? "нет индекса (только перебором)" : t.Label;
+    }
+
+    void ReportBase(LiveBase b) {
+        long size = 0;
+        try { size = new FileInfo(b.FilePath).Length; } catch (Exception) { }
+        Report.Line("Таблица абонентов " + Path.GetFileName(b.FilePath) + ": записей по заголовку " + b.Header.Expected + ", длина записи "
+            + b.Header.RecordLength + " байт, файл " + (size / 1048576.0).ToString("0") + " МБ");
+        Report.Line("Поля (по первым " + b.Sample.Count + " записям):");
+        Report.Fields(b.Sample, "    ");
+        List<string> files = b.IndexFiles;
+        Report.Line("Индексных файлов (.CDX, .IDX) в папке: " + files.Count + (files.Count > 0 ? ": " + string.Join(", ", files.GetRange(0, Math.Min(files.Count, 80)).ToArray())
+            + (files.Count > 80 ? "..." : "") : ""));
+        Report.Line("Индексы, подходящие к таблице " + Path.GetFileName(b.FilePath) + " (" + b.Tags.Count + "):");
+        if (b.Tags.Count == 0) Report.Line("    нет - поиск возможен только перебором всей таблицы");
+        foreach (IndexTag t in b.Tags) {
+            StringBuilder sb = new StringBuilder("    " + t.Label + (t.Structural ? " (свой .CDX)" : "") + "  ключ: " + t.Expr
+                + "  (длина " + t.KeyLen + ", тип " + t.KeyType + (t.Compact ? "" : ", обычный .IDX") + (t.Descending ? ", по убыванию" : "") + ")");
+            if (t.ForText != null) sb.Append("  FOR " + t.ForText);
+            if (t.Raw.Length > 0) sb.Append("  [" + t.Raw + "]");
+            if (t.Problem != null) sb.Append("  - не годится: " + t.Problem);
+            else {
+                List<string> fields = new List<string>();
+                foreach (string f in t.TermFields) fields.Add(f == null ? "?" : f);
+                sb.Append("  -> поля " + string.Join("+", fields.ToArray()));
+            }
+            Report.Line(sb.ToString());
         }
     }
 
-    void ReportRead(string what, DbfTable t) {
-        double mb = t.BytesRead / 1048576.0;
-        Report.Line(what + ": " + mb.ToString("0") + " МБ за " + t.Seconds.ToString("0.0") + " с (" + (t.Seconds > 0 ? (mb / t.Seconds).ToString("0.0") : "?")
-            + " МБ/с), записей " + t.Total + ", удалённых пропущено " + t.Deleted + ", оставлено " + t.Count
-            + (allowed != null ? " (мои сельсоветы)" : " (вся база)"));
-    }
-
-    void AfterLoad() {
-        query = new AbonentQuery(table, directory);
-        if (allowed == null && directory == null && onlyMine.Checked) FindMine();   // улицы названиями - отбор по тексту адреса
-        else query.Scope = null;
-        Report.Line("Поля таблицы абонентов (по загруженным записям):");
-        Report.Fields(table, "    ");
-        Report.Line("Где ищется: лицевой - " + query.FieldList(SearchMode.Account) + " | адрес - " + query.FieldList(SearchMode.Address)
-            + " | счётчик - " + query.FieldList(SearchMode.Meter) + " | ФИО - " + query.FieldList(SearchMode.Name));
-        Report.Line("--- поиски (сами слова не записываются) ---");
-        dataNote = "данные на " + dataTime.ToString("dd.MM HH:mm");
-        SaveSettings();
-        BuildColumns();
-        SetBusy(false, null);
-        ApplySearch();
-    }
-
     // Справочник улиц: запомненный с прошлого раза или ищем по кодам улиц из начала базы
-    StreetDirectory PrepareDirectory(string path, DbfTable header) {
-        streetCodes = false;
-        int ul = header.FieldIndex("UL");
-        ulField = ul < 0 ? null : header.Fields[ul];
-        if (ul < 0) return null;
-        string savedTable = Places.ReadSetting(settingsFile, 3), savedKey = Places.ReadSetting(settingsFile, 4);
-        if (savedTable != null && savedKey != null && File.Exists(Path.Combine(folder, savedTable))) {
+    StreetDirectory PrepareDirectory(LiveBase b, string dirFolder, string table, string savedTable, string savedKey, Dictionary<string, string> links) {
+        int ul = b.Header.FieldIndex("UL");
+        if (ul < 0) { Report.Line("Поля UL (улица) в таблице нет - справочник улиц не нужен"); return null; }
+        if (savedTable != null && savedKey != null && File.Exists(Path.Combine(dirFolder, savedTable))) {
             try {
                 Report.Line("Справочник улиц с прошлого раза: " + savedTable + "." + savedKey);
-                StreetDirectory d = StreetDirectory.Load(folder, savedTable, savedKey);
-                if (d != null && d.Count > 0) { streetCodes = true; return d; }
+                StreetDirectory d = StreetDirectory.Load(dirFolder, savedTable, savedKey, links);
+                if (d != null && d.Count > 0) return d;
             } catch (Exception ex) {
                 Report.Line("    не открылся: " + ex.Message);
             }
         }
-        status.Text = "Смотрю, как записаны улицы...";
-        status.Refresh();
-        DbfTable sample = DbfTable.Load(path, null, null, 30000);
-        List<string> codes = StreetDirectory.Codes(sample, sample.FieldIndex("UL"));
-        streetCodes = codes != null;
+        List<string> codes = StreetDirectory.Codes(b.Sample, b.Sample.FieldIndex("UL"));
         if (codes == null) return null;
         Report.Line("Ищу справочник улиц среди таблиц папки:");
         try {
-            return StreetDirectory.Detect(folder, tableName, codes, delegate(int done, int total) {
-                if (IsDisposed) throw new OperationCanceledException();
-                status.Text = "В поле улицы - коды. Ищу справочник улиц: проверено " + done + " из " + total + " таблиц...";
-                Application.DoEvents();
+            return StreetDirectory.Detect(dirFolder, table, codes, delegate(int done, int total) {
+                PostStatus("В поле улицы - коды. Ищу справочник улиц: проверено " + done + " из " + total + " таблиц...");
             });
-        } catch (OperationCanceledException) {
-            throw;
         } catch (Exception ex) {
             Report.Line("    ошибка: " + ex.Message);
             return null;
         }
     }
 
-    // Коды улиц моих сельсоветов - по справочникам. null - читаем всю базу.
-    void PrepareFilter(DbfTable header) {
-        allowed = null;
-        mineNote = "";
-        string[] names = ReadSelsovety();
-        onlyMine.Text = "Только мои сельсоветы (" + names.Length + ")";
-        if (!onlyMine.Checked) { Report.Line("Отбор по сельсоветам выключен - читаю всю базу"); return; }
-        if (names.Length == 0) { Report.Line("Сельсоветы: список пуст - читаю всю базу"); return; }
-        if (directory == null || ulField == null) {
-            if (streetCodes) mineNote = "   Справочник улиц не нашёлся - сельсоветы не проверить, показана вся база.";
-            return;   // улицы названиями - отберём после чтения по тексту адреса
-        }
-        string report;
-        Dictionary<string, bool> codes = directory.CodesMatching(names, out report);
-        Report.Line(report);
-        if (codes.Count == 0) {
-            mineNote = "   Названия сельсоветов в справочниках не нашлись - показана вся база. Нажмите \"Отчёт\" и пришлите его.";
-            onlyMine.Text = "Только мои сельсоветы (не нашлись)";
-            return;
-        }
-        allowed = codes;
-    }
-
-    RecordFilter MakeFilter() {
-        if (allowed == null || ulField == null) return null;
-        Dictionary<string, bool> codes = allowed;
-        DbfField f = ulField;
-        return delegate(byte[] record, int start) {
-            return codes.ContainsKey(StreetDirectory.NormalizeCode(Encoding.ASCII.GetString(record, start + f.Offset, f.Length)));
-        };
-    }
-
-    bool TryLoadCache(string path) {
-        if (!File.Exists(CacheFile) || !File.Exists(CacheInfo)) return false;
-        string key = Places.ReadSetting(CacheInfo, 0);
-        long ticks;
-        if (key != CacheKey() || !long.TryParse(Places.ReadSetting(CacheInfo, 1), out ticks)) {
-            Report.Line("Сохранённая выборка не подходит (поменялись база, справочник или сельсоветы) - читаю базу");
-            return false;
-        }
-        try {
-            status.Text = "Беру сохранённую выборку абонентов...";
-            status.Refresh();
-            table = DbfTable.Load(CacheFile, false);
-            table.FilePath = path;   // примечания - из исходной базы
-            dataTime = new DateTime(ticks);
-            Report.Line("Абоненты взяты из сохранённой выборки от " + dataTime.ToString("dd.MM.yyyy HH:mm") + ": " + table.Count
-                + " записей за " + table.Seconds.ToString("0.0") + " с" + (DateTime.Now - dataTime > TimeSpan.FromHours(1) ? "; ей больше часа - обновляю в фоне" : ""));
-            return true;
-        } catch (Exception ex) {
-            Report.Line("Сохранённая выборка не открылась: " + ex.Message);
-            table = null;
-            return false;
-        }
-    }
-
-    void SaveCache(DbfTable t, string key, DateTime when) {
-        try {
-            t.SaveCopy(CacheFile);
-            Places.SaveSettings(CacheInfo, new string[] { key, when.Ticks.ToString() });
-        } catch (Exception ex) {
-            Report.Line("Сохранить выборку не удалось: " + ex.Message);
-        }
-    }
-
-    // Свежие данные из базы - в фоне, пока работаете со старыми; потом тихо подменяем
-    void RefreshInBackground() {
-        if (refreshing || loading || table == null || tableName == null) return;
-        refreshing = true;
-        string path = Path.Combine(folder, tableName);
-        RecordFilter filter = MakeFilter();
-        string key = CacheKey();
-        bool save = allowed != null;
-        int gen = generation;
-        SetDataNote("обновляю данные из базы...");
-        System.Threading.Thread th = new System.Threading.Thread(delegate() {
-            DbfTable fresh = null;
-            string error = null;
-            int shown = 0;
-            try {
-                fresh = DbfTable.Load(path, filter, delegate(int done, int expected) {
-                    if (done - shown < 50000) return;
-                    shown = done;
-                    string note = "обновляю данные из базы: " + (int)(done * 100L / Math.Max(expected, 1)) + "%";
-                    try { BeginInvoke(new MethodInvoker(delegate { SetDataNote(note); })); } catch (Exception) { }
-                }, 0);
-                if (save) SaveCache(fresh, key, DateTime.Now);
-            } catch (Exception ex) {
-                error = ex.Message;
-            }
-            try { BeginInvoke(new MethodInvoker(delegate { FinishRefresh(fresh, error, gen); })); } catch (Exception) { }
-        });
-        th.IsBackground = true;
-        th.Start();
-    }
-
-    void FinishRefresh(DbfTable fresh, string error, int gen) {
-        refreshing = false;
-        if (gen != generation) return;   // пока обновлялось, базу уже перечитали заново
+    void AfterOpen(LiveBase b, Dictionary<string, bool> sel, string error, double seconds) {
+        opening = false;
+        SetBusy(false, null);
         if (error != null) {
-            Report.Line("Обновить данные не удалось: " + error);
-            SetDataNote("данные на " + dataTime.ToString("dd.MM HH:mm") + " (обновить не удалось)");
+            status.Text = "Не удалось открыть " + Path.Combine(folder, tableName) + ": " + error + "   Нажмите \"Где искать...\".";
             return;
         }
-        fresh.FilePath = Path.Combine(folder, tableName);
-        table = fresh;
-        dataTime = DateTime.Now;
-        ReportRead("Данные обновлены из базы", table);
-        query = new AbonentQuery(table, directory);
-        dataNote = "данные обновлены в " + dataTime.ToString("HH:mm");
-        ApplySearch();
-    }
-
-    void SetDataNote(string note) {
-        dataNote = note;
-        UpdateStatus();
+        live = b;
+        baseInfo = tableName + ", " + b.Header.Expected.ToString("#,0") + " записей";
+        selected = sel;
+        UpdateSsButton();
+        SaveSettings();
+        BuildColumns();
+        status.Text = "База открыта за " + seconds.ToString("0.0") + " с.";
+        if (DbfTable.SplitWords(queryBox.Text).Length > 0) StartSearch();
+        else UpdateStatus();
     }
 
     void SetBusy(bool busy, string text) {
-        loading = busy;
-        foreach (Control c in bottom.Controls) if (c is Button) c.Enabled = !busy;
+        foreach (Control c in bottom.Controls) if (c is Button && c != scanButton) c.Enabled = !busy;
         Cursor = busy ? Cursors.AppStarting : Cursors.Default;
         if (text != null) { status.Text = text; status.Refresh(); }
     }
 
+    AbonentQuery columns;
+
     void BuildColumns() {
+        columns = new AbonentQuery(DbfTable.CreateLike(live.Header), live.Dir);
         grid.RowCount = 0;
         grid.Columns.Clear();
-        foreach (int f in query.Columns) {
-            DbfField field = table.Fields[f];
+        foreach (int f in columns.Columns) {
+            DbfField field = live.Header.Fields[f];
             DataGridViewTextBoxColumn c = new DataGridViewTextBoxColumn();
-            c.HeaderText = query.ColumnTitle(f);
+            c.HeaderText = columns.ColumnTitle(f);
             c.SortMode = DataGridViewColumnSortMode.NotSortable;
             string n = field.Name.ToUpperInvariant();
             c.FillWeight = n == "FIO" ? 300 : n == "UL" ? 200 : (n == "NAB" || n == "NCH" || n == "TIPCH") ? 130 : 70;
@@ -2587,51 +4072,150 @@ public class AbonentSearch : Form {
         }
     }
 
-    internal void ApplySearch() {
-        if (loading || table == null) return;
-        found = query.Find(queryBox.Text, mode);
-        logTimer.Stop();
-        logTimer.Start();
+    // ---- поиск (в фоне, чтобы окно не замирало, пока читается сеть) ----
+
+    internal void StartSearch() {
+        timer.Stop();
+        if (live == null) return;
+        if (scanning) { cancelScan = true; again = true; return; }
+        if (searching) { again = true; return; }
+        string text = queryBox.Text;
+        if (DbfTable.SplitWords(text).Length == 0) { Show(null); return; }
+        if (!cardWhenDone && !EnoughTyped(text, mode)) { Show(null); status.Text = "Впишите дальше или нажмите Enter."; return; }
+        searching = true;
+        SearchMode m = mode;
+        Dictionary<string, bool> ss = selected;
+        LiveBase b = live;
+        status.Text = "Ищу...";
+        Cursor = Cursors.AppStarting;
+        System.Threading.Thread th = new System.Threading.Thread(delegate() {
+            SearchResult r = b.Search(text, m, ss);
+            Post(delegate { SearchDone(r, b); });
+        });
+        th.IsBackground = true;
+        th.Start();
+    }
+
+    // пока набирается одна-две буквы, не ищем (иначе по сети читается очень много лишнего)
+    static bool EnoughTyped(string text, SearchMode m) {
+        int digits = 0, letters = 0;
+        foreach (char c in text) { if (char.IsDigit(c)) digits++; else if (char.IsLetter(c)) letters++; }
+        switch (m) {
+            case SearchMode.Account: return digits >= 4;
+            case SearchMode.Meter: return digits + letters >= 4;
+            case SearchMode.Name: return letters >= 3;
+            default: return letters >= 3;
+        }
+    }
+
+    void SearchDone(SearchResult r, LiveBase b) {
+        searching = false;
+        Cursor = Cursors.Default;
+        if (b != live) return;
+        if (again || r.Text != queryBox.Text || r.Mode != mode) { again = false; StartSearch(); return; }
+        Show(r);
+        if (cardWhenDone) {
+            cardWhenDone = false;
+            LogSearch();
+            if (r.Rows.Count == 1) OpenCard(0);   // нашёлся один - сразу карточка
+            else if (r.Rows.Count > 1) grid.Focus();
+        }
+    }
+
+    internal void StartScan() {
+        if (live == null || searching || scanning) return;
+        string text = queryBox.Text;
+        if (DbfTable.SplitWords(text).Length == 0) return;
+        scanning = true;
+        cancelScan = false;
+        scanButton.Text = "Остановить перебор";
+        SearchMode m = mode;
+        Dictionary<string, bool> ss = selected;
+        LiveBase b = live;
+        System.Threading.Thread th = new System.Threading.Thread(delegate() {
+            SearchResult r = null;
+            DateTime started = DateTime.Now;
+            int shown = -1;
+            try {
+                r = b.Scan(text, m, ss, delegate(int done, int expected) {
+                    if (cancelScan) throw new OperationCanceledException();
+                    int pct = (int)(done * 100L / Math.Max(expected, 1));
+                    if (pct == shown) return;
+                    shown = pct;
+                    double spent = (DateTime.Now - started).TotalSeconds;
+                    string left = pct > 0 ? ", осталось примерно " + Math.Max(1, (int)(spent * (100 - pct) / pct / 60)) + " мин" : "";
+                    PostStatus("Перебираю всю базу: " + pct + "%" + left + "...   Можно остановить кнопкой справа.");
+                });
+            } catch (OperationCanceledException) {
+                r = null;
+            } catch (Exception ex) {
+                r = new SearchResult();
+                r.Text = text;
+                r.Mode = m;
+                r.Error = ex.Message;
+            }
+            Post(delegate { ScanDone(r, b); });
+        });
+        th.IsBackground = true;
+        th.Start();
+    }
+
+    void ScanDone(SearchResult r, LiveBase b) {
+        scanning = false;
+        scanButton.Text = "Искать перебором";
+        if (b != live) return;
+        if (again) { again = false; StartSearch(); return; }
+        if (r == null) { UpdateStatus(); return; }
+        Show(r);
+    }
+
+    void Show(SearchResult r) {
+        current = r;
         grid.RowCount = 0;
-        grid.RowCount = found.Count;
+        grid.RowCount = r == null ? 0 : r.Rows.Count;
         grid.Invalidate();
+        scanButton.Visible = scanning || (r != null && r.NoIndex);
+        logTimer.Stop();
+        if (r != null) logTimer.Start();
         UpdateStatus();
     }
 
     void UpdateStatus() {
-        if (table == null || query == null) return;
-        string where;
-        if (allowed != null) where = "абонентов в моих сельсоветах " + table.Count + " (всего в базе " + totalInBase + ")";
-        else if (query.Scope != null) where = "абонентов в моих сельсоветах " + query.Scope.Length + " из " + table.Count;
-        else where = tableName + ", " + table.Count + " абонентов";
-        if (directory != null) where += ", улицы - из " + directory.TableName;
-        where += "; " + dataNote + mineNote;
-        string warning = streetCodes && directory == null && mode == SearchMode.Address
-            ? "   В поле улицы - коды, а справочник улиц не нашёлся: адрес ищется по дому и квартире, название улицы может не находиться."
-            : "";
-        if (DbfTable.SplitWords(queryBox.Text).Length == 0)
-            status.Text = "Впишите " + Prompts[(int)mode] + ".   База: " + where + warning;
-        else if (found.Count == 0)
-            status.Text = "Ничего не найдено.   База: " + where + warning;
+        if (live == null) return;
+        string where = "База: " + baseInfo;
+        if (selected != null) where += ", сельсоветов выбрано " + selected.Count + " из " + live.Dir.Selsovety.Count;
+        SearchResult r = current;
+        string took = r == null ? "" : "   (" + r.Seconds.ToString("0.0") + " с)";
+        if (r == null)
+            status.Text = "Впишите " + Prompts[(int)mode] + ".   " + where;
+        else if (r.Error != null)
+            status.Text = "Ошибка при поиске: " + r.Error + "   Нажмите \"Отчёт\" и пришлите его.";
+        else if (r.NoIndex)
+            status.Text = "Для поиска по полю \"" + Prompts[(int)r.Mode] + "\" в базе нет подходящего индекса. Можно искать перебором всей базы - это долго (минуты). Кнопка справа.";
+        else if (r.Note.Length > 0 && r.Rows.Count == 0)
+            status.Text = r.Note + "   " + where;
+        else if (r.Rows.Count == 0)
+            status.Text = (r.Hidden > 0 ? "В выбранных сельсоветах не найдено, а в других нашлось: " + r.Hidden + " - отметьте их в списке \"Сельсоветы\"."
+                : "Ничего не найдено.") + took + "   " + where;
         else
-            status.Text = "Найдено: " + found.Count + ". Двойной щелчок или Enter - карточка.   База: " + where;
+            status.Text = "Найдено: " + r.Rows.Count + (r.TooMany ? " (нашлось очень много, показана часть - уточните запрос)" : "")
+                + (r.Hidden > 0 ? ", ещё " + r.Hidden + " в других сельсоветах скрыто" : "")
+                + ". Enter или двойной щелчок - карточка." + took + "   " + where;
     }
 
     void OnCellValueNeeded(object sender, DataGridViewCellValueEventArgs e) {
-        if (table == null || e.RowIndex >= found.Count || e.ColumnIndex >= query.Columns.Length) return;
-        e.Value = query.CellText(found[e.RowIndex], query.Columns[e.ColumnIndex]);
+        SearchResult r = current;
+        if (r == null || e.RowIndex >= r.Rows.Count || e.ColumnIndex >= r.Query.Columns.Length) return;
+        e.Value = r.Query.CellText(r.Rows[e.RowIndex], r.Query.Columns[e.ColumnIndex]);
     }
 
     void OnQueryKey(object sender, KeyEventArgs e) {
         if (e.KeyCode == Keys.Enter) {
             e.Handled = true;
             e.SuppressKeyPress = true;
-            timer.Stop();
-            ApplySearch();
-            LogSearch();
-            if (found.Count == 1) OpenCard(0);   // нашёлся один - сразу карточка
-            else if (found.Count > 1) grid.Focus();
-        } else if (e.KeyCode == Keys.Down && found.Count > 0) {
+            cardWhenDone = true;
+            StartSearch();
+        } else if (e.KeyCode == Keys.Down && current != null && current.Rows.Count > 0) {
             e.Handled = true;
             grid.Focus();
         }
@@ -2646,18 +4230,20 @@ public class AbonentSearch : Form {
     }
 
     internal void OpenCard(int index) {
-        if (table == null || index < 0 || index >= found.Count) return;
-        Card.Show(this, table, found[index], query.CardExtra(found[index]));
+        SearchResult r = current;
+        if (r == null || index < 0 || index >= r.Rows.Count) return;
+        int row = r.Rows[index];
+        Card.Show(this, r.Table, row, r.Query.CardExtra(row));
     }
 
-    string SelsovetyFile {
-        get { return Path.Combine(Path.GetDirectoryName(Path.GetFullPath(settingsFile)), "selsovety.txt"); }
-    }
+    // ---- сельсоветы: выпадающий список с галочками, только отбирает показанное ----
 
-    // список сельсоветов: из файла selsovety.txt (если его нет - создаём с вашими шестью)
+    string SelsovetyFile { get { return Path.Combine(Dir, "selsovety.txt"); } }
+
+    // список сельсоветов из файла selsovety.txt (если его нет - ваши шесть)
     string[] ReadSelsovety() {
         string file = SelsovetyFile;
-        if (!File.Exists(file)) SaveSelsovety(DefaultSelsovety);
+        if (!File.Exists(file)) return DefaultSelsovety;
         List<string> names = new List<string>();
         try {
             foreach (string line in File.ReadAllLines(file, Encoding.UTF8)) {
@@ -2665,106 +4251,126 @@ public class AbonentSearch : Form {
                 if (n.Length > 0 && !n.StartsWith("#")) names.Add(n);
             }
         } catch (Exception) {
-            names.AddRange(DefaultSelsovety);
+            return DefaultSelsovety;
         }
         return names.ToArray();
     }
 
-    void SaveSelsovety(string[] names) {
+    void SaveSelsovety(ICollection<string> names) {
         List<string> lines = new List<string>();
-        lines.Add("# Сельсоветы, абоненты которых нужны в поиске - по одному в строке");
+        lines.Add("# Сельсоветы, абоненты которых показываются в поиске - по одному в строке (пусто - все)");
         lines.AddRange(names);
         Places.SaveSettings(SelsovetyFile, lines.ToArray());
     }
 
-    void FindMine() {
-        string[] names = ReadSelsovety();
-        mine = null;
-        mineNote = "";
-        if (names.Length == 0) {
-            Report.Line("Сельсоветы: список пуст - ищу по всей базе");
-        } else {
-            string report;
-            int[] rows = query.FindByNames(names, out report);
-            Report.Line(report);
-            if (rows.Length > 0) {
-                mine = rows;
-            } else {
-                mineNote = "   Названия сельсоветов в базе не нашлись - показана вся база. Нажмите \"Отчёт\" и пришлите его.";
-                Report.Line("    названия сельсоветов не нашлись ни в справочнике улиц, ни в полях абонента - отбор не применён");
+    // названия из файла -> сельсоветы справочника ("Боровлянский" находит "Боровлянский с/с")
+    Dictionary<string, bool> LoadSelection(LiveBase b) {
+        if (b.Dir == null) return null;
+        List<string> all = b.Dir.Selsovety;
+        string[] wanted = ReadSelsovety();
+        Dictionary<string, bool> sel = new Dictionary<string, bool>();
+        List<string> missing = new List<string>();
+        foreach (string w in wanted) {
+            string stem = StreetDirectory.Stem(w);
+            bool hit = false;
+            foreach (string name in all) {
+                string l = name.ToLowerInvariant();
+                if (stem.Length > 0 && (l.Contains(stem) || stem.Contains(StreetDirectory.Stem(name)))) { sel[name] = true; hit = true; }
             }
+            if (!hit) missing.Add(w);
         }
-        onlyMine.Enabled = mine != null;
-        onlyMine.Text = mine == null ? "Только мои сельсоветы (не нашлись)" : "Только мои сельсоветы (" + names.Length + ")";
-        ApplyScope();
+        Report.Line("Сельсоветы в справочниках (" + all.Count + "): " + string.Join(", ", all.ToArray()));
+        Report.Line("Выбраны для показа: " + (sel.Count == 0 || sel.Count == all.Count ? "все" : string.Join(", ", new List<string>(sel.Keys).ToArray()))
+            + (missing.Count > 0 ? "; не нашлись в справочниках: " + string.Join(", ", missing.ToArray()) : ""));
+        if (sel.Count == 0 || sel.Count == all.Count) return null;
+        return sel;
     }
 
-    void ApplyScope() {
-        if (query == null) return;
-        query.Scope = onlyMine.Checked ? mine : null;
-    }
-
-    void OnOnlyMineChanged() {
-        if (suppressMine || table == null) return;
-        if (!onlyMine.Checked && allowed != null) {
-            string q = "Без отбора программа прочитает всю базу (около " + totalInBase + " записей) - это может занять несколько минут "
-                + "и много памяти. Продолжить?";
-            if (MessageBox.Show(this, q, Text, MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) {
-                suppressMine = true;
-                onlyMine.Checked = true;
-                suppressMine = false;
-                return;
-            }
-        }
-        if (allowed == null && directory == null && mine != null) { ApplyScope(); ApplySearch(); return; }   // отбор по тексту - без перечитывания
-        LoadTable();
-    }
-
-    void EditSelsovety() {
-        Form d = new Form();
-        d.Text = "Мои сельсоветы";
-        d.Size = new Size(360, 380);
-        d.StartPosition = FormStartPosition.CenterParent;
-        d.MinimizeBox = false;
-        d.MaximizeBox = false;
-        Label l = new Label();
-        l.Text = "По одному сельсовету в строке:";
-        l.AutoSize = true;
-        l.Location = new Point(12, 10);
-        TextBox box = new TextBox();
-        box.Multiline = true;
-        box.AcceptsReturn = true;
-        box.ScrollBars = ScrollBars.Vertical;
-        box.Location = new Point(12, 30);
-        box.Size = new Size(320, 260);
-        box.Text = string.Join("\r\n", ReadSelsovety());
-        Button ok = new Button();
-        ok.Text = "OK";
-        ok.Location = new Point(170, 300);
-        ok.DialogResult = DialogResult.OK;
-        Button cancel = new Button();
-        cancel.Text = "Отмена";
-        cancel.Location = new Point(255, 300);
-        cancel.DialogResult = DialogResult.Cancel;
-        d.CancelButton = cancel;
-        d.Controls.AddRange(new Control[] { l, box, ok, cancel });
-        if (d.ShowDialog(this) != DialogResult.OK) return;
-        List<string> names = new List<string>();
-        foreach (string line in box.Text.Replace("\r\n", "\n").Split('\n')) if (line.Trim().Length > 0) names.Add(line.Trim());
-        SaveSelsovety(names.ToArray());
-        if (table == null) return;
-        suppressMine = true;
-        onlyMine.Checked = true;
-        suppressMine = false;
-        LoadTable();
-    }
-
-    void OpenBatch() {
-        if (table == null || loading) {
-            MessageBox.Show(this, "Подождите, пока загрузится база абонентов.", Text);
+    void UpdateSsButton() {
+        if (live == null || live.Dir == null || live.Dir.Selsovety.Count == 0) {
+            ssButton.Text = "Сельсоветы ▼";
             return;
         }
-        new BatchSearch(table, query, mode).Show(this);
+        int total = live.Dir.Selsovety.Count;
+        ssButton.Text = selected == null ? "Сельсоветы: все ▼" : "Сельсоветы: " + selected.Count + " из " + total + " ▼";
+    }
+
+    internal void ShowSelsovety() {
+        if (live == null) { MessageBox.Show(this, "Подождите, пока откроется база.", Text); return; }
+        if (live.Dir == null || live.Dir.Selsovety.Count == 0) {
+            MessageBox.Show(this, "В справочниках улиц не нашлось сельсоветов - отбирать не по чему. Нажмите \"Отчёт\" и пришлите его.", Text);
+            return;
+        }
+        List<string> all = live.Dir.Selsovety;
+        ToolStripDropDown dd = new ToolStripDropDown();
+        Panel panel = new Panel();
+        panel.Font = Font;
+        CheckedListBox list = new CheckedListBox();
+        list.Font = Font;
+        list.CheckOnClick = true;
+        list.IntegralHeight = false;
+        foreach (string name in all) list.Items.Add(name, selected == null || selected.ContainsKey(name));
+        int listHeight = Math.Min(all.Count, 20) * list.ItemHeight + 6;
+        int width = 240;
+        foreach (string name in all) width = Math.Max(width, TextRenderer.MeasureText(name, Font).Width + 50);
+        list.Location = new Point(0, 0);
+        list.Size = new Size(width, listHeight);
+        Button allButton = new Button();
+        allButton.Font = Font;
+        allButton.Text = "Все";
+        allButton.Location = new Point(4, listHeight + 4);
+        allButton.Size = new Size(80, 26);
+        Button noneButton = new Button();
+        noneButton.Font = Font;
+        noneButton.Text = "Снять все";
+        noneButton.Location = new Point(90, listHeight + 4);
+        noneButton.Size = new Size(100, 26);
+        panel.Size = new Size(width, listHeight + 34);
+        panel.Controls.Add(list);
+        panel.Controls.Add(allButton);
+        panel.Controls.Add(noneButton);
+        bool bulk = false;
+        list.ItemCheck += delegate { if (!bulk) BeginInvoke(new MethodInvoker(delegate { ApplySelection(list); })); };
+        EventHandler setAll = delegate(object s, EventArgs e) {
+            bulk = true;
+            for (int i = 0; i < list.Items.Count; i++) list.SetItemChecked(i, s == allButton);
+            bulk = false;
+            ApplySelection(list);
+        };
+        allButton.Click += setAll;
+        noneButton.Click += setAll;
+        ToolStripControlHost host = new ToolStripControlHost(panel);
+        host.Margin = Padding.Empty;
+        host.Padding = Padding.Empty;
+        host.AutoSize = false;
+        host.Size = panel.Size;
+        dd.Padding = Padding.Empty;
+        dd.Items.Add(host);
+        dd.Show(ssButton, new Point(0, ssButton.Height));
+        list.Focus();
+    }
+
+    void ApplySelection(CheckedListBox list) {
+        List<string> names = new List<string>();
+        foreach (object item in list.CheckedItems) names.Add((string)item);
+        Dictionary<string, bool> sel = new Dictionary<string, bool>();
+        foreach (string n in names) sel[n] = true;
+        selected = sel.Count == 0 || sel.Count == list.Items.Count ? null : sel;
+        SaveSelsovety(names);
+        UpdateSsButton();
+        Report.Search("Сельсоветы для показа: " + (selected == null ? "все" : string.Join(", ", names.ToArray())));
+        if (current != null) StartSearch(); else UpdateStatus();
+    }
+
+    internal BatchSearch LastBatch;
+
+    internal void OpenBatch() {
+        if (live == null) {
+            MessageBox.Show(this, "Подождите, пока откроется база.", Text);
+            return;
+        }
+        LastBatch = new BatchSearch(live, selected, mode, columns);
+        LastBatch.Show(this);
     }
 
     // Выбор папки и таблицы абонентов, если сама не нашлась или нашлась не та
@@ -2834,9 +4440,13 @@ public class AbonentSearch : Form {
         d.Shown += delegate { fill(null, EventArgs.Empty); };
 
         if (d.ShowDialog(this) != DialogResult.OK || list.SelectedItem == null) return;
-        folder = folderBox.Text.Trim();
-        tableName = ((TableInfo)list.SelectedItem).Name;
-        LoadTable();
+        string newFolder = folderBox.Text.Trim(), newTable = ((TableInfo)list.SelectedItem).Name;
+        if (string.Compare(newFolder, folder, StringComparison.OrdinalIgnoreCase) != 0 || string.Compare(newTable, tableName, StringComparison.OrdinalIgnoreCase) != 0) {
+            folder = newFolder;
+            tableName = newTable;
+            Places.SaveSettings(settingsFile, new string[] { folder, tableName, ((int)mode).ToString() });   // справочник искать заново
+        }
+        OpenBase();
     }
 }
 
@@ -2868,16 +4478,17 @@ public static class Spreadsheet {
 
 // Поиск по списку: вставляете столбик лицевых, счётчиков, ФИО или адресов - получаете итог по каждой строке
 public class BatchSearch : Form {
-    readonly DbfTable table;
-    readonly AbonentQuery query;
+    readonly LiveBase live;
+    readonly Dictionary<string, bool> selected;
     SearchMode mode;
-    readonly RadioButton[] modeButtons = new RadioButton[4];
+    internal readonly RadioButton[] modeButtons = new RadioButton[4];
     internal readonly TextBox input = new TextBox();
     readonly DataGridView grid = new DataGridView();
     internal readonly Label status = new Label();
     readonly Button findButton = new Button();
     readonly List<Item> items = new List<Item>();
     bool running;
+    volatile bool stop;
 
     const int MaxPerLine = 20;   // если по строке нашлось много - показываем первые
 
@@ -2885,15 +4496,16 @@ public class BatchSearch : Form {
         public int Line;
         public string Text;
         public string Result;
+        public SearchResult Res;  // где лежит найденная запись
         public int Row = -1;      // запись абонента или -1, если не найден
         public int Kind;          // 0 - найден один, 1 - несколько, 2 - не найден
     }
 
     static readonly string[] ModeNames = { "&Лицевые счета", "&Адреса", "Номера &счётчиков", "&ФИО" };
 
-    public BatchSearch(DbfTable table, AbonentQuery query, SearchMode mode) {
-        this.table = table;
-        this.query = query;
+    public BatchSearch(LiveBase live, Dictionary<string, bool> selected, SearchMode mode, AbonentQuery query) {
+        this.live = live;
+        this.selected = selected;
         this.mode = mode;
         Text = "Поиск по списку";
         Size = new Size(1000, 700);
@@ -2992,6 +4604,7 @@ public class BatchSearch : Form {
         split.Panel2.Controls.Add(bottom);
         Controls.Add(split);
         Shown += delegate { split.SplitterDistance = 230; input.Focus(); };
+        FormClosing += delegate { stop = true; };
     }
 
     void AddColumn(string title, int weight) {
@@ -3002,8 +4615,9 @@ public class BatchSearch : Form {
         grid.Columns.Add(c);
     }
 
+    // Ищем строку за строкой в фоне; кнопка "Найти" на это время - "Стоп"
     internal void Run() {
-        if (running) return;
+        if (running) { stop = true; return; }
         List<string> lines = new List<string>();
         foreach (string raw in input.Text.Replace("\r\n", "\n").Split('\n')) {
             string line = raw.Replace('\t', ' ').Trim();
@@ -3011,40 +4625,56 @@ public class BatchSearch : Form {
         }
         if (lines.Count == 0) { MessageBox.Show(this, "Вставьте список: по одному значению в строке.", Text); return; }
         running = true;
-        findButton.Enabled = false;
-        Cursor = Cursors.WaitCursor;
+        stop = false;
+        findButton.Text = "Стоп";
         items.Clear();
         grid.RowCount = 0;
-        DateTime started = DateTime.Now;
-        int single = 0, several = 0, none = 0;
-        try {
-            for (int i = 0; i < lines.Count; i++) {
-                if (i % 5 == 0) {
-                    status.Text = "Ищу: строка " + (i + 1) + " из " + lines.Count + "...";
-                    Application.DoEvents();
-                    if (IsDisposed) return;
-                }
-                List<int> found = query.Find(lines[i], mode);
-                if (found.Count == 0) {
-                    Add(i + 1, lines[i], "не найден", -1, 2);
+        SearchMode m = mode;
+        System.Threading.Thread th = new System.Threading.Thread(delegate() {
+            DateTime started = DateTime.Now;
+            int single = 0, several = 0, none = 0, done = 0;
+            for (int i = 0; i < lines.Count && !stop; i++) {
+                SearchResult r = live.Search(lines[i], m, selected, 100);
+                List<Item> add = new List<Item>();
+                if (r.Rows.Count == 0) {
+                    string why = r.Error != null ? "ошибка: " + r.Error : r.NoIndex ? "нет индекса для поиска"
+                        : r.Hidden > 0 ? "в выбранных сельсоветах нет (в других: " + r.Hidden + ")" : "не найден";
+                    add.Add(NewItem(i + 1, lines[i], why, null, -1, 2));
                     none++;
-                    continue;
+                } else {
+                    string result = r.Rows.Count == 1 ? "найден" : "найдено " + r.Rows.Count + (r.Rows.Count > MaxPerLine ? " (показаны " + MaxPerLine + ")" : "");
+                    if (r.Hidden > 0) result += " (+" + r.Hidden + " в других с/с)";
+                    if (r.Rows.Count == 1) single++; else several++;
+                    for (int k = 0; k < r.Rows.Count && k < MaxPerLine; k++)
+                        add.Add(NewItem(i + 1, lines[i], result, r, r.Rows[k], r.Rows.Count == 1 ? 0 : 1));
                 }
-                string result = found.Count == 1 ? "найден" : "найдено " + found.Count + (found.Count > MaxPerLine ? " (показаны " + MaxPerLine + ")" : "");
-                if (found.Count == 1) single++; else several++;
-                for (int k = 0; k < found.Count && k < MaxPerLine; k++) Add(i + 1, lines[i], result, found[k], found.Count == 1 ? 0 : 1);
+                done = i + 1;
+                int line = done;
+                Post(delegate {
+                    items.AddRange(add);
+                    grid.RowCount = items.Count;
+                    status.Text = "Ищу: строка " + line + " из " + lines.Count + "...   (кнопка \"Стоп\" - прервать)";
+                });
             }
-        } finally {
-            if (!IsDisposed) {
-                running = false;
-                findButton.Enabled = true;
-                Cursor = Cursors.Default;
-            }
-        }
+            double seconds = (DateTime.Now - started).TotalSeconds;
+            int s1 = single, s2 = several, s3 = none, d = done;
+            Post(delegate { Finish(lines, d, s1, s2, s3, seconds); });
+        });
+        th.IsBackground = true;
+        th.Start();
+    }
+
+    void Post(MethodInvoker m) {
+        try { if (!IsDisposed) BeginInvoke(m); } catch (Exception) { }
+    }
+
+    void Finish(List<string> lines, int done, int single, int several, int none, double seconds) {
+        running = false;
+        findButton.Text = "Найти";
         grid.RowCount = items.Count;
         grid.Invalidate();
-        status.Text = "Строк в списке: " + lines.Count + ". Найдено по одному абоненту: " + single
-            + ", по несколько: " + several + ", не найдено: " + none + ". Двойной щелчок - карточка.";
+        status.Text = (done < lines.Count ? "Остановлено на строке " + done + " из " + lines.Count + ". " : "Строк в списке: " + lines.Count + ". ")
+            + "Найдено по одному абоненту: " + single + ", по несколько: " + several + ", не найдено: " + none + ". Двойной щелчок - карточка.";
         Dictionary<int, int> lengths = new Dictionary<int, int>();
         foreach (string line in lines) {
             int digits = 0;
@@ -3056,26 +4686,27 @@ public class BatchSearch : Form {
         List<string> shape = new List<string>();
         foreach (KeyValuePair<int, int> kv in lengths) shape.Add(kv.Key + " цифр - " + kv.Value);
         Report.Search("Поиск по списку, в списке: " + ModeNames[(int)mode].Replace("&", "").ToLowerInvariant() + "; строк " + lines.Count
-            + ", найдено по одному " + single + ", по несколько " + several + ", не найдено " + none
-            + ", время " + (DateTime.Now - started).TotalSeconds.ToString("0.0") + " с; цифр в строках: " + string.Join(", ", shape.ToArray()));
+            + (done < lines.Count ? " (остановлен на " + done + ")" : "") + ", найдено по одному " + single + ", по несколько " + several + ", не найдено " + none
+            + ", время " + seconds.ToString("0.0") + " с; цифр в строках: " + string.Join(", ", shape.ToArray()));
     }
 
-    void Add(int line, string text, string result, int row, int kind) {
+    static Item NewItem(int line, string text, string result, SearchResult res, int row, int kind) {
         Item it = new Item();
         it.Line = line;
         it.Text = text;
         it.Result = result;
+        it.Res = res;
         it.Row = row;
         it.Kind = kind;
-        items.Add(it);
+        return it;
     }
 
     string Cell(Item it, int column) {
         if (column == 0) return it.Line.ToString();
         if (column == 1) return it.Text;
         if (column == 2) return it.Result;
-        if (it.Row < 0) return "";
-        return query.CellText(it.Row, query.Columns[column - 3]);
+        if (it.Row < 0 || it.Res == null) return "";
+        return it.Res.Query.CellText(it.Row, it.Res.Query.Columns[column - 3]);
     }
 
     void OnCellValueNeeded(object sender, DataGridViewCellValueEventArgs e) {
@@ -3091,7 +4722,8 @@ public class BatchSearch : Form {
 
     void OpenCard(int index) {
         if (index < 0 || index >= items.Count || items[index].Row < 0) return;
-        Card.Show(this, table, items[index].Row, query.CardExtra(items[index].Row));
+        Item it = items[index];
+        Card.Show(this, it.Res.Table, it.Row, it.Res.Query.CardExtra(it.Row));
     }
 
     void Export() {
