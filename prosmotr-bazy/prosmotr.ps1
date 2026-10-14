@@ -1385,7 +1385,9 @@ public class SearchResult {
     public Dictionary<int, int> Tariff = new Dictionary<int, int>();      // строка -> номер тарифа (T1, T2...)
     public Dictionary<int, string> Power = new Dictionary<int, string>(); // строка -> мощность (доп. сведения)
     public Dictionary<int, bool> Added = new Dictionary<int, bool>();     // строки, которые не искали: другие тарифы того же счётчика
-    public Dictionary<int, string> Group = new Dictionary<int, string>(); // строка -> основной лицевой её группы тарифов
+    public Dictionary<int, string> Group = new Dictionary<int, string>(); // строка -> её группа (рамка): тарифы одного счётчика, абоненты одного адреса
+    public Dictionary<int, string> Related = new Dictionary<int, string>(); // добавленные по адресу или ФИО -> почему
+    public Dictionary<int, bool> Orange = new Dictionary<int, bool>();      // на адресе больше одного счётчика - оранжевым
 
     public string GroupOf(int row) {
         string g;
@@ -2262,47 +2264,34 @@ public class LiveBase {
                     && !Dir.InSelsovety(DbfTable.Format(part.GetValue(row, ul, null), true), selsovety)) { res.Hidden++; continue; }
                 res.Rows.Add(row);
             }
-            if (Extra != null && res.Rows.Count > 0) AddExtras(res);
+            if (res.Rows.Count > 0) AddExtras(res);
         }
         res.Seconds = (DateTime.Now - started).TotalSeconds;
         return res;
     }
 
     // Тариф (T1, T2...) и мощность для найденных; лицевые одного счётчика - рядом, по порядку тарифов
+    // Дополнительный поиск к найденному: другие тарифы того же счётчика (ABDIF_T), другие счётчики на том же
+    // адресе и абоненты с тем же ФИО в том же доме. Найденное и добавленное собирается в группы (рамка).
     void AddExtras(SearchResult res) {
         int nab = res.Table.FieldIndex("NAB");
         if (nab < 0) return;
         Dictionary<int, string> mainOf = new Dictionary<int, string>();
-        foreach (int row in res.Rows) {
-            string v = DbfTable.Format(res.Table.GetValue(row, nab, null), true);
-            string main;
-            int t = Extra.Tariff(v, out main);
-            if (t > 0) { res.Tariff[row] = t; mainOf[row] = main == null ? ExtraInfo.Nab(v) : main; }
+        if (Extra != null) {
+            foreach (int row in res.Rows) {
+                string v = DbfTable.Format(res.Table.GetValue(row, nab, null), true);
+                string main;
+                int t = Extra.Tariff(v, out main);
+                if (t > 0) { res.Tariff[row] = t; mainOf[row] = main == null ? ExtraInfo.Nab(v) : main; }
+            }
+            if (res.Tariff.Count > 0) AddSiblings(res, nab, mainOf);
         }
-        if (res.Tariff.Count > 0) AddSiblings(res, nab, mainOf);
-        foreach (KeyValuePair<int, string> kv in mainOf) res.Group[kv.Key] = kv.Value;
+        try { AddRelated(res, nab, mainOf); }
+        catch (Exception ex) { res.How += "; поиск по адресу/ФИО не удался: " + ex.Message; }
+        Arrange(res, mainOf);
+        if (Extra == null) return;
         List<string> nabs = new List<string>();
         foreach (int row in res.Rows) if (nabs.Count < 100) nabs.Add(DbfTable.Format(res.Table.GetValue(row, nab, null), true));
-        if (res.Tariff.Count > 0) {
-            // группа тарифов встаёт на место первой из её строк
-            Dictionary<string, int> groupAt = new Dictionary<string, int>();
-            Dictionary<int, int> pos = new Dictionary<int, int>();
-            for (int i = 0; i < res.Rows.Count; i++) {
-                int row = res.Rows[i];
-                string m;
-                if (mainOf.TryGetValue(row, out m)) { if (!groupAt.ContainsKey(m)) groupAt[m] = i; pos[row] = groupAt[m]; }
-                else pos[row] = i;
-            }
-            List<int> order = new List<int>(res.Rows);
-            Dictionary<int, int> original = new Dictionary<int, int>();
-            for (int i = 0; i < order.Count; i++) original[order[i]] = i;
-            order.Sort(delegate(int a, int b) {
-                int c = pos[a].CompareTo(pos[b]);
-                if (c == 0) { int ta, tb; res.Tariff.TryGetValue(a, out ta); res.Tariff.TryGetValue(b, out tb); c = ta.CompareTo(tb); }
-                return c != 0 ? c : original[a].CompareTo(original[b]);
-            });
-            res.Rows = order;
-        }
         try {
             Dictionary<string, string> power = Extra.Power(nabs);
             foreach (int row in res.Rows) {
@@ -2312,6 +2301,198 @@ public class LiveBase {
         } catch (Exception ex) {
             res.How += "; мощность не прочиталась: " + ex.Message;
         }
+    }
+
+    string Field(DbfTable t, int row, int field) {
+        return field < 0 ? "" : DbfTable.Format(t.GetValue(row, field, null), true).Trim();
+    }
+
+    // адрес целиком (улица, дом, корпус, квартира) - для сравнения; пусто, если дома нет
+    string AddrKey(DbfTable t, int row) {
+        string dom = AddressMatch.Num(Field(t, row, t.FieldIndex("DOM")));
+        if (dom.Length == 0) return "";
+        return StreetDirectory.NormalizeCode(Field(t, row, t.FieldIndex("UL"))) + "|" + dom + "|"
+            + AddressMatch.Num(Field(t, row, t.FieldIndex("KOR"))) + "|" + AddressMatch.Num(Field(t, row, t.FieldIndex("KV")));
+    }
+
+    string HouseKey(DbfTable t, int row) {
+        string dom = AddressMatch.Num(Field(t, row, t.FieldIndex("DOM")));
+        return dom.Length == 0 ? "" : StreetDirectory.NormalizeCode(Field(t, row, t.FieldIndex("UL"))) + "|" + dom;
+    }
+
+    static string FioKey(string fio) {
+        StringBuilder sb = new StringBuilder();
+        foreach (string w in fio.ToLowerInvariant().Replace('ё', 'е').Split(new char[] { ' ', '.', ',', '\t' }, StringSplitOptions.RemoveEmptyEntries)) {
+            if (sb.Length > 0) sb.Append(' ');
+            sb.Append(w);
+        }
+        return sb.ToString();
+    }
+
+    // Другие абоненты того же дома: с тем же адресом (второй счётчик) или с тем же ФИО. Дом читается по индексу
+    // улица+дом; ФИО ищется только в доме найденного (индекса по ФИО в базе нет).
+    void AddRelated(SearchResult res, int nab, Dictionary<int, string> mainOf) {
+        DbfTable tb = res.Table;
+        int ulF = tb.FieldIndex("UL"), domF = tb.FieldIndex("DOM"), fioF = tb.FieldIndex("FIO");
+        if (ulF < 0 || domF < 0) return;
+        IndexTag t = TagFor("UL", true);
+        if (t == null || t.Terms.Count < 2 || t.TermFields[1] != "DOM") return;
+        List<int> searched = new List<int>();
+        foreach (int row in res.Rows) if (!res.Added.ContainsKey(row)) searched.Add(row);
+        // дома найденных (не больше 30 - иначе поиск по общему адресу читал бы слишком много)
+        Dictionary<string, List<int>> houses = new Dictionary<string, List<int>>();
+        foreach (int row in searched) {
+            string h = HouseKey(tb, row);
+            if (h.Length == 0) continue;
+            List<int> list;
+            if (!houses.TryGetValue(h, out list)) { if (houses.Count >= 30) continue; list = new List<int>(); houses[h] = list; }
+            list.Add(row);
+        }
+        if (houses.Count == 0) return;
+        Dictionary<int, int> rowOfRec = new Dictionary<int, int>();
+        for (int row = 0; row < tb.Count; row++) rowOfRec[tb.RecNos[row]] = row;
+        Seeker s = new Seeker();
+        try {
+            foreach (List<int> list in houses.Values) {
+                int r0 = list[0];
+                s.Seek(t, KeyFor(t, new string[] { Field(tb, r0, ulF), Field(tb, r0, domF) }, false));
+            }
+        } finally {
+            s.Close();
+        }
+        List<int> missing = new List<int>();
+        foreach (int rec in s.Found.Keys) if (!rowOfRec.ContainsKey(rec)) missing.Add(rec);
+        bool grown = false;
+        if (missing.Count > 0) {
+            int deleted;
+            DbfTable more;
+            using (FileStream fs = OpenTable()) more = Fetch(fs, missing, 3000, out deleted);
+            for (int row = 0; row < more.Count; row++) {
+                int start;
+                byte[] buf = more.RecordBuffer(row, out start);
+                tb.AddRecord(buf, start, more.RecNos[row]);
+                rowOfRec[more.RecNos[row]] = tb.Count - 1;
+                grown = true;
+            }
+        }
+        Dictionary<int, bool> shown = new Dictionary<int, bool>();
+        foreach (int row in res.Rows) shown[row] = true;
+        int added = 0;
+        foreach (int rec in s.Found.Keys) {
+            int h;
+            if (!rowOfRec.TryGetValue(rec, out h) || shown.ContainsKey(h)) continue;
+            List<int> list;
+            if (!houses.TryGetValue(HouseKey(tb, h), out list)) continue;   // начало номера дома совпало, а дом другой ("180")
+            string addr = AddrKey(tb, h), fio = fioF < 0 ? "" : FioKey(Field(tb, h, fioF));
+            string hNab = ExtraInfo.Nab(Field(tb, h, nab));
+            foreach (int r in list) {
+                if (ExtraInfo.Nab(Field(tb, r, nab)) == hNab) continue;
+                string why = null;
+                if (addr.Length > 0 && addr == AddrKey(tb, r)) why = "тот же адрес - ещё один счётчик";
+                else if (fio.Length > 0 && fioF >= 0 && fio == FioKey(Field(tb, r, fioF))) why = "то же ФИО в этом доме";
+                if (why == null) continue;
+                string main;
+                if (Extra != null) {
+                    int tr = Extra.Tariff(Field(tb, h, nab), out main);
+                    if (tr > 0) {
+                        res.Tariff[h] = tr;
+                        mainOf[h] = main == null ? hNab : main;
+                        string rm;
+                        if (mainOf.TryGetValue(r, out rm) && rm == mainOf[h]) { shown[h] = true; break; }   // это тариф того же счётчика
+                    }
+                }
+                res.Rows.Add(h);
+                res.Added[h] = true;
+                res.Related[h] = why;
+                shown[h] = true;
+                added++;
+                break;
+            }
+        }
+        if (grown) {
+            AbonentQuery q = new AbonentQuery(tb, Dir);
+            q.Partial = res.Query.Partial;
+            q.Address = res.Query.Address;
+            q.LastExplain = res.Query.LastExplain;
+            q.Miss = res.Query.Miss;
+            res.Query = q;
+        }
+        res.How += "; домов проверено на второй счётчик/то же ФИО: " + houses.Count + ", добавлено абонентов: " + added;
+    }
+
+    // Группы (рамка): тарифы одного счётчика, абоненты одного адреса и добавленные к найденному.
+    // В группе больше одного счётчика - не тарифные строки оранжевым. Группа стоит на месте первой её строки.
+    void Arrange(SearchResult res, Dictionary<int, string> mainOf) {
+        DbfTable tb = res.Table;
+        Dictionary<int, int> parent = new Dictionary<int, int>();
+        foreach (int row in res.Rows) parent[row] = row;
+        Dictionary<string, int> firstOf = new Dictionary<string, int>();
+        foreach (int row in res.Rows) {
+            string m;
+            if (mainOf.TryGetValue(row, out m)) Join(parent, firstOf, "T" + m, row);
+            string a = AddrKey(tb, row);
+            if (a.Length > 0) Join(parent, firstOf, "A" + a, row);
+        }
+        // один человек (то же ФИО) в одном доме - тоже вместе
+        int fioF = tb.FieldIndex("FIO");
+        if (fioF >= 0)
+            foreach (int row in res.Rows) {
+                string h = HouseKey(tb, row), f = FioKey(Field(tb, row, fioF));
+                if (h.Length > 0 && f.Length > 0) Join(parent, firstOf, "F" + h + "|" + f, row);
+            }
+        Dictionary<int, List<int>> members = new Dictionary<int, List<int>>();
+        foreach (int row in res.Rows) {
+            int root = Find(parent, row);
+            List<int> l;
+            if (!members.TryGetValue(root, out l)) { l = new List<int>(); members[root] = l; }
+            l.Add(row);
+        }
+        Dictionary<int, int> original = new Dictionary<int, int>();
+        for (int i = 0; i < res.Rows.Count; i++) original[res.Rows[i]] = i;
+        Dictionary<int, int> clusterPos = new Dictionary<int, int>(), unitPos = new Dictionary<int, int>();
+        Dictionary<string, int> unitFirst = new Dictionary<string, int>();
+        foreach (KeyValuePair<int, List<int>> kv in members) {
+            List<int> l = kv.Value;
+            int pos = int.MaxValue;
+            Dictionary<string, bool> units = new Dictionary<string, bool>();
+            foreach (int row in l) {
+                pos = Math.Min(pos, original[row]);
+                string m;
+                string unit = mainOf.TryGetValue(row, out m) ? "T" + m : "R" + row;
+                units[unit] = true;
+                int up;
+                if (!unitFirst.TryGetValue(unit, out up) || original[row] < up) unitFirst[unit] = original[row];
+            }
+            foreach (int row in l) {
+                clusterPos[row] = pos;
+                if (l.Count > 1) res.Group[row] = "G" + kv.Key;
+                if (units.Count > 1 && !res.Tariff.ContainsKey(row)) res.Orange[row] = true;
+            }
+        }
+        foreach (int row in res.Rows) {
+            string m;
+            unitPos[row] = unitFirst[mainOf.TryGetValue(row, out m) ? "T" + m : "R" + row];
+        }
+        List<int> order = new List<int>(res.Rows);
+        order.Sort(delegate(int x, int y) {
+            int c = clusterPos[x].CompareTo(clusterPos[y]);
+            if (c == 0) c = unitPos[x].CompareTo(unitPos[y]);
+            if (c == 0) { int tx, ty; res.Tariff.TryGetValue(x, out tx); res.Tariff.TryGetValue(y, out ty); c = tx.CompareTo(ty); }
+            return c != 0 ? c : original[x].CompareTo(original[y]);
+        });
+        res.Rows = order;
+    }
+
+    static int Find(Dictionary<int, int> parent, int x) {
+        while (parent[x] != x) { parent[x] = parent[parent[x]]; x = parent[x]; }
+        return x;
+    }
+
+    static void Join(Dictionary<int, int> parent, Dictionary<string, int> firstOf, string key, int row) {
+        int first;
+        if (!firstOf.TryGetValue(key, out first)) { firstOf[key] = row; return; }
+        int a = Find(parent, first), b = Find(parent, row);
+        if (a != b) parent[b] = a;
     }
 
     // Нашёлся лицевой одного из тарифов - добавляем остальные тарифы того же счётчика (их не искали - помечаются)
@@ -5104,7 +5285,7 @@ public class AbonentSearch : Form {
         if (r == null) return;
         string line = "Поиск по: " + Prompts[(int)r.Mode] + (r.Partial ? " (частичное совпадение)" : "") + (r.Scanned ? " (перебором)" : "") + "; "
             + (r.NoIndex ? "нет подходящего индекса" : r.How) + (r.Query != null && r.Query.LastExplain.Length > 0 ? "; " + r.Query.LastExplain : "")
-            + (r.Note.Length > 0 ? "; " + r.Note : "") + " -> найдено " + r.Searched + (r.Added.Count > 0 ? " (+" + r.Added.Count + " других тарифов)" : "") + (r.Hidden > 0 ? ", скрыто (другие сельсоветы) " + r.Hidden : "")
+            + (r.Note.Length > 0 ? "; " + r.Note : "") + " -> найдено " + r.Searched + (r.Added.Count > 0 ? " (+" + (r.Added.Count - r.Related.Count) + " других тарифов, +" + r.Related.Count + " по адресу/ФИО)" : "") + (r.Hidden > 0 ? ", скрыто (другие сельсоветы) " + r.Hidden : "")
             + (r.TooMany ? ", показана часть" : "") + ", " + r.Seconds.ToString("0.00") + " с";
         if (line == lastLogged) return;
         lastLogged = line;
@@ -5469,7 +5650,9 @@ public class AbonentSearch : Form {
                 : "Ничего не найдено. " + (!r.TooMany && r.Query != null ? r.Query.Miss : "") + tip) + took + "   " + where;
         else
             status.Text = "Найдено: " + r.Searched + (r.TooMany ? " (нашлось очень много, показана часть - уточните запрос)" : "")
-                + (r.Added.Count > 0 ? ", и ещё " + r.Added.Count + " лицевых других тарифов тех же счётчиков (номер красным)" : "")
+                + (r.Added.Count - r.Related.Count > 0 ? ", ещё " + (r.Added.Count - r.Related.Count) + " - другие тарифы тех же счётчиков" : "")
+                + (r.Related.Count > 0 ? ", ещё " + r.Related.Count + " - на том же адресе или с тем же ФИО в доме" : "")
+                + (r.Added.Count > 0 ? " (их номер красным)" : "")
                 + (r.Hidden > 0 ? ", ещё " + r.Hidden + " в других сельсоветах скрыто" : "")
                 + ". Enter или двойной щелчок - карточка." + took + "   " + where;
     }
@@ -5766,8 +5949,11 @@ public static class ResultColumns {
     public static readonly Color AddedColor = Color.FromArgb(210, 0, 0);
 
     // строка - другой тариф того же счётчика (её не искали): номер абонента красным
+    public static readonly Color OrangeColor = Color.FromArgb(255, 205, 150);
+
     public static void Format(SearchResult r, int row, int kind, DataGridViewCellStyle style) {
         if (r.Tariff.ContainsKey(row)) style.BackColor = TariffColor;
+        else if (r.Orange.ContainsKey(row)) style.BackColor = OrangeColor;
         if (r.Added.ContainsKey(row) && kind >= 0 && string.Compare(r.Table.Fields[kind].Name, "NAB", StringComparison.OrdinalIgnoreCase) == 0) {
             style.ForeColor = AddedColor;
             style.SelectionForeColor = Color.FromArgb(255, 190, 190);
@@ -5808,6 +5994,9 @@ public static class ResultColumns {
         if (street != null) first.AddRange(street);
         int t;
         if (r.Tariff.TryGetValue(row, out t)) { first.Add("Тариф"); first.Add("T" + t + " (лицевые одного счётчика: таблица ABDIF_T)"); }
+        string why;
+        if (r.Related.TryGetValue(row, out why)) { first.Add("Добавлен к найденному"); first.Add(why); }
+        else if (r.Orange.ContainsKey(row)) { first.Add("На адресе"); first.Add("больше одного счётчика (подсвечено оранжевым)"); }
         List<string> after = null;
         int nab = r.Table.FieldIndex("NAB");
         if (x != null && nab >= 0) {
@@ -5975,7 +6164,7 @@ public class BatchSearch : Form {
         bottom.Height = 34;
         status.Dock = DockStyle.Fill;
         status.TextAlign = ContentAlignment.MiddleLeft;
-        status.Text = "Найденные - белым, несколько на одну строку - жёлтым, тарифы (T1, T2...) - зелёным, не найденные - красным; номер красным - другой тариф того же счётчика. Двойной щелчок - карточка.";
+        status.Text = "Найденные - белым, несколько - жёлтым, тарифы (T1, T2...) - зелёным, 2 счётчика на адресе - оранжевым, не найденные - красным; номер красным - добавлено к найденному. Двойной щелчок - карточка.";
         Button excel = new Button();
         excel.Text = "В Excel";
         excel.Dock = DockStyle.Right;
@@ -6031,7 +6220,8 @@ public class BatchSearch : Form {
                 } else {
                     int n = r.Searched;
                     string result = n == 1 ? "найден" : "найдено " + n + (r.Rows.Count > MaxPerLine ? " (показаны " + MaxPerLine + ")" : "");
-                    if (r.Added.Count > 0) result += " (+" + r.Added.Count + " др. тариф)";
+                    if (r.Added.Count > r.Related.Count) result += " (+" + (r.Added.Count - r.Related.Count) + " др. тариф)";
+                    if (r.Related.Count > 0) result += " (+" + r.Related.Count + " адрес/ФИО)";
                     if (r.Hidden > 0) result += " (+" + r.Hidden + " в других с/с)";
                     if (n == 1) single++; else several++;
                     for (int k = 0; k < r.Rows.Count && k < MaxPerLine; k++)
