@@ -28,6 +28,9 @@ public class DbfField {
 // Сообщает, сколько записей уже прочитано (чтобы окно не "зависало" на больших таблицах)
 public delegate void LoadProgress(int done, int expected);
 
+// Решает по записи как она есть в файле, оставлять ли её (например, только улицы своих сельсоветов)
+public delegate bool RecordFilter(byte[] record, int start);
+
 // Слово поиска, переведённое в байты кодировки таблицы
 public class SearchWord {
     public byte[] Bytes;
@@ -96,6 +99,9 @@ public class DbfTable {
     public int Total;     // сколько неудалённых записей в файле
     public int Deleted;
     public int Expected;  // сколько записей написано в заголовке файла
+    public long BytesRead;
+    public double Seconds;
+    byte[] headerBytes;
 
     const int BlockRecords = 4096;   // записи хранятся кусками, без одного огромного массива
     int recordLength;
@@ -111,15 +117,22 @@ public class DbfTable {
 
     // query - если задан, в памяти остаются только подходящие записи (поиск во всех таблицах)
     public static DbfTable Load(string path, bool otherEncoding, string query, LoadProgress progress) {
-        return LoadCore(path, otherEncoding, query, progress, false);
+        return LoadCore(path, otherEncoding, query, progress, false, null, 0);
+    }
+
+    // keep - какие записи оставлять; maxRecords > 0 - прочитать только начало файла
+    public static DbfTable Load(string path, RecordFilter keep, LoadProgress progress, int maxRecords) {
+        return LoadCore(path, false, null, progress, false, keep, maxRecords);
     }
 
     // Только заголовок: список полей и число записей, без чтения самих записей
     public static DbfTable LoadHeader(string path) {
-        return LoadCore(path, false, null, null, true);
+        return LoadCore(path, false, null, null, true, null, 0);
     }
 
-    static DbfTable LoadCore(string path, bool otherEncoding, string query, LoadProgress progress, bool headerOnly) {
+    static DbfTable LoadCore(string path, bool otherEncoding, string query, LoadProgress progress, bool headerOnly,
+                             RecordFilter keep, int maxRecords) {
+        DateTime started = DateTime.Now;
         DbfTable t = new DbfTable();
         t.FilePath = path;
         using (FileStream fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 1 << 16)) {
@@ -154,6 +167,9 @@ public class DbfTable {
             if (offset > recordLen)
                 throw new InvalidDataException("Не удалось разобрать структуру таблицы.");
             t.Expected = count;
+            t.headerBytes = new byte[headerLen];
+            Buffer.BlockCopy(head, 0, t.headerBytes, 0, 32);
+            Buffer.BlockCopy(desc, 0, t.headerBytes, 32, desc.Length);
             if (headerOnly) return t;
 
             // поисковая копия: только текстовые поля (двоичные числа и ссылки на примечания - пропуск),
@@ -175,16 +191,19 @@ public class DbfTable {
             byte[] chunk = new byte[chunkRecords * recordLen];
             byte[] low = new byte[t.lowerLength];
             int index = 0;
+            int limit = maxRecords > 0 ? Math.Min(count, maxRecords) : count;
             bool end = false;
-            while (index < count && !end) {
-                int want = Math.Min(chunkRecords, count - index);
+            while (index < limit && !end) {
+                int want = Math.Min(chunkRecords, limit - index);
                 int got = ReadUpTo(fs, chunk, want * recordLen) / recordLen;
+                t.BytesRead += (long)got * recordLen;
                 for (int r = 0; r < got; r++) {
                     int start = r * recordLen;
                     byte flag = chunk[start];
                     if (flag == 0x1A) { end = true; break; }          // конец файла
                     if (flag == (byte)'*') { t.Deleted++; continue; }  // удалённая запись
                     t.Total++;
+                    if (keep != null && !keep(chunk, start)) continue;
                     for (int j = 0; j < fieldCount; j++) {
                         DbfField f = t.Fields[j];
                         int src = start + f.Offset, dst = t.lowerOffsets[j];
@@ -196,10 +215,29 @@ public class DbfTable {
                 }
                 index += got;
                 if (got < want) break;   // файл короче, чем написано в его заголовке
-                if (progress != null) progress(index, count);
+                if (progress != null) progress(index, limit);
             }
         }
+        t.Seconds = (DateTime.Now - started).TotalSeconds;
         return t;
+    }
+
+    // Сохранить записи, что в памяти, отдельным файлом DBF той же структуры (быстрый запуск в следующий раз)
+    public void SaveCopy(string file) {
+        string tmp = file + ".tmp";
+        using (FileStream fs = new FileStream(tmp, FileMode.Create, FileAccess.Write, FileShare.None, 1 << 16)) {
+            byte[] head = (byte[])headerBytes.Clone();
+            byte[] n = BitConverter.GetBytes(Count);
+            Buffer.BlockCopy(n, 0, head, 4, 4);
+            fs.Write(head, 0, head.Length);
+            for (int b = 0; b < data.Count; b++) {
+                int records = Math.Min(BlockRecords, Count - b * BlockRecords);
+                fs.Write(data[b], 0, records * recordLength);
+            }
+            fs.WriteByte(0x1A);
+        }
+        if (File.Exists(file)) File.Delete(file);
+        File.Move(tmp, file);
     }
 
     void BuildLowerMap() {
@@ -1063,7 +1101,11 @@ public static class FieldNames {
                 "GIL", "Жильцов", "KLG", "Льготных жильцов", "TPO", "Тип помещения", "ROZ", "Розеток",
                 "TOS", "Точек освещения", "NCH", "№ счётчика", "TIPCH", "Тип счётчика", "RAS", "Разрядность",
                 "GODPR", "Год поверки", "KVP", "Квартал поверки", "DZA", "Дата замены счётчика",
-                "PZS", "Показание при замене", "NSC", "№ снятого счётчика" };
+                "PZS", "Показание при замене", "NSC", "№ снятого счётчика", "TSC", "Тип снятого счётчика",
+                "NPOK", "Показание при установке", "DPR", "Дата проверки", "POK", "Показание", "PPR", "Пр. проверки",
+                "OPOK", "Оплаченное показание", "PRA", "Признак архива", "DOT", "Дата отключения", "PRP", "Пр. пл.",
+                "DUC", "Дата учёта без пр.", "DOK", "Дата окончания", "N_UCH", "№ участка", "N_F", "№ фидера",
+                "LS_ERIP", "Л/С ЕРИП" };
             for (int i = 0; i + 1 < pairs.Length; i += 2) names[pairs[i]] = pairs[i + 1];
         }
         string label;
@@ -1213,10 +1255,14 @@ public static class Report {
         Line("Windows " + Environment.OSVersion.Version + ", .NET " + Environment.Version);
     }
 
+    static readonly object sync = new object();
+
     public static void Line(string text) {
         if (path == null) return;
-        try { File.AppendAllText(path, text + "\r\n", Encoding.UTF8); }
-        catch (Exception) { }
+        lock (sync) {
+            try { File.AppendAllText(path, text + "\r\n", Encoding.UTF8); }
+            catch (Exception) { }
+        }
     }
 
     public static void Search(string text) {
@@ -1268,13 +1314,17 @@ public static class Report {
     }
 }
 
-// Справочник улиц. Если у абонента в поле UL хранится код улицы (5114), то название улицы,
-// населённый пункт и сельсовет программа берёт из отдельной таблицы - ищем её сами.
+// Справочник улиц. У абонента в поле UL хранится код улицы. Название улицы берём из справочника
+// улиц (у вас STREET.DBF), а населённый пункт и сельсовет - из справочников, на которые он ссылается
+// своими кодами (IDNP -> таблица населённых пунктов, IDSS -> таблица сельсоветов). Их ищем сами:
+// таблица, где есть поле с тем же именем, каждый код встречается один раз и при нём есть текст.
 public class StreetDirectory {
     public string TableName;
     public string KeyField;
     readonly Dictionary<string, string> names = new Dictionary<string, string>();
     readonly Dictionary<string, string> lowerNames = new Dictionary<string, string>();
+
+    public int Count { get { return names.Count; } }
 
     public string Name(string code) {
         string s;
@@ -1310,50 +1360,214 @@ public class StreetDirectory {
         return false;
     }
 
+    static string Value(DbfTable t, int row, int field) {
+        return DbfTable.Format(t.GetValue(row, field, null), true).Trim();
+    }
+
     // Коды улиц у абонентов, если в UL почти везде числа; иначе null (там названия)
     public static List<string> Codes(DbfTable abon, int ul) {
         if (ul < 0) return null;
         Dictionary<string, bool> codes = new Dictionary<string, bool>();
         int filled = 0, numeric = 0;
         for (int r = 0; r < abon.Count; r++) {
-            string v = DbfTable.Format(abon.GetValue(r, ul, null), true).Trim();
+            string v = Value(abon, r, ul);
             if (v.Length == 0) continue;
             filled++;
             if (!IsDigits(v.Replace(",00", "").Replace(".00", ""))) continue;
             numeric++;
             codes[NormalizeCode(v)] = true;
         }
-        Report.Line("Поле улицы (UL): заполнено " + filled + ", из них чисел " + numeric + ", разных чисел " + codes.Count
+        Report.Line("Поле улицы (UL) в первых " + abon.Count + " записях: заполнено " + filled + ", из них чисел " + numeric + ", разных чисел " + codes.Count
             + (filled > 0 && numeric >= filled * 0.9 ? " -> в UL коды улиц, нужен справочник" : " -> в UL названия, справочник не нужен"));
         if (filled == 0 || numeric < filled * 0.9) return null;
         return new List<string>(codes.Keys);
     }
 
-    public static StreetDirectory Load(string path, string keyField) {
+    // строка таблицы-ссылки: её текст и (на один уровень глубже) тексты её собственных ссылок
+    class LinkRow {
+        public string Text;
+        public Dictionary<string, string> Nested = new Dictionary<string, string>();
+    }
+
+    // Найти таблицу, где поле field - уникальный код с текстом при нём (например, IDNP в таблице населённых пунктов)
+    static Dictionary<string, LinkRow> FindLink(string folder, List<TableInfo> tables, string field, List<string> needed,
+                                                string exclude, bool nested, out string found) {
+        found = null;
+        foreach (TableInfo info in tables) {
+            if (info.Records < 1 || info.Records > 50000) continue;
+            if (string.Compare(info.Name, exclude, StringComparison.OrdinalIgnoreCase) == 0) continue;
+            string path = Path.Combine(folder, info.Name);
+            DbfTable t;
+            int k;
+            try {
+                DbfTable h = DbfTable.LoadHeader(path);
+                k = h.FieldIndex(field);
+                if (k < 0) continue;
+                bool text = false;
+                foreach (DbfField f in h.Fields) if (f.Type == 'C' && f.Length >= 3) text = true;
+                if (!text) continue;
+                t = DbfTable.Load(path, false);
+            } catch (Exception) {
+                continue;
+            }
+            Dictionary<string, LinkRow> map = new Dictionary<string, LinkRow>();
+            int filled = 0, withText = 0;
+            for (int r = 0; r < t.Count; r++) {
+                string code = NormalizeCode(Value(t, r, k));
+                if (code.Length == 0 || code == "0") continue;
+                filled++;
+                if (map.ContainsKey(code)) continue;
+                LinkRow row = new LinkRow();
+                // сокращения ("аг.", "д.", "г.") - вперёд: "аг. Боровляны", а не "Боровляны аг."
+                List<string> words = new List<string>();
+                int front = 0;
+                for (int j = 0; j < t.Fields.Count; j++) {
+                    if (j == k || t.Fields[j].Type != 'C') continue;
+                    string v = Value(t, r, j);
+                    if (v.Length == 0 || !HasLetter(v)) continue;
+                    if (v.Length <= 5 && v.EndsWith(".")) words.Insert(front++, v);
+                    else words.Add(v);
+                }
+                row.Text = string.Join(" ", words.ToArray());
+                if (row.Text.Length > 0) withText++;
+                map[code] = row;
+            }
+            if (filled == 0 || map.Count < filled * 0.95 || withText < map.Count * 0.5) continue;   // код должен быть уникальным, с текстом
+            int hit = 0;
+            foreach (string c in needed) if (map.ContainsKey(c)) hit++;
+            if (needed.Count > 0 && hit < needed.Count * 0.9) continue;                            // и покрывать почти все коды
+            found = info.Name;
+            Report.Line("    поле " + field + " -> " + info.Name + " (записей " + t.Count + ", кодов нашлось " + hit + " из " + needed.Count + "). Поля:");
+            Report.Fields(t, "        ");
+            if (nested) {
+                // ссылки самой этой таблицы (например, у населённого пункта - его сельсовет)
+                for (int j = 0; j < t.Fields.Count; j++) {
+                    if (j == k || t.Fields[j].Type != 'N') continue;
+                    List<string> codes = new List<string>();
+                    Dictionary<string, bool> seen = new Dictionary<string, bool>();
+                    for (int r = 0; r < t.Count; r++) {
+                        string c = NormalizeCode(Value(t, r, j));
+                        if (c.Length > 0 && c != "0" && !seen.ContainsKey(c)) { seen[c] = true; codes.Add(c); }
+                    }
+                    if (codes.Count == 0) continue;
+                    string inner;
+                    Dictionary<string, LinkRow> sub = FindLink(folder, tables, t.Fields[j].Name, codes, info.Name, false, out inner);
+                    if (sub == null) continue;
+                    for (int r = 0; r < t.Count; r++) {
+                        string code = NormalizeCode(Value(t, r, k));
+                        LinkRow row, target;
+                        if (!map.TryGetValue(code, out row)) continue;
+                        if (sub.TryGetValue(NormalizeCode(Value(t, r, j)), out target) && target.Text.Length > 0)
+                            row.Nested[t.Fields[j].Name.ToUpperInvariant()] = target.Text;
+                    }
+                }
+            }
+            return map;
+        }
+        return null;
+    }
+
+    public static StreetDirectory Load(string folder, string tableName, string keyField) {
+        string path = Path.Combine(folder, tableName);
         DbfTable d = DbfTable.Load(path, false);
         int key = d.FieldIndex(keyField);
         if (key < 0) return null;
         StreetDirectory dir = new StreetDirectory();
         dir.TableName = Path.GetFileName(path);
         dir.KeyField = d.Fields[key].Name;
-        Report.Line("Справочник улиц " + dir.TableName + ": код - поле " + dir.KeyField + ", записей " + d.Count
-            + ". Адрес собирается из текстовых полей через запятую. Поля:");
+        Report.Line("Справочник улиц " + dir.TableName + ": код - поле " + dir.KeyField + ", записей " + d.Count + ". Поля:");
         Report.Fields(d, "    ");
+
+        // числовые поля справочника - ссылки на другие справочники (населённый пункт, сельсовет)
+        List<TableInfo> tables = null;
+        Dictionary<int, Dictionary<string, LinkRow>> links = new Dictionary<int, Dictionary<string, LinkRow>>();
+        for (int j = 0; j < d.Fields.Count; j++) {
+            if (j == key || d.Fields[j].Type != 'N') continue;
+            List<string> codes = new List<string>();
+            Dictionary<string, bool> seen = new Dictionary<string, bool>();
+            for (int r = 0; r < d.Count; r++) {
+                string c = NormalizeCode(Value(d, r, j));
+                if (c.Length > 0 && c != "0" && !seen.ContainsKey(c)) { seen[c] = true; codes.Add(c); }
+            }
+            if (codes.Count == 0) continue;
+            if (tables == null) tables = TableInfo.List(folder, null);
+            string found;
+            Dictionary<string, LinkRow> map = FindLink(folder, tables, d.Fields[j].Name, codes, dir.TableName, true, out found);
+            if (map != null) links[j] = map;
+            else Report.Line("    поле " + d.Fields[j].Name + ": справочник к нему не нашёлся");
+        }
+
         for (int r = 0; r < d.Count; r++) {
-            string code = NormalizeCode(DbfTable.Format(d.GetValue(r, key, null), true));
+            string code = NormalizeCode(Value(d, r, key));
             if (code.Length == 0 || dir.names.ContainsKey(code)) continue;
-            StringBuilder text = new StringBuilder();
+            // своё: название улицы
+            StringBuilder own = new StringBuilder();
             for (int j = 0; j < d.Fields.Count; j++) {
                 if (j == key || d.Fields[j].Type != 'C') continue;
-                string v = DbfTable.Format(d.GetValue(r, j, null), true).Trim();
+                string v = Value(d, r, j);
                 if (v.Length == 0 || !HasLetter(v)) continue;
-                if (text.Length > 0) text.Append(", ");
-                text.Append(v);
+                if (own.Length > 0) own.Append(", ");
+                own.Append(v);
             }
-            dir.names[code] = text.ToString();
-            dir.lowerNames[code] = text.ToString().ToLowerInvariant();
+            // по ссылкам: населённый пункт, сельсовет и прочее
+            Dictionary<string, string> parts = new Dictionary<string, string>();
+            List<string> order = new List<string>();
+            foreach (KeyValuePair<int, Dictionary<string, LinkRow>> link in links) {
+                LinkRow row;
+                if (!link.Value.TryGetValue(NormalizeCode(Value(d, r, link.Key)), out row) || row.Text.Length == 0) continue;
+                string name = d.Fields[link.Key].Name.ToUpperInvariant();
+                parts[name] = row.Text;
+                order.Add(name);
+                foreach (KeyValuePair<string, string> n in row.Nested)
+                    if (!parts.ContainsKey(n.Key)) { parts[n.Key] = n.Value; order.Add(n.Key); }
+            }
+            // если своя ссылка пустая, а у населённого пункта она есть - берём оттуда (сельсовет улицы через её деревню)
+            string town = "", ss = "", other = "";
+            foreach (string name in order) {
+                string text = parts[name];
+                if (name.Contains("NP")) { if (town.Length == 0) town = text; }
+                else if (name.Contains("SS")) { if (ss.Length == 0) ss = text; }
+                else other += (other.Length > 0 ? ", " : "") + text;
+            }
+            StringBuilder display = new StringBuilder();
+            if (town.Length > 0) display.Append(town);
+            if (own.Length > 0) display.Append((display.Length > 0 ? ", " : "") + own);
+            if (ss.Length > 0) {
+                string l = ss.ToLowerInvariant();
+                display.Append((display.Length > 0 ? ", " : "") + ss + (l.Contains("с/с") || l.Contains("сельсовет") ? "" : " с/с"));
+            }
+            if (other.Length > 0) display.Append((display.Length > 0 ? ", " : "") + other);
+            dir.names[code] = display.ToString();
+            dir.lowerNames[code] = display.ToString().ToLowerInvariant();
         }
         return dir;
+    }
+
+    // Коды улиц, в адресе которых есть одно из названий (сельсоветы). "Боровлянский" ищется как "боровлянск".
+    public Dictionary<string, bool> CodesMatching(string[] wanted, out string report) {
+        List<string> stems = new List<string>();
+        foreach (string n in wanted) stems.Add(Stem(n));
+        int[] perName = new int[stems.Count];
+        Dictionary<string, bool> codes = new Dictionary<string, bool>();
+        foreach (KeyValuePair<string, string> kv in lowerNames) {
+            for (int i = 0; i < stems.Count; i++) {
+                if (stems[i].Length == 0 || kv.Value.IndexOf(stems[i], StringComparison.Ordinal) < 0) continue;
+                perName[i]++;
+                codes[kv.Key] = true;
+                break;
+            }
+        }
+        StringBuilder r = new StringBuilder("Сельсоветы из списка - улиц в справочнике: ");
+        for (int i = 0; i < stems.Count; i++) r.Append((i > 0 ? ", " : "") + wanted[i].Trim() + " - " + perName[i]);
+        r.Append(". Всего улиц: " + codes.Count + " из " + names.Count);
+        report = r.ToString();
+        return codes;
+    }
+
+    public static string Stem(string name) {
+        string w = name.Trim().ToLowerInvariant();
+        if (w.Length > 5 && (w.EndsWith("ий") || w.EndsWith("ой") || w.EndsWith("ая") || w.EndsWith("ое"))) w = w.Substring(0, w.Length - 2);
+        return w;
     }
 
     // Ищем таблицу, где есть поле с теми же кодами (каждый код - один раз) и текстом при них.
@@ -1387,7 +1601,7 @@ public class StreetDirectory {
                 Dictionary<string, bool> values = new Dictionary<string, bool>();
                 int filled = 0;
                 for (int r = 0; r < d.Count; r++) {
-                    string v = NormalizeCode(DbfTable.Format(d.GetValue(r, k, null), true));
+                    string v = NormalizeCode(Value(d, r, k));
                     if (v.Length == 0) continue;
                     filled++;
                     values[v] = true;
@@ -1396,9 +1610,16 @@ public class StreetDirectory {
                 int hit = 0;
                 foreach (string c in codes) if (values.ContainsKey(c)) hit++;
                 double coverage = (double)hit / codes.Count;
+                // справочник со ссылками на населённый пункт и сельсовет (IDNP, IDSS) лучше просто списка улиц
+                bool linked = false;
+                foreach (DbfField g in d.Fields) {
+                    string n = g.Name.ToUpperInvariant();
+                    if (g.Type == 'N' && g != f && (n.Contains("NP") || n.Contains("SS"))) linked = true;
+                }
                 if (hit > 0)
                     Report.Line("    кандидат " + info.Name + "." + f.Name + ": записей " + d.Count + ", кодов улиц нашлось " + hit + " из " + codes.Count
-                        + " (" + (int)(coverage * 100) + "%)" + (coverage >= 0.9 ? "" : " - мало, не подходит"));
+                        + " (" + (int)(coverage * 100) + "%)" + (coverage >= 0.9 ? (linked ? ", есть ссылки на населённый пункт/сельсовет" : "") : " - мало, не подходит"));
+                if (coverage >= 0.9 && linked) coverage += 0.05;
                 if (coverage > bestCoverage || (coverage == bestCoverage && bestTable != null && d.Count < bestRecords)) {
                     bestCoverage = coverage;
                     bestRecords = d.Count;
@@ -1411,7 +1632,8 @@ public class StreetDirectory {
             Report.Line("    справочник не найден: нет таблицы, где нашлись бы 90% кодов улиц");
             return null;
         }
-        return Load(Path.Combine(folder, bestTable), bestKey);
+        Report.Line("    выбран " + bestTable + "." + bestKey + " - больше всех кодов улиц");
+        return Load(folder, bestTable, bestKey);
     }
 }
 
@@ -1421,6 +1643,7 @@ public enum SearchMode { Account, Address, Meter, Name }
 public class AbonentQuery {
     readonly DbfTable t;
     readonly int[] accountFields, addressFields, meterFields, nameFields;
+    readonly int oldMeter;   // снятый счётчик (NSC) - ищем по нему, если по текущему не нашлось
     readonly int dom, kor, kv, ul;
     public readonly int[] Columns;   // что показывать в списке найденного
     public string LastExplain = "";  // как прошёл последний поиск - для отчёта (без самих слов)
@@ -1439,6 +1662,7 @@ public class AbonentQuery {
         this.t = t;
         accountFields = Existing(new string[] { "NAB", "LS", "LIC", "LSCH" });
         meterFields = Existing(new string[] { "NCH" });
+        oldMeter = t.FieldIndex("NSC");
         nameFields = Existing(new string[] { "FIO" });
         dom = t.FieldIndex("DOM");
         kor = t.FieldIndex("KOR");
@@ -1447,12 +1671,17 @@ public class AbonentQuery {
 
         // слова адреса (населённый пункт, улица) ищем во всех текстовых полях абонента,
         // кроме ФИО и номеров - где бы ни хранился населённый пункт
-        string[] notAddress = { "FIO", "NAB", "LS", "LIC", "LSCH", "NCH", "NSC", "TIPCH", "TEL", "DOM", "KOR", "KV" };
+        string[] notAddress = { "FIO", "NAB", "LS", "LIC", "LSCH", "NCH", "NSC", "TIPCH", "TSC", "TEL", "DOM", "KOR", "KV", "N_F", "LS_ERIP" };
         List<int> address = new List<int>();
-        for (int i = 0; i < t.Fields.Count; i++) {
-            bool skip = false;
-            foreach (string n in notAddress) if (string.Compare(t.Fields[i].Name, n, StringComparison.OrdinalIgnoreCase) == 0) skip = true;
-            if (!skip && (t.Fields[i].Type == 'C' || i == ul)) address.Add(i);
+        if (dir != null) {
+            // улицы - по справочнику; из полей абонента берём только явно адресные
+            address.AddRange(Existing(new string[] { "UL", "NP", "NASP", "GOROD", "ULICA", "ADRES", "ADR" }));
+        } else {
+            for (int i = 0; i < t.Fields.Count; i++) {
+                bool skip = false;
+                foreach (string n in notAddress) if (string.Compare(t.Fields[i].Name, n, StringComparison.OrdinalIgnoreCase) == 0) skip = true;
+                if (!skip && (t.Fields[i].Type == 'C' || i == ul)) address.Add(i);
+            }
         }
         addressFields = address.ToArray();
 
@@ -1577,7 +1806,7 @@ public class AbonentQuery {
         switch (mode) {
             case SearchMode.Account: found = FindAccount(query); break;
             case SearchMode.Address: found = FindAddress(query); break;
-            case SearchMode.Meter: found = FindWords(query, meterFields); break;
+            case SearchMode.Meter: found = FindMeter(query); break;
             default: found = FindWords(query, nameFields); break;
         }
         if (found.Count <= 20000) SortByAddress(found);
@@ -1591,10 +1820,30 @@ public class AbonentQuery {
         foreach (char c in query) if (c >= '0' && c <= '9') digits.Append(c);
         LastExplain = "цифр: " + digits.Length;
         if (digits.Length == 0) return found;
-        SearchWord w = Part(digits.ToString());
+        string q = digits.ToString();
+        SearchWord w = Part(q);
+        foreach (int f in accountFields) {
+            for (int i = 0; i < RowCount; i++) {
+                int row = RowAt(i);
+                if (t.FieldEquals(row, f, w)) found.Add(row);
+            }
+        }
+        if (found.Count > 0) { LastExplain += ", точное совпадение"; return found; }
         for (int i = 0; i < RowCount; i++) {
             int row = RowAt(i);
             if (InAny(row, accountFields, w)) found.Add(row);
+        }
+        if (found.Count > 0) { LastExplain += ", часть номера"; return found; }
+        // длинный номер (Л/С) может содержать номер абонента внутри себя
+        string qt = q.TrimStart('0');
+        if (accountFields.Length > 0 && qt.Length >= 8) {
+            int f = accountFields[0];
+            for (int i = 0; i < RowCount; i++) {
+                int row = RowAt(i);
+                string nab = DbfTable.Format(t.GetValue(row, f, null), true).Trim().TrimStart('0');
+                if (nab.Length >= 6 && nab.Length < qt.Length && qt.IndexOf(nab, StringComparison.Ordinal) >= 0) found.Add(row);
+            }
+            if (found.Count > 0) LastExplain += ", номер абонента внутри длинного номера";
         }
         return found;
     }
@@ -1606,6 +1855,7 @@ public class AbonentQuery {
         foreach (string w in DbfTable.SplitWords(query)) words.Add(Part(w));
         LastExplain = "слов: " + words.Count;
         if (words.Count == 0) return found;
+
         for (int si = 0; si < RowCount; si++) {
             int row = RowAt(si);
             bool ok = true;
@@ -1613,6 +1863,57 @@ public class AbonentQuery {
             if (ok) found.Add(row);
         }
         return found;
+    }
+
+    // Номер счётчика: точно; потом как часть; потом по одним цифрам (без "№", пробелов, дефисов),
+    // в том числе когда в списке номер длиннее или короче записанного; потом - по снятому счётчику
+    List<int> FindMeter(string query) {
+        List<int> found = new List<int>();
+        string[] words = DbfTable.SplitWords(query);
+        StringBuilder sb = new StringBuilder();
+        foreach (char c in query) if (c >= '0' && c <= '9') sb.Append(c);
+        string digits = sb.ToString().TrimStart('0');
+        LastExplain = "слов: " + words.Length + ", цифр: " + sb.Length;
+        if (words.Length == 0) return found;
+        int[] where = meterFields.Length > 0 ? meterFields : new int[] { -1 };
+        string how = MeterIn(where, words, digits, found);
+        if (found.Count == 0 && oldMeter >= 0) {
+            how = MeterIn(new int[] { oldMeter }, words, digits, found);
+            if (found.Count > 0) how += ", найден по снятому счётчику (NSC)";
+        }
+        if (found.Count > 0) LastExplain += ", " + how;
+        return found;
+    }
+
+    string MeterIn(int[] fields, string[] words, string digits, List<int> found) {
+        if (words.Length == 1 && fields[0] >= 0) {
+            SearchWord w = Part(words[0]);
+            foreach (int f in fields)
+                for (int i = 0; i < RowCount; i++) { int row = RowAt(i); if (t.FieldEquals(row, f, w)) found.Add(row); }
+            if (found.Count > 0) return "точное совпадение";
+        }
+        List<SearchWord> parts = new List<SearchWord>();
+        foreach (string w in words) parts.Add(Part(w));
+        for (int i = 0; i < RowCount; i++) {
+            int row = RowAt(i);
+            bool ok = true;
+            foreach (SearchWord w in parts) if (!InAny(row, fields, w)) { ok = false; break; }
+            if (ok) found.Add(row);
+        }
+        if (found.Count > 0) return "часть номера";
+        if (digits.Length < 5 || fields[0] < 0) return "";
+        foreach (int f in fields) {
+            for (int i = 0; i < RowCount; i++) {
+                int row = RowAt(i);
+                string v = DbfTable.Format(t.GetValue(row, f, null), true);
+                StringBuilder d = new StringBuilder();
+                foreach (char c in v) if (c >= '0' && c <= '9') d.Append(c);
+                string nd = d.ToString().TrimStart('0');
+                if (nd.Length < 5) continue;
+                if (nd.IndexOf(digits, StringComparison.Ordinal) >= 0 || (nd.Length >= 6 && digits.IndexOf(nd, StringComparison.Ordinal) >= 0)) found.Add(row);
+            }
+        }
+        return found.Count > 0 ? "по цифрам номера" : "";
     }
 
     // слово ищется как часть поля (и короткие числа тоже - это часть номера, а не дом)
@@ -1796,9 +2097,17 @@ public class AbonentSearch : Form {
     AbonentQuery query;
     StreetDirectory directory;
     bool streetCodes;    // в UL у абонентов коды улиц, а не названия
-    int[] mine;          // абоненты выбранных сельсоветов (null - отбора нет или он ничего не нашёл)
+    int[] mine;          // абоненты выбранных сельсоветов, если улицы записаны названиями (отбор после чтения)
     string mineNote = "";
     readonly CheckBox onlyMine = new CheckBox();
+    Dictionary<string, bool> allowed;   // коды улиц моих сельсоветов - читаем только их абонентов (null - всю базу)
+    DbfField ulField;
+    int totalInBase;
+    DateTime dataTime;
+    string dataNote = "";
+    bool refreshing;
+    bool suppressMine;
+    int generation;      // номер загрузки: фоновое обновление от старой загрузки не подменяет новую
 
     static readonly string[] DefaultSelsovety = { "Шершунский", "Папернянский", "Юзуфовский", "Острошицкий", "Боровлянский", "Колодищанский" };
     bool loading;
@@ -1877,7 +2186,7 @@ public class AbonentSearch : Form {
         onlyMine.AutoSize = true;
         onlyMine.Checked = true;
         onlyMine.Margin = new Padding(14, 7, 3, 0);
-        onlyMine.CheckedChanged += delegate { ApplyScope(); ApplySearch(); };
+        onlyMine.CheckedChanged += delegate { OnOnlyMineChanged(); };
         row.Controls.Add(onlyMine);
         Button ssButton = new Button();
         ssButton.Text = "Сельсоветы...";
@@ -1913,7 +2222,7 @@ public class AbonentSearch : Form {
         bottom.Controls.Add(BottomButton("Отчёт", delegate { OpenReport(); }));
         bottom.Controls.Add(BottomButton("Все таблицы...", delegate { new DbfViewer(this.viewerSettings).Show(); }));
         bottom.Controls.Add(BottomButton("Где искать...", delegate { ChooseBase(); }));
-        bottom.Controls.Add(BottomButton("Обновить", delegate { LoadTable(); }));
+        bottom.Controls.Add(BottomButton("Обновить", delegate { if (allowed != null && table != null) RefreshInBackground(); else LoadTable(); }));
 
         timer.Interval = 300;
         timer.Tick += delegate { timer.Stop(); ApplySearch(); };
@@ -2030,26 +2339,45 @@ public class AbonentSearch : Form {
         LoadTable();
     }
 
+    // ---- загрузка: справочники -> коды улиц моих сельсоветов -> только их абоненты ----
+
+    string Dir { get { return Path.GetDirectoryName(Path.GetFullPath(settingsFile)); } }
+    string CacheFile { get { return Path.Combine(Dir, "kesh_abonenty.dbf"); } }
+    string CacheInfo { get { return Path.Combine(Dir, "kesh_abonenty.txt"); } }
+
+    // что лежит в сохранённой выборке: база, справочник и список сельсоветов
+    string CacheKey() {
+        return Path.Combine(folder, tableName) + "|" + (directory == null ? "" : directory.TableName + "." + directory.KeyField)
+            + "|" + string.Join(";", ReadSelsovety());
+    }
+
     internal void LoadTable() {
         if (loading || tableName == null) return;
         string path = Path.Combine(folder, tableName);
-        SetBusy(true, "Загружаю базу абонентов " + tableName + "...");
-        DateTime started = DateTime.Now;
+        generation++;
+        SetBusy(true, "Готовлю справочники...");
         try {
-            table = DbfTable.Load(path, false, null, delegate(int done, int expected) {
+            DbfTable header = DbfTable.LoadHeader(path);
+            totalInBase = header.Expected;
+            Report.Line("Таблица абонентов " + tableName + ": записей по заголовку " + header.Expected);
+            directory = PrepareDirectory(path, header);
+            PrepareFilter(header);
+            if (allowed != null && TryLoadCache(path)) {
+                AfterLoad();
+                if (DateTime.Now - dataTime > TimeSpan.FromHours(1)) RefreshInBackground();
+                return;
+            }
+            SetBusy(true, allowed != null ? "Читаю базу и отбираю абонентов моих сельсоветов..." : "Читаю всю базу абонентов...");
+            table = DbfTable.Load(path, MakeFilter(), delegate(int done, int expected) {
                 if (IsDisposed) throw new OperationCanceledException();
-                status.Text = "Загружаю базу абонентов " + tableName + ": " + done + " из " + expected + "...";
+                status.Text = "Читаю базу " + tableName + ": " + done + " из " + expected + " записей"
+                    + (allowed != null ? " (оставляю только мои сельсоветы)" : "") + "...";
                 Application.DoEvents();
-            });
-            Report.Line("Загружена " + tableName + ": записей " + table.Count + ", удалённых пропущено " + table.Deleted
-                + ", кодировка " + table.Enc.CodePage + ", время " + (DateTime.Now - started).TotalSeconds.ToString("0.0") + " с. Поля:");
-            Report.Fields(table, "    ");
-            directory = FindDirectory();
-            query = new AbonentQuery(table, directory);
-            FindMine();
-            Report.Line("Где ищется: лицевой - " + query.FieldList(SearchMode.Account) + " | адрес - " + query.FieldList(SearchMode.Address)
-                + " | счётчик - " + query.FieldList(SearchMode.Meter) + " | ФИО - " + query.FieldList(SearchMode.Name));
-            Report.Line("--- поиски (сами слова не записываются) ---");
+            }, 0);
+            dataTime = DateTime.Now;
+            ReportRead("Прочитана база", table);
+            if (allowed != null) SaveCache(table, CacheKey(), dataTime);
+            AfterLoad();
         } catch (OperationCanceledException) {
             return;
         } catch (Exception ex) {
@@ -2057,34 +2385,55 @@ public class AbonentSearch : Form {
             query = null;
             Report.Line("ОШИБКА чтения " + path + ": " + ex.Message);
             SetBusy(false, "Не удалось прочитать " + path + ": " + ex.Message);
-            return;
         }
+    }
+
+    void ReportRead(string what, DbfTable t) {
+        double mb = t.BytesRead / 1048576.0;
+        Report.Line(what + ": " + mb.ToString("0") + " МБ за " + t.Seconds.ToString("0.0") + " с (" + (t.Seconds > 0 ? (mb / t.Seconds).ToString("0.0") : "?")
+            + " МБ/с), записей " + t.Total + ", удалённых пропущено " + t.Deleted + ", оставлено " + t.Count
+            + (allowed != null ? " (мои сельсоветы)" : " (вся база)"));
+    }
+
+    void AfterLoad() {
+        query = new AbonentQuery(table, directory);
+        if (allowed == null && directory == null && onlyMine.Checked) FindMine();   // улицы названиями - отбор по тексту адреса
+        else query.Scope = null;
+        Report.Line("Поля таблицы абонентов (по загруженным записям):");
+        Report.Fields(table, "    ");
+        Report.Line("Где ищется: лицевой - " + query.FieldList(SearchMode.Account) + " | адрес - " + query.FieldList(SearchMode.Address)
+            + " | счётчик - " + query.FieldList(SearchMode.Meter) + " | ФИО - " + query.FieldList(SearchMode.Name));
+        Report.Line("--- поиски (сами слова не записываются) ---");
+        dataNote = "данные на " + dataTime.ToString("dd.MM HH:mm");
         SaveSettings();
         BuildColumns();
         SetBusy(false, null);
         ApplySearch();
     }
 
-    // Если в поле улицы коды - нужен справочник: сначала запомненный, иначе ищем
-    StreetDirectory FindDirectory() {
-        List<string> codes = StreetDirectory.Codes(table, table.FieldIndex("UL"));
-        streetCodes = codes != null;
-        if (codes == null) return null;
+    // Справочник улиц: запомненный с прошлого раза или ищем по кодам улиц из начала базы
+    StreetDirectory PrepareDirectory(string path, DbfTable header) {
+        streetCodes = false;
+        int ul = header.FieldIndex("UL");
+        ulField = ul < 0 ? null : header.Fields[ul];
+        if (ul < 0) return null;
         string savedTable = Places.ReadSetting(settingsFile, 3), savedKey = Places.ReadSetting(settingsFile, 4);
         if (savedTable != null && savedKey != null && File.Exists(Path.Combine(folder, savedTable))) {
             try {
                 Report.Line("Справочник улиц с прошлого раза: " + savedTable + "." + savedKey);
-                StreetDirectory d = StreetDirectory.Load(Path.Combine(folder, savedTable), savedKey);
-                double cov = d == null ? 0 : d.Coverage(codes);
-                Report.Line("    кодов улиц нашлось: " + (int)(cov * 100) + "%" + (cov >= 0.9 ? " - подходит" : " - мало, ищу заново"));
-                if (d != null && cov >= 0.9) return d;
+                StreetDirectory d = StreetDirectory.Load(folder, savedTable, savedKey);
+                if (d != null && d.Count > 0) { streetCodes = true; return d; }
             } catch (Exception ex) {
                 Report.Line("    не открылся: " + ex.Message);
             }
         }
-        Report.Line("Ищу справочник улиц среди таблиц папки:");
-        status.Text = "В поле улицы - коды. Ищу справочник улиц...";
+        status.Text = "Смотрю, как записаны улицы...";
         status.Refresh();
+        DbfTable sample = DbfTable.Load(path, null, null, 30000);
+        List<string> codes = StreetDirectory.Codes(sample, sample.FieldIndex("UL"));
+        streetCodes = codes != null;
+        if (codes == null) return null;
+        Report.Line("Ищу справочник улиц среди таблиц папки:");
         try {
             return StreetDirectory.Detect(folder, tableName, codes, delegate(int done, int total) {
                 if (IsDisposed) throw new OperationCanceledException();
@@ -2093,9 +2442,128 @@ public class AbonentSearch : Form {
             });
         } catch (OperationCanceledException) {
             throw;
-        } catch (Exception) {
+        } catch (Exception ex) {
+            Report.Line("    ошибка: " + ex.Message);
             return null;
         }
+    }
+
+    // Коды улиц моих сельсоветов - по справочникам. null - читаем всю базу.
+    void PrepareFilter(DbfTable header) {
+        allowed = null;
+        mineNote = "";
+        string[] names = ReadSelsovety();
+        onlyMine.Text = "Только мои сельсоветы (" + names.Length + ")";
+        if (!onlyMine.Checked) { Report.Line("Отбор по сельсоветам выключен - читаю всю базу"); return; }
+        if (names.Length == 0) { Report.Line("Сельсоветы: список пуст - читаю всю базу"); return; }
+        if (directory == null || ulField == null) {
+            if (streetCodes) mineNote = "   Справочник улиц не нашёлся - сельсоветы не проверить, показана вся база.";
+            return;   // улицы названиями - отберём после чтения по тексту адреса
+        }
+        string report;
+        Dictionary<string, bool> codes = directory.CodesMatching(names, out report);
+        Report.Line(report);
+        if (codes.Count == 0) {
+            mineNote = "   Названия сельсоветов в справочниках не нашлись - показана вся база. Нажмите \"Отчёт\" и пришлите его.";
+            onlyMine.Text = "Только мои сельсоветы (не нашлись)";
+            return;
+        }
+        allowed = codes;
+    }
+
+    RecordFilter MakeFilter() {
+        if (allowed == null || ulField == null) return null;
+        Dictionary<string, bool> codes = allowed;
+        DbfField f = ulField;
+        return delegate(byte[] record, int start) {
+            return codes.ContainsKey(StreetDirectory.NormalizeCode(Encoding.ASCII.GetString(record, start + f.Offset, f.Length)));
+        };
+    }
+
+    bool TryLoadCache(string path) {
+        if (!File.Exists(CacheFile) || !File.Exists(CacheInfo)) return false;
+        string key = Places.ReadSetting(CacheInfo, 0);
+        long ticks;
+        if (key != CacheKey() || !long.TryParse(Places.ReadSetting(CacheInfo, 1), out ticks)) {
+            Report.Line("Сохранённая выборка не подходит (поменялись база, справочник или сельсоветы) - читаю базу");
+            return false;
+        }
+        try {
+            status.Text = "Беру сохранённую выборку абонентов...";
+            status.Refresh();
+            table = DbfTable.Load(CacheFile, false);
+            table.FilePath = path;   // примечания - из исходной базы
+            dataTime = new DateTime(ticks);
+            Report.Line("Абоненты взяты из сохранённой выборки от " + dataTime.ToString("dd.MM.yyyy HH:mm") + ": " + table.Count
+                + " записей за " + table.Seconds.ToString("0.0") + " с" + (DateTime.Now - dataTime > TimeSpan.FromHours(1) ? "; ей больше часа - обновляю в фоне" : ""));
+            return true;
+        } catch (Exception ex) {
+            Report.Line("Сохранённая выборка не открылась: " + ex.Message);
+            table = null;
+            return false;
+        }
+    }
+
+    void SaveCache(DbfTable t, string key, DateTime when) {
+        try {
+            t.SaveCopy(CacheFile);
+            Places.SaveSettings(CacheInfo, new string[] { key, when.Ticks.ToString() });
+        } catch (Exception ex) {
+            Report.Line("Сохранить выборку не удалось: " + ex.Message);
+        }
+    }
+
+    // Свежие данные из базы - в фоне, пока работаете со старыми; потом тихо подменяем
+    void RefreshInBackground() {
+        if (refreshing || loading || table == null || tableName == null) return;
+        refreshing = true;
+        string path = Path.Combine(folder, tableName);
+        RecordFilter filter = MakeFilter();
+        string key = CacheKey();
+        bool save = allowed != null;
+        int gen = generation;
+        SetDataNote("обновляю данные из базы...");
+        System.Threading.Thread th = new System.Threading.Thread(delegate() {
+            DbfTable fresh = null;
+            string error = null;
+            int shown = 0;
+            try {
+                fresh = DbfTable.Load(path, filter, delegate(int done, int expected) {
+                    if (done - shown < 50000) return;
+                    shown = done;
+                    string note = "обновляю данные из базы: " + (int)(done * 100L / Math.Max(expected, 1)) + "%";
+                    try { BeginInvoke(new MethodInvoker(delegate { SetDataNote(note); })); } catch (Exception) { }
+                }, 0);
+                if (save) SaveCache(fresh, key, DateTime.Now);
+            } catch (Exception ex) {
+                error = ex.Message;
+            }
+            try { BeginInvoke(new MethodInvoker(delegate { FinishRefresh(fresh, error, gen); })); } catch (Exception) { }
+        });
+        th.IsBackground = true;
+        th.Start();
+    }
+
+    void FinishRefresh(DbfTable fresh, string error, int gen) {
+        refreshing = false;
+        if (gen != generation) return;   // пока обновлялось, базу уже перечитали заново
+        if (error != null) {
+            Report.Line("Обновить данные не удалось: " + error);
+            SetDataNote("данные на " + dataTime.ToString("dd.MM HH:mm") + " (обновить не удалось)");
+            return;
+        }
+        fresh.FilePath = Path.Combine(folder, tableName);
+        table = fresh;
+        dataTime = DateTime.Now;
+        ReportRead("Данные обновлены из базы", table);
+        query = new AbonentQuery(table, directory);
+        dataNote = "данные обновлены в " + dataTime.ToString("HH:mm");
+        ApplySearch();
+    }
+
+    void SetDataNote(string note) {
+        dataNote = note;
+        UpdateStatus();
     }
 
     void SetBusy(bool busy, string text) {
@@ -2127,11 +2595,17 @@ public class AbonentSearch : Form {
         grid.RowCount = 0;
         grid.RowCount = found.Count;
         grid.Invalidate();
-        string where = query.Scope != null
-            ? "абонентов в моих сельсоветах " + query.Scope.Length + " из " + table.Count
-            : tableName + ", " + table.Count + " абонентов";
+        UpdateStatus();
+    }
+
+    void UpdateStatus() {
+        if (table == null || query == null) return;
+        string where;
+        if (allowed != null) where = "абонентов в моих сельсоветах " + table.Count + " (всего в базе " + totalInBase + ")";
+        else if (query.Scope != null) where = "абонентов в моих сельсоветах " + query.Scope.Length + " из " + table.Count;
+        else where = tableName + ", " + table.Count + " абонентов";
         if (directory != null) where += ", улицы - из " + directory.TableName;
-        where += mineNote;
+        where += "; " + dataNote + mineNote;
         string warning = streetCodes && directory == null && mode == SearchMode.Address
             ? "   В поле улицы - коды, а справочник улиц не нашёлся: адрес ищется по дому и квартире, название улицы может не находиться."
             : "";
@@ -2230,6 +2704,22 @@ public class AbonentSearch : Form {
         query.Scope = onlyMine.Checked ? mine : null;
     }
 
+    void OnOnlyMineChanged() {
+        if (suppressMine || table == null) return;
+        if (!onlyMine.Checked && allowed != null) {
+            string q = "Без отбора программа прочитает всю базу (около " + totalInBase + " записей) - это может занять несколько минут "
+                + "и много памяти. Продолжить?";
+            if (MessageBox.Show(this, q, Text, MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) {
+                suppressMine = true;
+                onlyMine.Checked = true;
+                suppressMine = false;
+                return;
+            }
+        }
+        if (allowed == null && directory == null && mine != null) { ApplyScope(); ApplySearch(); return; }   // отбор по тексту - без перечитывания
+        LoadTable();
+    }
+
     void EditSelsovety() {
         Form d = new Form();
         d.Text = "Мои сельсоветы";
@@ -2262,12 +2752,11 @@ public class AbonentSearch : Form {
         List<string> names = new List<string>();
         foreach (string line in box.Text.Replace("\r\n", "\n").Split('\n')) if (line.Trim().Length > 0) names.Add(line.Trim());
         SaveSelsovety(names.ToArray());
-        if (query == null) return;
-        Cursor = Cursors.WaitCursor;
-        FindMine();
-        Cursor = Cursors.Default;
-        onlyMine.Checked = mine != null;
-        ApplySearch();
+        if (table == null) return;
+        suppressMine = true;
+        onlyMine.Checked = true;
+        suppressMine = false;
+        LoadTable();
     }
 
     void OpenBatch() {
@@ -2556,9 +3045,19 @@ public class BatchSearch : Form {
         grid.Invalidate();
         status.Text = "Строк в списке: " + lines.Count + ". Найдено по одному абоненту: " + single
             + ", по несколько: " + several + ", не найдено: " + none + ". Двойной щелчок - карточка.";
+        Dictionary<int, int> lengths = new Dictionary<int, int>();
+        foreach (string line in lines) {
+            int digits = 0;
+            foreach (char c in line) if (c >= '0' && c <= '9') digits++;
+            int n;
+            lengths.TryGetValue(digits, out n);
+            lengths[digits] = n + 1;
+        }
+        List<string> shape = new List<string>();
+        foreach (KeyValuePair<int, int> kv in lengths) shape.Add(kv.Key + " цифр - " + kv.Value);
         Report.Search("Поиск по списку, в списке: " + ModeNames[(int)mode].Replace("&", "").ToLowerInvariant() + "; строк " + lines.Count
             + ", найдено по одному " + single + ", по несколько " + several + ", не найдено " + none
-            + ", время " + (DateTime.Now - started).TotalSeconds.ToString("0.0") + " с");
+            + ", время " + (DateTime.Now - started).TotalSeconds.ToString("0.0") + " с; цифр в строках: " + string.Join(", ", shape.ToArray()));
     }
 
     void Add(int line, string text, string result, int row, int kind) {
