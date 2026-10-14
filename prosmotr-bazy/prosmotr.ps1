@@ -1385,6 +1385,12 @@ public class SearchResult {
     public Dictionary<int, int> Tariff = new Dictionary<int, int>();      // строка -> номер тарифа (T1, T2...)
     public Dictionary<int, string> Power = new Dictionary<int, string>(); // строка -> мощность (доп. сведения)
     public Dictionary<int, bool> Added = new Dictionary<int, bool>();     // строки, которые не искали: другие тарифы того же счётчика
+    public Dictionary<int, string> Group = new Dictionary<int, string>(); // строка -> основной лицевой её группы тарифов
+
+    public string GroupOf(int row) {
+        string g;
+        return Group.TryGetValue(row, out g) ? g : null;
+    }
 
     public int Searched { get { return Rows.Count - Added.Count; } }
 
@@ -2274,6 +2280,7 @@ public class LiveBase {
             if (t > 0) { res.Tariff[row] = t; mainOf[row] = main == null ? ExtraInfo.Nab(v) : main; }
         }
         if (res.Tariff.Count > 0) AddSiblings(res, nab, mainOf);
+        foreach (KeyValuePair<int, string> kv in mainOf) res.Group[kv.Key] = kv.Value;
         List<string> nabs = new List<string>();
         foreach (int row in res.Rows) if (nabs.Count < 100) nabs.Add(DbfTable.Format(res.Table.GetValue(row, nab, null), true));
         if (res.Tariff.Count > 0) {
@@ -4976,6 +4983,7 @@ public class AbonentSearch : Form {
         grid.ClipboardCopyMode = DataGridViewClipboardCopyMode.EnableWithoutHeaderText;
         grid.CellValueNeeded += new DataGridViewCellValueEventHandler(OnCellValueNeeded);
         grid.CellFormatting += new DataGridViewCellFormattingEventHandler(OnCellFormatting);
+        grid.CellPainting += new DataGridViewCellPaintingEventHandler(OnCellPainting);
         grid.CellDoubleClick += delegate(object s, DataGridViewCellEventArgs e) { if (e.RowIndex >= 0) OpenCard(e.RowIndex); };
         grid.KeyDown += new KeyEventHandler(OnGridKey);
 
@@ -5472,6 +5480,16 @@ public class AbonentSearch : Form {
         e.Value = ResultColumns.Text(r, r.Rows[e.RowIndex], kinds[e.ColumnIndex]);
     }
 
+    string GroupAt(int i) {
+        SearchResult r = current;
+        return r == null || i < 0 || i >= r.Rows.Count ? null : r.GroupOf(r.Rows[i]);
+    }
+
+    void OnCellPainting(object sender, DataGridViewCellPaintingEventArgs e) {
+        if (e.RowIndex < 0) return;
+        ResultColumns.PaintGroup(grid, e, GroupAt(e.RowIndex - 1), GroupAt(e.RowIndex), GroupAt(e.RowIndex + 1));
+    }
+
     // лицевые тарифов (T1, T2...) - зеленоватым; не искавшиеся тарифы того же счётчика - номер красным
     void OnCellFormatting(object sender, DataGridViewCellFormattingEventArgs e) {
         SearchResult r = current;
@@ -5756,6 +5774,20 @@ public static class ResultColumns {
         }
     }
 
+    // Жирная чёрная рамка вокруг группы тарифов одного счётчика (T1, T2, T3), чтобы группы не сливались.
+    // prev, cur, next - группа предыдущей, этой и следующей строки (null - строка не в группе)
+    public static void PaintGroup(DataGridView g, DataGridViewCellPaintingEventArgs e, string prev, string cur, string next) {
+        if (cur == null || e.RowIndex < 0 || e.ColumnIndex < 0) return;
+        e.Paint(e.ClipBounds, DataGridViewPaintParts.All);
+        Rectangle b = e.CellBounds;
+        const int w = 3;
+        if (prev != cur) e.Graphics.FillRectangle(Brushes.Black, b.Left, b.Top, b.Width, w);
+        if (next != cur) e.Graphics.FillRectangle(Brushes.Black, b.Left, b.Bottom - w, b.Width, w);
+        if (e.ColumnIndex == 0) e.Graphics.FillRectangle(Brushes.Black, b.Left, b.Top, w, b.Height);
+        if (e.ColumnIndex == g.Columns.Count - 1) e.Graphics.FillRectangle(Brushes.Black, b.Right - w, b.Top, w, b.Height);
+        e.Handled = true;
+    }
+
     // Ctrl+A в поле ввода - выделить всё
     public static void SelectAllKey(TextBox box) {
         box.KeyDown += delegate(object s, KeyEventArgs e) {
@@ -5929,6 +5961,9 @@ public class BatchSearch : Form {
         grid.ClipboardCopyMode = DataGridViewClipboardCopyMode.EnableWithoutHeaderText;
         grid.CellValueNeeded += new DataGridViewCellValueEventHandler(OnCellValueNeeded);
         grid.CellFormatting += new DataGridViewCellFormattingEventHandler(OnCellFormatting);
+        grid.CellPainting += delegate(object s, DataGridViewCellPaintingEventArgs e) {
+            if (e.RowIndex >= 0) ResultColumns.PaintGroup(grid, e, GroupAt(e.RowIndex - 1), GroupAt(e.RowIndex), GroupAt(e.RowIndex + 1));
+        };
         grid.CellDoubleClick += delegate(object s, DataGridViewCellEventArgs e) { OpenCard(e.RowIndex); };
         AddColumn("№", 35);
         AddColumn("Искали", 200);
@@ -6065,6 +6100,15 @@ public class BatchSearch : Form {
 
     void OnCellValueNeeded(object sender, DataGridViewCellValueEventArgs e) {
         if (e.RowIndex < items.Count) e.Value = Cell(items[e.RowIndex], e.ColumnIndex);
+    }
+
+    // группа тарифов строки итога: своя для каждой строки списка
+    string GroupAt(int i) {
+        if (i < 0 || i >= items.Count) return null;
+        Item it = items[i];
+        if (it.Res == null || it.Row < 0) return null;
+        string g = it.Res.GroupOf(it.Row);
+        return g == null ? null : it.Line + "|" + g;
     }
 
     void OnCellFormatting(object sender, DataGridViewCellFormattingEventArgs e) {
