@@ -273,7 +273,7 @@ public class DbfTable {
 public class DbfViewer : Form {
     readonly string settingsFile;
     string folder;
-    readonly Label folderLabel = new Label();
+    readonly TextBox folderBox = new TextBox();
     readonly ComboBox tableBox = new ComboBox();
     readonly CheckBox encodingBox = new CheckBox();
     internal readonly TextBox searchBox = new TextBox();
@@ -302,14 +302,17 @@ public class DbfViewer : Form {
         StartPosition = FormStartPosition.CenterScreen;
 
         FlowLayoutPanel bar1 = Bar();
+        folderBox.Width = 420;
+        folderBox.KeyDown += new KeyEventHandler(OnFolderKey);
+        Button openButton = new Button();
+        openButton.Text = "Открыть";
+        openButton.AutoSize = true;
+        openButton.Click += delegate { OpenTypedFolder(); };
         Button folderButton = new Button();
-        folderButton.Text = "Папка...";
+        folderButton.Text = "Обзор...";
         folderButton.AutoSize = true;
         folderButton.Click += delegate { ChooseFolder(); };
-        folderLabel.AutoSize = true;
-        folderLabel.Margin = new Padding(3, 8, 3, 3);
-        bar1.Controls.Add(folderButton);
-        bar1.Controls.Add(folderLabel);
+        bar1.Controls.AddRange(new Control[] { Caption("Папка:"), folderBox, openButton, folderButton });
 
         FlowLayoutPanel bar2 = Bar();
         tableBox.DropDownStyle = ComboBoxStyle.DropDownList;
@@ -363,11 +366,42 @@ public class DbfViewer : Form {
         Controls.Add(bar2);
         Controls.Add(bar1);
 
-        folder = ReadSetting(0);
-        if (folder == null || !Directory.Exists(folder))
-            folder = Directory.Exists(@"O:\BASAFOX") ? @"O:\BASAFOX" : Path.GetDirectoryName(Path.GetFullPath(settingsFile));
         string lastTable = ReadSetting(1);
-        Shown += delegate { FillTables(lastTable); searchBox.Focus(); };
+        Shown += delegate {
+            Cursor = Cursors.WaitCursor;
+            status.Text = "Ищу папку базы...";
+            status.Refresh();
+            folder = FindFolder(ReadSetting(0));
+            Cursor = Cursors.Default;
+            FillTables(lastTable);
+            searchBox.Focus();
+        };
+    }
+
+    // Батник базы подключает \\fs-dos\communal как диск O:, но только пока база запущена,
+    // поэтому пробуем и диск, и прямой сетевой путь
+    string FindFolder(string saved) {
+        string[] candidates = { saved, @"O:\BASAFOX", @"\\fs-dos\communal\BASAFOX" };
+        foreach (string c in candidates) {
+            try { if (c != null && Directory.Exists(c)) return c; }
+            catch (Exception) { }
+        }
+        return saved != null ? saved : @"\\fs-dos\communal\BASAFOX";
+    }
+
+    void OnFolderKey(object sender, KeyEventArgs e) {
+        if (e.KeyCode != Keys.Enter) return;
+        e.Handled = true;
+        e.SuppressKeyPress = true;
+        OpenTypedFolder();
+    }
+
+    void OpenTypedFolder() {
+        string p = folderBox.Text.Trim();
+        if (p.Length == 0) return;
+        folder = p;
+        SaveSettings();
+        FillTables(null);
     }
 
     static FlowLayoutPanel Bar() {
@@ -390,7 +424,7 @@ public class DbfViewer : Form {
     void ChooseFolder() {
         FolderBrowserDialog d = new FolderBrowserDialog();
         d.Description = "Папка с таблицами базы (файлы .dbf)";
-        d.SelectedPath = folder;
+        if (folder != null && Directory.Exists(folder)) d.SelectedPath = folder;
         if (d.ShowDialog(this) != DialogResult.OK) return;
         folder = d.SelectedPath;
         SaveSettings();
@@ -398,13 +432,13 @@ public class DbfViewer : Form {
     }
 
     void FillTables(string select) {
-        folderLabel.Text = folder;
+        folderBox.Text = folder;
         suspend = true;
         tableBox.Items.Clear();
         suspend = false;
         string[] files = new string[0];
         try { files = Directory.GetFiles(folder, "*.dbf"); }
-        catch (Exception ex) { Message("Не удалось открыть папку:\n" + ex.Message); }
+        catch (Exception ex) { Message("Не удалось открыть папку " + folder + "\n\n" + ex.Message + "\n\nПроверьте путь в поле \"Папка\" и нажмите \"Открыть\"."); }
         Array.Sort(files, StringComparer.OrdinalIgnoreCase);
         int index = -1;
         foreach (string f in files) {
@@ -414,7 +448,7 @@ public class DbfViewer : Form {
         }
         table = null;
         BuildColumns();
-        if (files.Length == 0) status.Text = "В этой папке нет таблиц .dbf. Нажмите \"Папка...\" и выберите другую.";
+        if (files.Length == 0) status.Text = "В этой папке нет таблиц .dbf. Впишите другой путь или нажмите \"Обзор...\".";
         else if (index >= 0) tableBox.SelectedIndex = index;
         else status.Text = "Выберите таблицу в списке.";
     }
