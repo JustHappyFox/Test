@@ -25,16 +25,24 @@ public class DbfField {
     public int Length;
 }
 
-// Таблица DBF (FoxPro / dBase), прочитанная целиком в память. Файл открывается только на чтение.
+// Решает, оставить ли прочитанную запись (для поиска по всем таблицам без загрузки их целиком)
+public delegate bool RowFilter(object[] values);
+
+// Таблица DBF (FoxPro / dBase), прочитанная в память. Файл открывается только на чтение.
 public class DbfTable {
     public string FilePath;
     public List<DbfField> Fields = new List<DbfField>();
     public List<object[]> Rows = new List<object[]>();
     public int Deleted;
+    public int Total;   // сколько неудалённых записей прочитано
 
     const int MaxMemoFile = 64 * 1024 * 1024;
 
     public static DbfTable Load(string path, bool otherEncoding) {
+        return Load(path, otherEncoding, null);
+    }
+
+    public static DbfTable Load(string path, bool otherEncoding, RowFilter filter) {
         DbfTable t = new DbfTable();
         t.FilePath = path;
         using (FileStream fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 1 << 16)) {
@@ -81,10 +89,39 @@ public class DbfTable {
                 object[] values = new object[t.Fields.Count];
                 for (int j = 0; j < values.Length; j++)
                     values[j] = Parse(rec, t.Fields[j], enc, memo, blockSize);
-                t.Rows.Add(values);
+                t.Total++;
+                if (filter == null || filter(values)) t.Rows.Add(values);
             }
         }
         return t;
+    }
+
+    // Текст записи для поиска: все поля подряд, маленькими буквами
+    public static string SearchText(object[] values) {
+        StringBuilder sb = new StringBuilder();
+        foreach (object v in values) sb.Append(Format(v, true)).Append('\u0001');
+        return sb.ToString().ToLowerInvariant();
+    }
+
+    public static string[] SplitWords(string query) {
+        return query.ToLowerInvariant().Split(new char[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+    }
+
+    // Все слова должны встретиться в тексте. Номер с нулями впереди ищем и без них -
+    // на случай, если в таблице он хранится числом.
+    public static bool Matches(string text, string[] words) {
+        foreach (string w in words) {
+            if (text.IndexOf(w, StringComparison.Ordinal) >= 0) continue;
+            string trimmed = w.TrimStart('0');
+            if (trimmed.Length > 0 && trimmed.Length < w.Length && IsDigits(w) && text.IndexOf(trimmed, StringComparison.Ordinal) >= 0) continue;
+            return false;
+        }
+        return true;
+    }
+
+    static bool IsDigits(string s) {
+        foreach (char c in s) if (c < '0' || c > '9') return false;
+        return true;
     }
 
     static object Parse(byte[] rec, DbfField f, Encoding enc, byte[] memo, int blockSize) {
@@ -327,6 +364,10 @@ public class DbfViewer : Form {
         fieldBox.DropDownStyle = ComboBoxStyle.DropDownList;
         fieldBox.Width = 140;
         fieldBox.SelectedIndexChanged += delegate { ApplyFilter(); };
+        Button everywhere = new Button();
+        everywhere.Text = "Во всех таблицах";
+        everywhere.AutoSize = true;
+        everywhere.Click += delegate { SearchAllTables(); };
         Button excel = new Button();
         excel.Text = "В Excel";
         excel.AutoSize = true;
@@ -337,7 +378,7 @@ public class DbfViewer : Form {
         encodingBox.CheckedChanged += delegate { LoadSelected(); };
         bar2.Controls.AddRange(new Control[] {
             Caption("Таблица:"), tableBox, reload,
-            Caption("Поиск:"), searchBox, Caption("в поле:"), fieldBox, excel, encodingBox });
+            Caption("Поиск:"), searchBox, everywhere, Caption("в поле:"), fieldBox, excel, encodingBox });
 
         grid.Dock = DockStyle.Fill;
         grid.VirtualMode = true;
@@ -494,12 +535,7 @@ public class DbfViewer : Form {
                 fieldBox.Items.Add(f.Name);
             }
             rowText = new string[table.Rows.Count];
-            StringBuilder sb = new StringBuilder();
-            for (int i = 0; i < rowText.Length; i++) {
-                sb.Length = 0;
-                foreach (object v in table.Rows[i]) sb.Append(DbfTable.Format(v, true)).Append('\u0001');
-                rowText[i] = sb.ToString().ToLowerInvariant();
-            }
+            for (int i = 0; i < rowText.Length; i++) rowText[i] = DbfTable.SearchText(table.Rows[i]);
             resizeColumns = true;
         }
         suspend = false;
@@ -509,11 +545,11 @@ public class DbfViewer : Form {
         if (suspend) return;
         view.Clear();
         if (table != null) {
-            string[] words = searchBox.Text.ToLowerInvariant().Split(new char[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+            string[] words = DbfTable.SplitWords(searchBox.Text);
             int field = fieldBox.SelectedIndex - 1;   // -1 - искать во всех полях
             for (int i = 0; i < table.Rows.Count; i++) {
                 string text = field < 0 ? rowText[i] : DbfTable.Format(table.Rows[i][field], true).ToLowerInvariant();
-                if (Matches(text, words)) view.Add(i);
+                if (DbfTable.Matches(text, words)) view.Add(i);
             }
             SortView();
         }
@@ -528,20 +564,66 @@ public class DbfViewer : Form {
         UpdateStatus();
     }
 
-    static bool Matches(string text, string[] words) {
-        foreach (string w in words) {
-            if (text.IndexOf(w, StringComparison.Ordinal) >= 0) continue;
-            // номер с нулями впереди ищем и без них - на случай, если в таблице он хранится числом
-            string trimmed = w.TrimStart('0');
-            if (trimmed.Length > 0 && trimmed.Length < w.Length && IsDigits(w) && text.IndexOf(trimmed, StringComparison.Ordinal) >= 0) continue;
-            return false;
+    // Поиск по всем таблицам папки: таблицы читаются по очереди, в памяти остаются только совпадения
+    internal void SearchAllTables() {
+        string query = searchBox.Text.Trim();
+        string[] words = DbfTable.SplitWords(query);
+        if (words.Length == 0) {
+            Message("Впишите в поле \"Поиск\", что искать: адрес, номер, фамилию...");
+            searchBox.Focus();
+            return;
         }
-        return true;
+        if (tableBox.Items.Count == 0) {
+            Message("В папке нет таблиц .dbf.");
+            return;
+        }
+        searchTimer.Stop();
+        ScanResults results = new ScanResults(this, query);
+        results.Show(this);
+        Enabled = false;
+        try {
+            int count = tableBox.Items.Count;
+            for (int i = 0; i < count && !results.Cancelled; i++) {
+                string name = (string)tableBox.Items[i];
+                results.SetProgress("Проверяю " + name + " (" + (i + 1) + " из " + count + ")...");
+                ScanTable(results, name, words);
+            }
+        } finally {
+            Enabled = true;
+            results.Finish();
+        }
     }
 
-    static bool IsDigits(string s) {
-        foreach (char c in s) if (c < '0' || c > '9') return false;
-        return true;
+    void ScanTable(ScanResults results, string name, string[] words) {
+        int counter = 0;
+        try {
+            DbfTable t = DbfTable.Load(Path.Combine(folder, name), encodingBox.Checked, delegate(object[] values) {
+                if (++counter % 2000 == 0) {
+                    Application.DoEvents();
+                    if (results.Cancelled) throw new OperationCanceledException();
+                }
+                return DbfTable.Matches(DbfTable.SearchText(values), words);
+            });
+            if (t.Rows.Count > 0) results.AddResult(name, t.Rows.Count, t.Total);
+        } catch (OperationCanceledException) {
+        } catch (Exception ex) {
+            results.AddError(name, ex.Message);
+        }
+        Application.DoEvents();
+    }
+
+    // Открыть таблицу из результатов поиска сразу с тем же поиском
+    internal void OpenTable(string name, string query) {
+        int index = -1;
+        for (int i = 0; i < tableBox.Items.Count; i++) {
+            if (string.Compare((string)tableBox.Items[i], name, StringComparison.OrdinalIgnoreCase) == 0) { index = i; break; }
+        }
+        if (index < 0) return;
+        searchBox.Text = query;
+        searchTimer.Stop();
+        if (tableBox.SelectedIndex == index) ApplyFilter();
+        else tableBox.SelectedIndex = index;
+        Activate();
     }
 
     void SortView() {
@@ -601,7 +683,8 @@ public class DbfViewer : Form {
             e.Handled = true;
             e.SuppressKeyPress = true;
             searchTimer.Stop();
-            ApplyFilter();
+            if (e.Control) SearchAllTables();   // Ctrl+Enter - искать во всех таблицах
+            else ApplyFilter();
         } else if (e.KeyCode == Keys.Down && grid.RowCount > 0) {
             e.Handled = true;
             grid.Focus();
@@ -683,6 +766,86 @@ public class DbfViewer : Form {
 
     void Message(string text) {
         MessageBox.Show(this, text, Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+    }
+}
+
+// Окно с результатами поиска по всем таблицам: где и сколько нашлось
+public class ScanResults : Form {
+    readonly DbfViewer viewer;
+    readonly string query;
+    readonly ListView list = new ListView();
+    readonly Label info = new Label();
+    readonly Button stop = new Button();
+    public bool Cancelled;
+    bool scanning = true;
+    int found;
+
+    public ScanResults(DbfViewer viewer, string query) {
+        this.viewer = viewer;
+        this.query = query;
+        Text = "Поиск во всех таблицах: " + query;
+        Size = new Size(560, 500);
+        StartPosition = FormStartPosition.CenterScreen;
+
+        list.Dock = DockStyle.Fill;
+        list.View = View.Details;
+        list.FullRowSelect = true;
+        list.HideSelection = false;
+        list.MultiSelect = false;
+        list.Columns.Add("Таблица", 180);
+        list.Columns.Add("Найдено", 90, HorizontalAlignment.Right);
+        list.Columns.Add("Всего записей", 260);
+        list.ItemActivate += delegate { OpenSelected(); };
+
+        Panel bottom = new Panel();
+        bottom.Dock = DockStyle.Bottom;
+        bottom.Height = 34;
+        info.Dock = DockStyle.Fill;
+        info.TextAlign = ContentAlignment.MiddleLeft;
+        stop.Text = "Стоп";
+        stop.Dock = DockStyle.Right;
+        stop.Width = 90;
+        stop.Click += delegate { Cancelled = true; };
+        bottom.Controls.Add(info);
+        bottom.Controls.Add(stop);
+
+        Controls.Add(list);
+        Controls.Add(bottom);
+        FormClosing += delegate { Cancelled = true; };
+    }
+
+    public void SetProgress(string text) {
+        if (IsDisposed) return;
+        info.Text = text;
+        info.Refresh();
+    }
+
+    public void AddResult(string table, int hits, int total) {
+        if (IsDisposed) return;
+        list.Items.Add(new ListViewItem(new string[] { table, hits.ToString(), total.ToString() }));
+        found++;
+    }
+
+    public void AddError(string table, string error) {
+        if (IsDisposed) return;
+        ListViewItem item = new ListViewItem(new string[] { table, "не открылась", error });
+        item.ForeColor = Color.Gray;
+        item.Tag = "error";
+        list.Items.Add(item);
+    }
+
+    public void Finish() {
+        scanning = false;
+        if (IsDisposed) return;
+        stop.Enabled = false;
+        info.Text = (Cancelled ? "Поиск остановлен. " : "Поиск закончен. ")
+            + (found == 0 ? "Ничего не найдено." : "Таблиц с совпадениями: " + found + ". Двойной щелчок - открыть таблицу с найденным.");
+    }
+
+    void OpenSelected() {
+        if (scanning) { info.Text = "Дождитесь конца поиска или нажмите \"Стоп\"."; return; }
+        if (list.SelectedItems.Count == 0 || list.SelectedItems[0].Tag != null) return;
+        viewer.OpenTable(list.SelectedItems[0].Text, query);
     }
 }
 '@
