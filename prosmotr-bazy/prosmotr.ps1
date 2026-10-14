@@ -1,4 +1,4 @@
-﻿# Просмотр базы FoxPro (таблицы .dbf) - ТОЛЬКО ЧТЕНИЕ.
+﻿# Поиск абонента в базе FoxPro (таблицы .dbf) - ТОЛЬКО ЧТЕНИЕ.
 # Таблицы открываются только на чтение, в базу ничего не записывается.
 
 $ErrorActionPreference = 'Stop'
@@ -95,6 +95,7 @@ public class DbfTable {
     public int Count;     // сколько записей в памяти
     public int Total;     // сколько неудалённых записей в файле
     public int Deleted;
+    public int Expected;  // сколько записей написано в заголовке файла
 
     const int BlockRecords = 4096;   // записи хранятся кусками, без одного огромного массива
     int recordLength;
@@ -110,6 +111,15 @@ public class DbfTable {
 
     // query - если задан, в памяти остаются только подходящие записи (поиск во всех таблицах)
     public static DbfTable Load(string path, bool otherEncoding, string query, LoadProgress progress) {
+        return LoadCore(path, otherEncoding, query, progress, false);
+    }
+
+    // Только заголовок: список полей и число записей, без чтения самих записей
+    public static DbfTable LoadHeader(string path) {
+        return LoadCore(path, false, null, null, true);
+    }
+
+    static DbfTable LoadCore(string path, bool otherEncoding, string query, LoadProgress progress, bool headerOnly) {
         DbfTable t = new DbfTable();
         t.FilePath = path;
         using (FileStream fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 1 << 16)) {
@@ -143,6 +153,8 @@ public class DbfTable {
             }
             if (offset > recordLen)
                 throw new InvalidDataException("Не удалось разобрать структуру таблицы.");
+            t.Expected = count;
+            if (headerOnly) return t;
 
             // поисковая копия: только текстовые поля (двоичные числа и ссылки на примечания - пропуск),
             // после каждого поля - разделитель
@@ -241,21 +253,50 @@ public class DbfTable {
     public SearchWord[] PrepareWords(string query) {
         string[] words = SplitWords(query);
         SearchWord[] result = new SearchWord[words.Length];
-        for (int i = 0; i < words.Length; i++) {
-            string w = words[i];
-            // дата 03.03.2021 хранится в таблице как 20210303
-            if (w.Length == 10 && w[2] == '.' && w[5] == '.' && IsDigits(w.Remove(5, 1).Remove(2, 1)))
-                w = w.Substring(6, 4) + w.Substring(3, 2) + w.Substring(0, 2);
-            SearchWord sw = new SearchWord();
-            sw.Bytes = ToLowerBytes(w);
-            if (IsDigits(w)) {
-                sw.WholeNumber = w.Length <= 4;
-                string trimmed = w.TrimStart('0');
-                if (trimmed.Length > 0 && trimmed.Length < w.Length) sw.Trimmed = ToLowerBytes(trimmed);
-            }
-            result[i] = sw;
-        }
+        for (int i = 0; i < words.Length; i++) result[i] = PrepareWord(words[i]);
         return result;
+    }
+
+    public SearchWord PrepareWord(string word) {
+        string w = word.ToLowerInvariant();
+        // дата 03.03.2021 хранится в таблице как 20210303
+        if (w.Length == 10 && w[2] == '.' && w[5] == '.' && IsDigits(w.Remove(5, 1).Remove(2, 1)))
+            w = w.Substring(6, 4) + w.Substring(3, 2) + w.Substring(0, 2);
+        SearchWord sw = new SearchWord();
+        sw.Bytes = ToLowerBytes(w);
+        if (IsDigits(w)) {
+            sw.WholeNumber = w.Length <= 4;
+            string trimmed = w.TrimStart('0');
+            if (trimmed.Length > 0 && trimmed.Length < w.Length) sw.Trimmed = ToLowerBytes(trimmed);
+        }
+        return sw;
+    }
+
+    public int FieldIndex(string name) {
+        for (int i = 0; i < Fields.Count; i++)
+            if (string.Compare(Fields[i].Name, name, StringComparison.OrdinalIgnoreCase) == 0) return i;
+        return -1;
+    }
+
+    // слово встречается в поле; field = -1 - где угодно в записи
+    public bool FieldContains(int row, int field, SearchWord w) {
+        byte[] buf = lower[row / BlockRecords];
+        int start = (row % BlockRecords) * lowerLength;
+        if (field < 0) return MatchWord(buf, start, start + lowerLength, w);
+        int from = start + lowerOffsets[field];
+        return MatchWord(buf, from, from + Fields[field].Length, w);
+    }
+
+    // поле целиком (без пробелов по краям) равно слову: дом "18" - это 18, а не 118 и не 18а
+    public bool FieldEquals(int row, int field, SearchWord w) {
+        byte[] buf = lower[row / BlockRecords];
+        int from = (row % BlockRecords) * lowerLength + lowerOffsets[field];
+        int end = from + Fields[field].Length;
+        while (from < end && buf[from] <= 32) from++;
+        while (end > from && buf[end - 1] <= 32) end--;
+        if (end - from != w.Bytes.Length) return false;
+        for (int k = 0; k < w.Bytes.Length; k++) if (buf[from + k] != w.Bytes[k]) return false;
+        return true;
     }
 
     byte[] ToLowerBytes(string s) {
@@ -274,14 +315,14 @@ public class DbfTable {
     }
 
     static bool MatchesAll(byte[] buf, int from, int length, SearchWord[] words) {
-        int end = from + length;
-        foreach (SearchWord w in words) {
-            bool ok = w.WholeNumber
-                ? ContainsNumber(buf, from, end, w.Bytes) || (w.Trimmed != null && ContainsNumber(buf, from, end, w.Trimmed))
-                : IndexOf(buf, from, end, w.Bytes) >= 0 || (w.Trimmed != null && IndexOf(buf, from, end, w.Trimmed) >= 0);
-            if (!ok) return false;
-        }
+        foreach (SearchWord w in words) if (!MatchWord(buf, from, from + length, w)) return false;
         return true;
+    }
+
+    static bool MatchWord(byte[] buf, int from, int end, SearchWord w) {
+        if (w.WholeNumber)
+            return ContainsNumber(buf, from, end, w.Bytes) || (w.Trimmed != null && ContainsNumber(buf, from, end, w.Trimmed));
+        return IndexOf(buf, from, end, w.Bytes) >= 0 || (w.Trimmed != null && IndexOf(buf, from, end, w.Trimmed) >= 0);
     }
 
     static int IndexOf(byte[] buf, int from, int end, byte[] pattern) {
@@ -584,22 +625,11 @@ public class DbfViewer : Form {
             Cursor = Cursors.WaitCursor;
             status.Text = "Ищу папку базы...";
             status.Refresh();
-            folder = FindFolder(ReadSetting(0));
+            folder = Places.FindFolder(ReadSetting(0));
             Cursor = Cursors.Default;
             FillTables(lastTable);
             searchBox.Focus();
         };
-    }
-
-    // Батник базы подключает \\fs-dos\communal как диск O:, но только пока база запущена,
-    // поэтому пробуем и диск, и прямой сетевой путь
-    string FindFolder(string saved) {
-        string[] candidates = { saved, @"O:\BASAFOX", @"\\fs-dos\communal\BASAFOX" };
-        foreach (string c in candidates) {
-            try { if (c != null && Directory.Exists(c)) return c; }
-            catch (Exception) { }
-        }
-        return saved != null ? saved : @"\\fs-dos\communal\BASAFOX";
     }
 
     void OnFolderKey(object sender, KeyEventArgs e) {
@@ -650,7 +680,7 @@ public class DbfViewer : Form {
         tableBox.Items.Clear();
         suspend = false;
         string[] files = new string[0];
-        try { files = Directory.GetFiles(folder, "*.dbf"); }
+        try { files = Places.DbfFiles(folder); }
         catch (Exception ex) { Message("Не удалось открыть папку " + folder + "\n\n" + ex.Message + "\n\nПроверьте путь в поле \"Папка\" и нажмите \"Открыть\"."); }
         Array.Sort(files, StringComparer.OrdinalIgnoreCase);
         int index = -1;
@@ -885,30 +915,7 @@ public class DbfViewer : Form {
 
     internal void ShowCard(int viewRow) {
         if (table == null || viewRow < 0 || viewRow >= view.Count) return;
-        object[] values;
-        using (MemoReader memo = table.OpenMemo()) values = table.GetRow(view[viewRow], memo);
-        Form card = new Form();
-        card.Text = "Карточка - " + Path.GetFileName(table.FilePath);
-        card.Size = new Size(650, 600);
-        card.StartPosition = FormStartPosition.CenterScreen;
-        DataGridView g = new DataGridView();
-        g.Dock = DockStyle.Fill;
-        g.ReadOnly = true;
-        g.AllowUserToAddRows = false;
-        g.AllowUserToDeleteRows = false;
-        g.RowHeadersVisible = false;
-        g.ClipboardCopyMode = DataGridViewClipboardCopyMode.EnableWithoutHeaderText;
-        g.ColumnCount = 2;
-        g.Columns[0].HeaderText = "Поле";
-        g.Columns[1].HeaderText = "Значение";
-        g.Columns[0].AutoSizeMode = DataGridViewAutoSizeColumnMode.AllCells;
-        g.Columns[1].AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill;
-        g.Columns[1].DefaultCellStyle.WrapMode = DataGridViewTriState.True;
-        g.AutoSizeRowsMode = DataGridViewAutoSizeRowsMode.AllCells;
-        for (int j = 0; j < values.Length; j++)
-            g.Rows.Add(table.Fields[j].Name, DbfTable.Format(values[j], true));
-        card.Controls.Add(g);
-        card.Show(this);
+        Card.Show(this, table, view[viewRow]);
     }
 
     void ExportToExcel() {
@@ -1042,6 +1049,580 @@ public class ScanResults : Form {
         viewer.OpenTable(list.SelectedItems[0].Text, query);
     }
 }
+
+// Подписи полей таблицы абонентов - как на карточке "АБОНЕНТ" в старой программе
+public static class FieldNames {
+    static Dictionary<string, string> names;
+
+    public static string Label(string field) {
+        if (names == null) {
+            names = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            string[] pairs = {
+                "NAB", "№ абонента", "FIO", "Ф.И.О.", "UL", "Улица", "DOM", "Дом", "KOR", "Корпус", "KV", "Квартира",
+                "TEL", "Телефон", "KNIGA", "№ книги", "LGI", "Код льготы", "SKID", "% скидки", "KTAR", "Код тарифа",
+                "GIL", "Жильцов", "KLG", "Льготных жильцов", "TPO", "Тип помещения", "ROZ", "Розеток",
+                "TOS", "Точек освещения", "NCH", "№ счётчика", "TIPCH", "Тип счётчика", "RAS", "Разрядность",
+                "GODPR", "Год поверки", "KVP", "Квартал поверки", "DZA", "Дата замены счётчика",
+                "PZS", "Показание при замене", "NSC", "№ снятого счётчика" };
+            for (int i = 0; i + 1 < pairs.Length; i += 2) names[pairs[i]] = pairs[i + 1];
+        }
+        string label;
+        return names.TryGetValue(field, out label) ? label : null;
+    }
+
+    public static string Title(string field) {
+        string label = Label(field);
+        return label == null ? field : label + " (" + field + ")";
+    }
+}
+
+// Карточка записи: все поля целиком, с русскими подписями, где они известны
+public static class Card {
+    public static void Show(IWin32Window owner, DbfTable table, int row) {
+        object[] values;
+        using (MemoReader memo = table.OpenMemo()) values = table.GetRow(row, memo);
+        Form card = new Form();
+        card.Text = "Карточка - " + Path.GetFileName(table.FilePath);
+        card.Size = new Size(650, 650);
+        card.StartPosition = FormStartPosition.CenterScreen;
+        DataGridView g = new DataGridView();
+        g.Dock = DockStyle.Fill;
+        g.ReadOnly = true;
+        g.AllowUserToAddRows = false;
+        g.AllowUserToDeleteRows = false;
+        g.RowHeadersVisible = false;
+        g.ClipboardCopyMode = DataGridViewClipboardCopyMode.EnableWithoutHeaderText;
+        g.ColumnCount = 2;
+        g.Columns[0].HeaderText = "Поле";
+        g.Columns[1].HeaderText = "Значение";
+        g.Columns[0].AutoSizeMode = DataGridViewAutoSizeColumnMode.AllCells;
+        g.Columns[1].AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill;
+        g.Columns[1].DefaultCellStyle.WrapMode = DataGridViewTriState.True;
+        g.AutoSizeRowsMode = DataGridViewAutoSizeRowsMode.AllCells;
+        for (int j = 0; j < values.Length; j++)
+            g.Rows.Add(FieldNames.Title(table.Fields[j].Name), DbfTable.Format(values[j], true));
+        card.Controls.Add(g);
+        card.Show(owner);
+    }
+}
+
+public static class Places {
+    public const string Network = @"\\fs-dos\communal\BASAFOX";
+
+    // Батник базы подключает \\fs-dos\communal как диск O:, но только пока база запущена,
+    // поэтому пробуем и диск, и прямой сетевой путь
+    public static string FindFolder(string saved) {
+        string[] candidates = { saved, @"O:\BASAFOX", Network };
+        foreach (string c in candidates) {
+            try { if (c != null && Directory.Exists(c)) return c; }
+            catch (Exception) { }
+        }
+        return saved != null ? saved : Network;
+    }
+
+    public static string[] DbfFiles(string folder) {
+        List<string> list = new List<string>();
+        foreach (string f in Directory.GetFiles(folder))
+            if (string.Compare(Path.GetExtension(f), ".dbf", StringComparison.OrdinalIgnoreCase) == 0) list.Add(f);
+        string[] files = list.ToArray();
+        Array.Sort(files, StringComparer.OrdinalIgnoreCase);
+        return files;
+    }
+
+    public static string ReadSetting(string file, int line) {
+        try {
+            if (!File.Exists(file)) return null;
+            string[] lines = File.ReadAllLines(file, Encoding.UTF8);
+            return line < lines.Length && lines[line].Trim().Length > 0 ? lines[line].Trim() : null;
+        } catch (Exception) {
+            return null;
+        }
+    }
+
+    public static void SaveSettings(string file, string[] lines) {
+        try { File.WriteAllLines(file, lines, Encoding.UTF8); }
+        catch (Exception) { }   // папка может быть только для чтения - тогда просто не запоминаем
+    }
+}
+
+public class TableInfo {
+    public string Name;
+    public int Records;
+    public bool Abonents;
+
+    public override string ToString() {
+        return Name + "   (" + Records + " записей)";
+    }
+
+    // Таблицы папки, похожие на таблицу абонентов - первыми; архивы (ARC...) - после основных
+    public static List<TableInfo> List(string folder, LoadProgress progress) {
+        List<TableInfo> list = new List<TableInfo>();
+        string[] files = Places.DbfFiles(folder);
+        for (int i = 0; i < files.Length; i++) {
+            if (progress != null) progress(i, files.Length);
+            TableInfo info = new TableInfo();
+            info.Name = Path.GetFileName(files[i]);
+            try {
+                DbfTable h = DbfTable.LoadHeader(files[i]);
+                info.Records = h.Expected;
+                info.Abonents = h.FieldIndex("NAB") >= 0 && h.FieldIndex("FIO") >= 0
+                    && (h.FieldIndex("DOM") >= 0 || h.FieldIndex("UL") >= 0);
+            } catch (Exception) {
+                continue;
+            }
+            list.Add(info);
+        }
+        list.Sort(delegate(TableInfo a, TableInfo b) {
+            if (a.Abonents != b.Abonents) return a.Abonents ? -1 : 1;
+            bool aa = a.Name.ToUpperInvariant().StartsWith("ARC"), ba = b.Name.ToUpperInvariant().StartsWith("ARC");
+            if (aa != ba) return aa ? 1 : -1;
+            if (a.Records != b.Records) return b.Records.CompareTo(a.Records);
+            return string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase);
+        });
+        return list;
+    }
+}
+
+// Поиск абонента одной строкой: лицевой счёт, адрес или номер счётчика
+public class AbonentQuery {
+    readonly DbfTable t;
+    readonly int[] textFields;   // где искать слова: ФИО, улица
+    readonly int[] idFields;     // где искать длинные номера: лицевой, счётчик, телефон
+    readonly int dom, kor, kv, ul;
+    public readonly int[] Columns;   // что показывать в списке найденного
+
+    static readonly string[] Skip = { "ул", "улица", "пер", "переулок", "пр", "пр-т", "проспект", "г", "аг", "п", "пос", "дер", "с/с" };
+
+    public AbonentQuery(DbfTable t) {
+        this.t = t;
+        textFields = Existing(new string[] { "FIO", "UL", "NP" });
+        idFields = Existing(new string[] { "NAB", "NCH", "NSC", "TEL", "LS", "LIC", "LSCH" });
+        dom = t.FieldIndex("DOM");
+        kor = t.FieldIndex("KOR");
+        kv = t.FieldIndex("KV");
+        ul = t.FieldIndex("UL");
+        Columns = Existing(new string[] { "NAB", "FIO", "UL", "DOM", "KOR", "KV", "NCH", "TEL" });
+        if (Columns.Length == 0) {
+            Columns = new int[Math.Min(8, t.Fields.Count)];
+            for (int i = 0; i < Columns.Length; i++) Columns[i] = i;
+        }
+    }
+
+    int[] Existing(string[] names) {
+        List<int> list = new List<int>();
+        foreach (string n in names) {
+            int i = t.FieldIndex(n);
+            if (i >= 0) list.Add(i);
+        }
+        return list.ToArray();
+    }
+
+    class Parsed {
+        public List<SearchWord> Text = new List<SearchWord>();
+        public List<SearchWord> Ids = new List<SearchWord>();
+        public SearchWord House, Korp, Flat;
+    }
+
+    public List<int> Find(string query) {
+        List<int> found = new List<int>();
+        Parsed q = Parse(query);
+        if (q.Text.Count == 0 && q.Ids.Count == 0 && q.House == null && q.Korp == null && q.Flat == null) return found;
+        for (int row = 0; row < t.Count; row++) if (Match(row, q)) found.Add(row);
+        if (found.Count <= 20000) SortByAddress(found);
+        return found;
+    }
+
+    Parsed Parse(string query) {
+        Parsed q = new Parsed();
+        List<string> numbers = new List<string>();
+        string pending = null;   // слово "дом", "корп" или "кв" перед числом
+        foreach (string w in DbfTable.SplitWords(query.Replace('.', ' '))) {
+            if (w == "д" || w == "дом") { pending = "дом"; continue; }
+            if (w == "к" || w == "корп" || w == "корпус") { pending = "корп"; continue; }
+            if (w == "кв" || w == "квартира") { pending = "кв"; continue; }
+            if (Array.IndexOf(Skip, w) >= 0) { pending = null; continue; }
+            bool digitFirst = w[0] >= '0' && w[0] <= '9';
+            bool longNumber = IsDigits(w) && w.Length >= 5;
+            if (digitFirst && !longNumber && w.Length <= 6) {   // 18, 18а, 18/2 - дом, корпус или квартира
+                if (pending == "корп" && q.Korp == null) q.Korp = t.PrepareWord(w);
+                else if (pending == "кв" && q.Flat == null) q.Flat = t.PrepareWord(w);
+                else if (pending == "дом" && q.House == null) q.House = t.PrepareWord(w);
+                else numbers.Add(w);
+                pending = null;
+                continue;
+            }
+            pending = null;
+            if (HasDigit(w)) q.Ids.Add(t.PrepareWord(w));   // лицевой, номер счётчика, телефон
+            else q.Text.Add(t.PrepareWord(w));               // фамилия, улица
+        }
+        // числа без пояснений: первое - дом, второе - квартира ("заводская 18 5")
+        foreach (string n in numbers) {
+            if (q.House == null) q.House = t.PrepareWord(n);
+            else if (q.Flat == null) q.Flat = t.PrepareWord(n);
+            else if (q.Korp == null) q.Korp = t.PrepareWord(n);
+        }
+        return q;
+    }
+
+    bool Match(int row, Parsed q) {
+        foreach (SearchWord w in q.Text) if (!InAny(row, textFields, w)) return false;
+        foreach (SearchWord w in q.Ids) if (!InAny(row, idFields, w)) return false;
+        if (q.House != null && !Is(row, dom, q.House)) return false;
+        if (q.Korp != null && !Is(row, kor, q.Korp)) return false;
+        if (q.Flat != null && !Is(row, kv, q.Flat)) return false;
+        return true;
+    }
+
+    bool InAny(int row, int[] fields, SearchWord w) {
+        if (fields.Length == 0) return t.FieldContains(row, -1, w);
+        foreach (int f in fields) if (t.FieldContains(row, f, w)) return true;
+        return false;
+    }
+
+    bool Is(int row, int field, SearchWord w) {
+        return field < 0 ? t.FieldContains(row, -1, w) : t.FieldEquals(row, field, w);
+    }
+
+    class SortItem {
+        public int Row;
+        public string Street, House, Flat;
+    }
+
+    // по улице, дому и квартире, с числами по порядку: 2, 10, 18а
+    void SortByAddress(List<int> rows) {
+        if (ul < 0 && dom < 0) return;
+        List<SortItem> items = new List<SortItem>(rows.Count);
+        foreach (int r in rows) {
+            SortItem it = new SortItem();
+            it.Row = r;
+            it.Street = ul < 0 ? "" : DbfTable.Format(t.GetValue(r, ul, null), true);
+            it.House = dom < 0 ? "" : DbfTable.Format(t.GetValue(r, dom, null), true);
+            it.Flat = kv < 0 ? "" : DbfTable.Format(t.GetValue(r, kv, null), true);
+            items.Add(it);
+        }
+        items.Sort(delegate(SortItem a, SortItem b) {
+            int c = string.Compare(a.Street, b.Street, StringComparison.CurrentCultureIgnoreCase);
+            if (c == 0) c = Natural(a.House, b.House);
+            if (c == 0) c = Natural(a.Flat, b.Flat);
+            return c != 0 ? c : a.Row.CompareTo(b.Row);
+        });
+        rows.Clear();
+        foreach (SortItem it in items) rows.Add(it.Row);
+    }
+
+    static int Natural(string a, string b) {
+        int na = LeadingNumber(a), nb = LeadingNumber(b);
+        if (na != nb) return na.CompareTo(nb);
+        return string.Compare(a, b, StringComparison.CurrentCultureIgnoreCase);
+    }
+
+    static int LeadingNumber(string s) {
+        int n = 0, i = 0;
+        s = s.Trim();
+        while (i < s.Length && i < 9 && s[i] >= '0' && s[i] <= '9') n = n * 10 + (s[i++] - '0');
+        return i == 0 ? int.MaxValue : n;
+    }
+
+    static bool IsDigits(string s) {
+        foreach (char c in s) if (c < '0' || c > '9') return false;
+        return s.Length > 0;
+    }
+
+    static bool HasDigit(string s) {
+        foreach (char c in s) if (c >= '0' && c <= '9') return true;
+        return false;
+    }
+}
+
+// Главное окно: одна строка поиска по базе абонентов
+public class AbonentSearch : Form {
+    readonly string settingsFile;
+    readonly string viewerSettings;
+    string folder;
+    string tableName;
+    DbfTable table;
+    AbonentQuery query;
+    bool loading;
+    List<int> found = new List<int>();
+
+    internal readonly TextBox queryBox = new TextBox();
+    readonly DataGridView grid = new DataGridView();
+    readonly Label status = new Label();
+    readonly Panel bottom = new Panel();
+    readonly Timer timer = new Timer();
+
+    public static void Run(string dir) {
+        Application.EnableVisualStyles();
+        Application.Run(new AbonentSearch(Path.Combine(dir, "poisk.txt"), Path.Combine(dir, "nastroiki.txt")));
+    }
+
+    public AbonentSearch(string settingsFile, string viewerSettings) {
+        this.settingsFile = settingsFile;
+        this.viewerSettings = viewerSettings;
+        Text = "Поиск абонента (только чтение)";
+        Size = new Size(1000, 650);
+        StartPosition = FormStartPosition.CenterScreen;
+
+        Panel top = new Panel();
+        top.Dock = DockStyle.Top;
+        top.Height = 92;
+        Label caption = new Label();
+        caption.Text = "Лицевой счёт, адрес или номер счётчика:";
+        caption.AutoSize = true;
+        caption.Location = new Point(12, 10);
+        queryBox.Font = new Font(Font.FontFamily, 14f);
+        queryBox.Location = new Point(12, 30);
+        queryBox.Width = top.Width - 24;
+        queryBox.Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top;
+        queryBox.TextChanged += delegate { timer.Stop(); timer.Start(); };
+        queryBox.KeyDown += new KeyEventHandler(OnQueryKey);
+        Label hint = new Label();
+        hint.Text = "Например:   044060216      заводская 18      заводская 18 кв 5      иванов      номер счётчика";
+        hint.ForeColor = SystemColors.GrayText;
+        hint.AutoSize = true;
+        hint.Location = new Point(12, 68);
+        top.Controls.Add(caption);
+        top.Controls.Add(queryBox);
+        top.Controls.Add(hint);
+
+        grid.Dock = DockStyle.Fill;
+        grid.VirtualMode = true;
+        grid.ReadOnly = true;
+        grid.AllowUserToAddRows = false;
+        grid.AllowUserToDeleteRows = false;
+        grid.AllowUserToResizeRows = false;
+        grid.RowHeadersVisible = false;
+        grid.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
+        grid.MultiSelect = false;
+        grid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
+        grid.ClipboardCopyMode = DataGridViewClipboardCopyMode.EnableWithoutHeaderText;
+        grid.CellValueNeeded += new DataGridViewCellValueEventHandler(OnCellValueNeeded);
+        grid.CellDoubleClick += delegate(object s, DataGridViewCellEventArgs e) { if (e.RowIndex >= 0) OpenCard(e.RowIndex); };
+        grid.KeyDown += new KeyEventHandler(OnGridKey);
+
+        bottom.Dock = DockStyle.Bottom;
+        bottom.Height = 34;
+        status.Dock = DockStyle.Fill;
+        status.TextAlign = ContentAlignment.MiddleLeft;
+        bottom.Controls.Add(status);
+        bottom.Controls.Add(BottomButton("Все таблицы...", delegate { new DbfViewer(this.viewerSettings).Show(); }));
+        bottom.Controls.Add(BottomButton("Где искать...", delegate { ChooseBase(); }));
+        bottom.Controls.Add(BottomButton("Обновить", delegate { LoadTable(); }));
+
+        timer.Interval = 300;
+        timer.Tick += delegate { timer.Stop(); ApplySearch(); };
+
+        Controls.Add(grid);
+        Controls.Add(bottom);
+        Controls.Add(top);
+
+        Shown += delegate { Start(); };
+    }
+
+    Button BottomButton(string text, EventHandler click) {
+        Button b = new Button();
+        b.Text = text;
+        b.Dock = DockStyle.Right;
+        b.Width = 120;
+        b.Click += click;
+        return b;
+    }
+
+    void Start() {
+        queryBox.Focus();
+        SetBusy(true, "Ищу папку базы...");
+        folder = Places.FindFolder(Places.ReadSetting(settingsFile, 0));
+        tableName = Places.ReadSetting(settingsFile, 1);
+        if (tableName == null || !File.Exists(Path.Combine(folder, tableName))) {
+            tableName = null;
+            try {
+                List<TableInfo> tables = TableInfo.List(folder, delegate(int done, int total) {
+                    if (IsDisposed) throw new OperationCanceledException();
+                    status.Text = "Ищу таблицу абонентов: проверено " + done + " из " + total + " таблиц...";
+                    Application.DoEvents();
+                });
+                if (tables.Count > 0 && tables[0].Abonents) tableName = tables[0].Name;
+            } catch (OperationCanceledException) {
+                return;
+            } catch (Exception ex) {
+                SetBusy(false, "Не удалось открыть папку " + folder + ": " + ex.Message + "   Нажмите \"Где искать...\".");
+                return;
+            }
+        }
+        SetBusy(false, null);
+        if (tableName == null) {
+            status.Text = "Не нашёл таблицу абонентов в папке " + folder + ". Нажмите \"Где искать...\" и выберите её.";
+            return;
+        }
+        LoadTable();
+    }
+
+    internal void LoadTable() {
+        if (loading || tableName == null) return;
+        string path = Path.Combine(folder, tableName);
+        SetBusy(true, "Загружаю базу абонентов " + tableName + "...");
+        try {
+            table = DbfTable.Load(path, false, null, delegate(int done, int expected) {
+                if (IsDisposed) throw new OperationCanceledException();
+                status.Text = "Загружаю базу абонентов " + tableName + ": " + done + " из " + expected + "...";
+                Application.DoEvents();
+            });
+            query = new AbonentQuery(table);
+        } catch (OperationCanceledException) {
+            return;
+        } catch (Exception ex) {
+            table = null;
+            query = null;
+            SetBusy(false, "Не удалось прочитать " + path + ": " + ex.Message);
+            return;
+        }
+        Places.SaveSettings(settingsFile, new string[] { folder, tableName });
+        BuildColumns();
+        SetBusy(false, null);
+        ApplySearch();
+    }
+
+    void SetBusy(bool busy, string text) {
+        loading = busy;
+        foreach (Control c in bottom.Controls) if (c is Button) c.Enabled = !busy;
+        Cursor = busy ? Cursors.AppStarting : Cursors.Default;
+        if (text != null) { status.Text = text; status.Refresh(); }
+    }
+
+    void BuildColumns() {
+        grid.RowCount = 0;
+        grid.Columns.Clear();
+        foreach (int f in query.Columns) {
+            DbfField field = table.Fields[f];
+            DataGridViewTextBoxColumn c = new DataGridViewTextBoxColumn();
+            string label = FieldNames.Label(field.Name);
+            c.HeaderText = label == null ? field.Name : label;
+            c.SortMode = DataGridViewColumnSortMode.NotSortable;
+            string n = field.Name.ToUpperInvariant();
+            c.FillWeight = n == "FIO" ? 300 : n == "UL" ? 200 : (n == "NAB" || n == "NCH") ? 130 : 70;
+            grid.Columns.Add(c);
+        }
+    }
+
+    internal void ApplySearch() {
+        if (loading || table == null) return;
+        found = query.Find(queryBox.Text);
+        grid.RowCount = 0;
+        grid.RowCount = found.Count;
+        grid.Invalidate();
+        string where = tableName + ", " + table.Count + " абонентов";
+        if (DbfTable.SplitWords(queryBox.Text).Length == 0)
+            status.Text = "Впишите лицевой счёт, адрес или номер счётчика.   База: " + where;
+        else if (found.Count == 0)
+            status.Text = "Ничего не найдено.   База: " + where;
+        else
+            status.Text = "Найдено: " + found.Count + ". Двойной щелчок или Enter - карточка.   База: " + where;
+    }
+
+    void OnCellValueNeeded(object sender, DataGridViewCellValueEventArgs e) {
+        if (table == null || e.RowIndex >= found.Count || e.ColumnIndex >= query.Columns.Length) return;
+        e.Value = DbfTable.Format(table.GetValue(found[e.RowIndex], query.Columns[e.ColumnIndex], null), false);
+    }
+
+    void OnQueryKey(object sender, KeyEventArgs e) {
+        if (e.KeyCode == Keys.Enter) {
+            e.Handled = true;
+            e.SuppressKeyPress = true;
+            timer.Stop();
+            ApplySearch();
+            if (found.Count == 1) OpenCard(0);   // нашёлся один - сразу карточка
+            else if (found.Count > 1) grid.Focus();
+        } else if (e.KeyCode == Keys.Down && found.Count > 0) {
+            e.Handled = true;
+            grid.Focus();
+        }
+    }
+
+    void OnGridKey(object sender, KeyEventArgs e) {
+        if (e.KeyCode == Keys.Enter && grid.CurrentCell != null) {
+            e.Handled = true;
+            e.SuppressKeyPress = true;
+            OpenCard(grid.CurrentCell.RowIndex);
+        }
+    }
+
+    internal void OpenCard(int index) {
+        if (table == null || index < 0 || index >= found.Count) return;
+        Card.Show(this, table, found[index]);
+    }
+
+    // Выбор папки и таблицы абонентов, если сама не нашлась или нашлась не та
+    void ChooseBase() {
+        Form d = new Form();
+        d.Text = "Где искать абонентов";
+        d.Size = new Size(560, 420);
+        d.StartPosition = FormStartPosition.CenterParent;
+        d.MinimizeBox = false;
+        d.MaximizeBox = false;
+
+        TextBox folderBox = new TextBox();
+        folderBox.Text = folder;
+        folderBox.Location = new Point(12, 30);
+        folderBox.Width = 330;
+        Button browse = new Button();
+        browse.Text = "Обзор...";
+        browse.Location = new Point(350, 28);
+        Button show = new Button();
+        show.Text = "Показать";
+        show.Location = new Point(430, 28);
+        Label l1 = new Label();
+        l1.Text = "Папка с таблицами базы:";
+        l1.AutoSize = true;
+        l1.Location = new Point(12, 10);
+        Label l2 = new Label();
+        l2.Text = "Таблица абонентов (подходящие - вверху):";
+        l2.AutoSize = true;
+        l2.Location = new Point(12, 62);
+        ListBox list = new ListBox();
+        list.Location = new Point(12, 82);
+        list.Size = new Size(520, 250);
+        Button ok = new Button();
+        ok.Text = "OK";
+        ok.Location = new Point(370, 345);
+        ok.DialogResult = DialogResult.OK;
+        Button cancel = new Button();
+        cancel.Text = "Отмена";
+        cancel.Location = new Point(455, 345);
+        cancel.DialogResult = DialogResult.Cancel;
+        d.AcceptButton = ok;
+        d.CancelButton = cancel;
+        d.Controls.AddRange(new Control[] { l1, folderBox, browse, show, l2, list, ok, cancel });
+
+        EventHandler fill = delegate {
+            list.Items.Clear();
+            d.Cursor = Cursors.WaitCursor;
+            try {
+                foreach (TableInfo info in TableInfo.List(folderBox.Text.Trim(), null)) {
+                    list.Items.Add(info);
+                    if (string.Compare(info.Name, tableName, StringComparison.OrdinalIgnoreCase) == 0) list.SelectedItem = info;
+                }
+                if (list.SelectedIndex < 0 && list.Items.Count > 0) list.SelectedIndex = 0;
+            } catch (Exception ex) {
+                MessageBox.Show(d, "Не удалось открыть папку:\n" + ex.Message, d.Text);
+            } finally {
+                d.Cursor = Cursors.Default;
+            }
+        };
+        show.Click += fill;
+        browse.Click += delegate {
+            FolderBrowserDialog fb = new FolderBrowserDialog();
+            if (Directory.Exists(folderBox.Text)) fb.SelectedPath = folderBox.Text;
+            if (fb.ShowDialog(d) == DialogResult.OK) { folderBox.Text = fb.SelectedPath; fill(null, EventArgs.Empty); }
+        };
+        list.DoubleClick += delegate { if (list.SelectedItem != null) d.DialogResult = DialogResult.OK; };
+        d.Shown += delegate { fill(null, EventArgs.Empty); };
+
+        if (d.ShowDialog(this) != DialogResult.OK || list.SelectedItem == null) return;
+        folder = folderBox.Text.Trim();
+        tableName = ((TableInfo)list.SelectedItem).Name;
+        LoadTable();
+    }
+}
 '@
 
 # Перед запуском Windows собирает программу и пишет при этом временные файлы в папку TEMP.
@@ -1070,7 +1651,7 @@ while ($true) {
 }
 
 try {
-    [DbfViewer]::Run((Join-Path $here 'nastroiki.txt'))
+    [AbonentSearch]::Run($here)
 } catch {
     [void][System.Windows.Forms.MessageBox]::Show("$_", 'Просмотр базы - ошибка')
 }
