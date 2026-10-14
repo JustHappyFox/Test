@@ -25,27 +25,91 @@ public class DbfField {
     public int Length;
 }
 
-// Решает, оставить ли прочитанную запись (для поиска по всем таблицам без загрузки их целиком)
-public delegate bool RowFilter(object[] values);
-
 // Сообщает, сколько записей уже прочитано (чтобы окно не "зависало" на больших таблицах)
 public delegate void LoadProgress(int done, int expected);
 
-// Таблица DBF (FoxPro / dBase), прочитанная в память. Файл открывается только на чтение.
+// Слово поиска, переведённое в байты кодировки таблицы
+public class SearchWord {
+    public byte[] Bytes;
+    public byte[] Trimmed;      // то же число без нулей впереди, или null
+    public bool WholeNumber;    // короткое число (дом, квартира) - ищется только целиком
+}
+
+// Примечания (memo) читаются из файла .FPT только когда нужны - для карточки и выгрузки
+public class MemoReader : IDisposable {
+    readonly FileStream fs;
+    readonly int blockSize;
+    readonly Encoding enc;
+
+    MemoReader(FileStream fs, int blockSize, Encoding enc) {
+        this.fs = fs;
+        this.blockSize = blockSize;
+        this.enc = enc;
+    }
+
+    public static MemoReader Open(string dbfPath, Encoding enc) {
+        string path = Path.ChangeExtension(dbfPath, ".FPT");
+        if (!File.Exists(path)) path = Path.ChangeExtension(dbfPath, ".fpt");
+        if (!File.Exists(path)) return null;
+        FileStream fs = null;
+        try {
+            fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            byte[] h = new byte[8];
+            if (DbfTable.ReadUpTo(fs, h, 8) < 8) { fs.Close(); return null; }
+            int size = (h[6] << 8) | h[7];
+            return new MemoReader(fs, size > 0 ? size : 64, enc);
+        } catch (IOException) {
+            if (fs != null) fs.Close();
+            return null;
+        }
+    }
+
+    public string Read(int block) {
+        long pos = (long)block * blockSize;
+        if (pos + 8 > fs.Length) return "";
+        fs.Seek(pos, SeekOrigin.Begin);
+        byte[] h = new byte[8];
+        if (DbfTable.ReadUpTo(fs, h, 8) < 8) return "";
+        int type = (h[0] << 24) | (h[1] << 16) | (h[2] << 8) | h[3];
+        long len = (uint)((h[4] << 24) | (h[5] << 16) | (h[6] << 8) | h[7]);
+        if (type != 1) return "(объект)";
+        len = Math.Min(len, Math.Min(fs.Length - pos - 8, 1 << 20));   // не больше 1 МБ на одно примечание
+        if (len <= 0) return "";
+        byte[] b = new byte[len];
+        int got = DbfTable.ReadUpTo(fs, b, b.Length);
+        return enc.GetString(b, 0, got).TrimEnd('\0', ' ', '\r', '\n');
+    }
+
+    public void Dispose() {
+        fs.Close();
+    }
+}
+
+// Таблица DBF (FoxPro / dBase). Файл открывается только на чтение.
+// Записи хранятся в памяти как есть, байтами, и разбираются на поля только для показа -
+// так таблица на 100 000 абонентов читается быстро и занимает в памяти немного.
 public class DbfTable {
     public string FilePath;
     public List<DbfField> Fields = new List<DbfField>();
-    public List<object[]> Rows = new List<object[]>();
+    public Encoding Enc;
+    public int Count;     // сколько записей в памяти
+    public int Total;     // сколько неудалённых записей в файле
     public int Deleted;
-    public int Total;   // сколько неудалённых записей прочитано
 
-    const int MaxMemoFile = 64 * 1024 * 1024;
+    const int BlockRecords = 4096;   // записи хранятся кусками, без одного огромного массива
+    int recordLength;
+    int lowerLength;      // запись в поисковой копии: поля через разделитель, чтобы "18" и "12" не слились в "1812"
+    int[] lowerOffsets;
+    readonly List<byte[]> data = new List<byte[]>();    // записи как в файле
+    readonly List<byte[]> lower = new List<byte[]>();   // они же маленькими буквами, только текст - для поиска
+    readonly byte[] lowerMap = new byte[256];
 
     public static DbfTable Load(string path, bool otherEncoding) {
         return Load(path, otherEncoding, null, null);
     }
 
-    public static DbfTable Load(string path, bool otherEncoding, RowFilter filter, LoadProgress progress) {
+    // query - если задан, в памяти остаются только подходящие записи (поиск во всех таблицах)
+    public static DbfTable Load(string path, bool otherEncoding, string query, LoadProgress progress) {
         DbfTable t = new DbfTable();
         t.FilePath = path;
         using (FileStream fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 1 << 16)) {
@@ -59,7 +123,9 @@ public class DbfTable {
             // базы FoxPro для DOS хранят текст в кодировке 866, отмеченные как Windows - в 1251
             bool windows = head[29] == 0xC9;
             if (otherEncoding) windows = !windows;
-            Encoding enc = Encoding.GetEncoding(windows ? 1251 : 866);
+            t.Enc = Encoding.GetEncoding(windows ? 1251 : 866);
+            t.recordLength = recordLen;
+            t.BuildLowerMap();
 
             byte[] desc = ReadBytes(fs, headerLen - 32);
             int offset = 1;
@@ -78,184 +144,263 @@ public class DbfTable {
             if (offset > recordLen)
                 throw new InvalidDataException("Не удалось разобрать структуру таблицы.");
 
-            byte[] memo = null;
-            int blockSize = 0;
-            foreach (DbfField f in t.Fields) {
-                if (f.Type == 'M') { memo = LoadMemo(path, out blockSize); break; }
+            // поисковая копия: только текстовые поля (двоичные числа и ссылки на примечания - пропуск),
+            // после каждого поля - разделитель
+            int fieldCount = t.Fields.Count;
+            bool[] text = new bool[fieldCount];
+            t.lowerOffsets = new int[fieldCount];
+            int pos = 0;
+            for (int j = 0; j < fieldCount; j++) {
+                t.lowerOffsets[j] = pos;
+                pos += t.Fields[j].Length + 1;
+                text[j] = "CNFDL".IndexOf(t.Fields[j].Type) >= 0;
             }
+            t.lowerLength = Math.Max(pos, 1);
+            SearchWord[] filter = query == null ? null : t.PrepareWords(query);
 
             fs.Seek(headerLen, SeekOrigin.Begin);
-            byte[] rec = new byte[recordLen];
-            for (int i = 0; i < count; i++) {
-                if (progress != null && i > 0 && i % 5000 == 0) progress(i, count);
-                if (!ReadFull(fs, rec) || rec[0] == 0x1A) break;
-                if (rec[0] == (byte)'*') { t.Deleted++; continue; }
-                object[] values = new object[t.Fields.Count];
-                for (int j = 0; j < values.Length; j++)
-                    values[j] = Parse(rec, t.Fields[j], enc, memo, blockSize);
-                t.Total++;
-                if (filter == null || filter(values)) t.Rows.Add(values);
+            const int chunkRecords = 2048;
+            byte[] chunk = new byte[chunkRecords * recordLen];
+            byte[] low = new byte[t.lowerLength];
+            int index = 0;
+            bool end = false;
+            while (index < count && !end) {
+                int want = Math.Min(chunkRecords, count - index);
+                int got = ReadUpTo(fs, chunk, want * recordLen) / recordLen;
+                for (int r = 0; r < got; r++) {
+                    int start = r * recordLen;
+                    byte flag = chunk[start];
+                    if (flag == 0x1A) { end = true; break; }          // конец файла
+                    if (flag == (byte)'*') { t.Deleted++; continue; }  // удалённая запись
+                    t.Total++;
+                    for (int j = 0; j < fieldCount; j++) {
+                        DbfField f = t.Fields[j];
+                        int src = start + f.Offset, dst = t.lowerOffsets[j];
+                        if (text[j]) for (int k = 0; k < f.Length; k++) low[dst + k] = t.lowerMap[chunk[src + k]];
+                        else for (int k = 0; k < f.Length; k++) low[dst + k] = 1;
+                        low[dst + f.Length] = 1;
+                    }
+                    if (filter == null || MatchesAll(low, 0, t.lowerLength, filter)) t.Append(chunk, start, low);
+                }
+                index += got;
+                if (got < want) break;   // файл короче, чем написано в его заголовке
+                if (progress != null) progress(index, count);
             }
         }
         return t;
     }
 
-    // Текст записи для поиска: все поля подряд, маленькими буквами
-    public static string SearchText(object[] values) {
-        StringBuilder sb = new StringBuilder();
-        foreach (object v in values) sb.Append(Format(v, true)).Append('\u0001');
-        return sb.ToString().ToLowerInvariant();
+    void BuildLowerMap() {
+        byte[] one = new byte[1];
+        for (int b = 0; b < 256; b++) {
+            lowerMap[b] = (byte)b;
+            one[0] = (byte)b;
+            string s = Enc.GetString(one);
+            string l = s.ToLowerInvariant();
+            if (l == s) continue;
+            byte[] lb = Enc.GetBytes(l);
+            if (lb.Length == 1 && Enc.GetString(lb) == l) lowerMap[b] = lb[0];
+        }
     }
+
+    void Append(byte[] src, int start, byte[] low) {
+        int block = Count / BlockRecords;
+        int slot = Count % BlockRecords;
+        if (block == data.Count) {
+            data.Add(new byte[BlockRecords * recordLength]);
+            lower.Add(new byte[BlockRecords * lowerLength]);
+        }
+        Buffer.BlockCopy(src, start, data[block], slot * recordLength, recordLength);
+        Buffer.BlockCopy(low, 0, lower[block], slot * lowerLength, lowerLength);
+        Count++;
+    }
+
+    public object GetValue(int row, int field, MemoReader memo) {
+        byte[] buf = data[row / BlockRecords];
+        int start = (row % BlockRecords) * recordLength;
+        return Parse(buf, start, Fields[field], Enc, memo);
+    }
+
+    public object[] GetRow(int row, MemoReader memo) {
+        object[] values = new object[Fields.Count];
+        for (int j = 0; j < values.Length; j++) values[j] = GetValue(row, j, memo);
+        return values;
+    }
+
+    public MemoReader OpenMemo() {
+        foreach (DbfField f in Fields) if (f.Type == 'M') return MemoReader.Open(FilePath, Enc);
+        return null;
+    }
+
+    // ---- поиск ----
 
     public static string[] SplitWords(string query) {
         return query.ToLowerInvariant().Split(new char[] { ' ', ',', ';', '\t' }, StringSplitOptions.RemoveEmptyEntries);
     }
 
-    // Все слова должны встретиться в тексте записи
-    public static bool Matches(string text, string[] words) {
-        foreach (string w in words) {
-            if (!MatchesWord(text, w)) return false;
+    public SearchWord[] PrepareWords(string query) {
+        string[] words = SplitWords(query);
+        SearchWord[] result = new SearchWord[words.Length];
+        for (int i = 0; i < words.Length; i++) {
+            string w = words[i];
+            // дата 03.03.2021 хранится в таблице как 20210303
+            if (w.Length == 10 && w[2] == '.' && w[5] == '.' && IsDigits(w.Remove(5, 1).Remove(2, 1)))
+                w = w.Substring(6, 4) + w.Substring(3, 2) + w.Substring(0, 2);
+            SearchWord sw = new SearchWord();
+            sw.Bytes = ToLowerBytes(w);
+            if (IsDigits(w)) {
+                sw.WholeNumber = w.Length <= 4;
+                string trimmed = w.TrimStart('0');
+                if (trimmed.Length > 0 && trimmed.Length < w.Length) sw.Trimmed = ToLowerBytes(trimmed);
+            }
+            result[i] = sw;
+        }
+        return result;
+    }
+
+    byte[] ToLowerBytes(string s) {
+        byte[] b = Enc.GetBytes(s);
+        for (int i = 0; i < b.Length; i++) b[i] = lowerMap[b[i]];
+        return b;
+    }
+
+    // field = -1 - искать во всей записи, иначе только в этом поле
+    public bool Matches(int row, SearchWord[] words, int field) {
+        if (words.Length == 0) return true;
+        byte[] buf = lower[row / BlockRecords];
+        int start = (row % BlockRecords) * lowerLength;
+        if (field < 0) return MatchesAll(buf, start, lowerLength, words);
+        return MatchesAll(buf, start + lowerOffsets[field], Fields[field].Length, words);
+    }
+
+    static bool MatchesAll(byte[] buf, int from, int length, SearchWord[] words) {
+        int end = from + length;
+        foreach (SearchWord w in words) {
+            bool ok = w.WholeNumber
+                ? ContainsNumber(buf, from, end, w.Bytes) || (w.Trimmed != null && ContainsNumber(buf, from, end, w.Trimmed))
+                : IndexOf(buf, from, end, w.Bytes) >= 0 || (w.Trimmed != null && IndexOf(buf, from, end, w.Trimmed) >= 0);
+            if (!ok) return false;
         }
         return true;
     }
 
-    static bool MatchesWord(string text, string w) {
-        if (!IsDigits(w)) return text.IndexOf(w, StringComparison.Ordinal) >= 0;
-        string trimmed = w.TrimStart('0');
-        // короткое число - дом или квартира - ищем только целиком: "18" не найдёт "118" и "180"
-        if (w.Length <= 4)
-            return ContainsNumber(text, w) || (trimmed.Length > 0 && trimmed.Length < w.Length && ContainsNumber(text, trimmed));
-        // длинное - лицевой счёт, телефон: можно часть; с нулями впереди ищем и без них
-        if (text.IndexOf(w, StringComparison.Ordinal) >= 0) return true;
-        return trimmed.Length > 0 && trimmed.Length < w.Length && text.IndexOf(trimmed, StringComparison.Ordinal) >= 0;
+    static int IndexOf(byte[] buf, int from, int end, byte[] pattern) {
+        int last = end - pattern.Length;
+        byte first = pattern[0];
+        for (int i = from; i <= last; i++) {
+            if (buf[i] != first) continue;
+            int k = 1;
+            while (k < pattern.Length && buf[i + k] == pattern[k]) k++;
+            if (k == pattern.Length) return i;
+        }
+        return -1;
     }
 
-    static bool ContainsNumber(string text, string n) {
-        int i = text.IndexOf(n, StringComparison.Ordinal);
+    // число целиком: "18" находит "18" и "18а", но не "118", не "180" и не копейки в "61.18"
+    static bool ContainsNumber(byte[] buf, int from, int end, byte[] number) {
+        int i = IndexOf(buf, from, end, number);
         while (i >= 0) {
-            bool before = i == 0 || text[i - 1] < '0' || text[i - 1] > '9';
-            int end = i + n.Length;
-            bool after = end >= text.Length || text[end] < '0' || text[end] > '9';
-            if (before && after) return true;
-            i = text.IndexOf(n, i + 1, StringComparison.Ordinal);
+            int after = i + number.Length;
+            bool before = i == from || !(IsDigit(buf[i - 1]) || (IsPoint(buf[i - 1]) && i - 1 > from && IsDigit(buf[i - 2])));
+            bool behind = after >= end || !(IsDigit(buf[after]) || (IsPoint(buf[after]) && after + 1 < end && IsDigit(buf[after + 1])));
+            if (before && behind) return true;
+            i = IndexOf(buf, i + 1, end, number);
         }
         return false;
     }
 
+    static bool IsPoint(byte b) {
+        return b == (byte)'.' || b == (byte)',';
+    }
+
+    static bool IsDigit(byte b) {
+        return b >= (byte)'0' && b <= (byte)'9';
+    }
+
     static bool IsDigits(string s) {
+        if (s.Length == 0) return false;
         foreach (char c in s) if (c < '0' || c > '9') return false;
         return true;
     }
 
-    static object Parse(byte[] rec, DbfField f, Encoding enc, byte[] memo, int blockSize) {
+    // ---- разбор полей ----
+
+    static object Parse(byte[] buf, int start, DbfField f, Encoding enc, MemoReader memo) {
+        int at = start + f.Offset;
         switch (f.Type) {
             case 'C':
-                return enc.GetString(rec, f.Offset, f.Length).TrimEnd(' ', '\0');
+                return enc.GetString(buf, at, f.Length).TrimEnd(' ', '\0');
             case 'N':
             case 'F': {
-                string s = Encoding.ASCII.GetString(rec, f.Offset, f.Length).Trim(' ', '\0');
+                string s = Encoding.ASCII.GetString(buf, at, f.Length).Trim(' ', '\0');
                 if (s.Length == 0) return null;
                 decimal d;
                 if (decimal.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out d)) return d;
                 return s;
             }
             case 'D': {
-                string s = Encoding.ASCII.GetString(rec, f.Offset, Math.Min(8, f.Length)).Trim(' ', '\0');
+                string s = Encoding.ASCII.GetString(buf, at, Math.Min(8, f.Length)).Trim(' ', '\0');
                 DateTime d;
                 if (s.Length == 8 && DateTime.TryParseExact(s, "yyyyMMdd", CultureInfo.InvariantCulture, DateTimeStyles.None, out d)) return d;
                 return null;
             }
             case 'L': {
-                char c = (char)rec[f.Offset];
+                char c = (char)buf[at];
                 if ("TtYy".IndexOf(c) >= 0) return "Да";
                 if ("FfNn".IndexOf(c) >= 0) return "Нет";
                 return null;
             }
             case 'M': {
-                int block = MemoBlock(rec, f);
+                int block = MemoBlock(buf, at, f.Length);
                 if (block <= 0) return null;
-                if (memo == null) return "(текст)";
-                return ReadMemo(memo, block, blockSize, enc);
+                return memo == null ? "(текст)" : memo.Read(block);
             }
             case 'G':
             case 'P':
-                return MemoBlock(rec, f) > 0 ? "(объект)" : null;
+                return MemoBlock(buf, at, f.Length) > 0 ? "(объект)" : null;
             case 'I':
-                return f.Length == 4 ? (object)(decimal)BitConverter.ToInt32(rec, f.Offset) : null;
+                return f.Length == 4 ? (object)(decimal)BitConverter.ToInt32(buf, at) : null;
             case 'B':
-                return f.Length == 8 ? (object)BitConverter.ToDouble(rec, f.Offset) : null;
+                return f.Length == 8 ? (object)BitConverter.ToDouble(buf, at) : null;
             case 'Y':
-                return f.Length == 8 ? (object)(BitConverter.ToInt64(rec, f.Offset) / 10000m) : null;
+                return f.Length == 8 ? (object)(BitConverter.ToInt64(buf, at) / 10000m) : null;
             case 'T': {
                 if (f.Length != 8) return null;
-                int day = BitConverter.ToInt32(rec, f.Offset);
-                int ms = BitConverter.ToInt32(rec, f.Offset + 4);
+                int day = BitConverter.ToInt32(buf, at);
+                int ms = BitConverter.ToInt32(buf, at + 4);
                 if (day <= 1721426) return null;   // 1721426 - юлианский день 01.01.0001
                 try { return new DateTime(1, 1, 1).AddDays(day - 1721426).AddMilliseconds(ms); }
                 catch (ArgumentOutOfRangeException) { return null; }
             }
             default:
-                return enc.GetString(rec, f.Offset, f.Length).Trim(' ', '\0');
+                return enc.GetString(buf, at, f.Length).Trim(' ', '\0');
         }
     }
 
-    static int MemoBlock(byte[] rec, DbfField f) {
-        if (f.Length == 4) return BitConverter.ToInt32(rec, f.Offset);
-        string s = Encoding.ASCII.GetString(rec, f.Offset, f.Length).Trim(' ', '\0');
+    static int MemoBlock(byte[] buf, int at, int length) {
+        if (length == 4) return BitConverter.ToInt32(buf, at);
+        string s = Encoding.ASCII.GetString(buf, at, length).Trim(' ', '\0');
         int b;
         return int.TryParse(s, NumberStyles.None, CultureInfo.InvariantCulture, out b) ? b : 0;
     }
 
-    // Файл .FPT рядом с таблицей; если его нет или он слишком большой - текст не читаем
-    static byte[] LoadMemo(string path, out int blockSize) {
-        blockSize = 0;
-        string memoPath = Path.ChangeExtension(path, ".FPT");
-        if (!File.Exists(memoPath)) memoPath = Path.ChangeExtension(path, ".fpt");
-        if (!File.Exists(memoPath)) return null;
-        try {
-            using (FileStream fs = new FileStream(memoPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete)) {
-                if (fs.Length < 512 || fs.Length > MaxMemoFile) return null;
-                byte[] data = ReadBytes(fs, (int)fs.Length);
-                blockSize = (data[6] << 8) | data[7];
-                if (blockSize <= 0) blockSize = 64;
-                return data;
-            }
-        } catch (IOException) {
-            return null;
-        }
-    }
-
-    static string ReadMemo(byte[] memo, int block, int blockSize, Encoding enc) {
-        long pos = (long)block * blockSize;
-        if (pos + 8 > memo.Length) return "";
-        int p = (int)pos;
-        int type = BigEndian(memo, p);
-        int len = BigEndian(memo, p + 4);
-        if (type != 1) return "(объект)";
-        if (len <= 0) return "";
-        if (p + 8 + (long)len > memo.Length) len = memo.Length - p - 8;
-        return enc.GetString(memo, p + 8, len).TrimEnd('\0', ' ', '\r', '\n');
-    }
-
-    static int BigEndian(byte[] b, int p) {
-        return (b[p] << 24) | (b[p + 1] << 16) | (b[p + 2] << 8) | b[p + 3];
-    }
-
     static byte[] ReadBytes(Stream s, int n) {
         byte[] b = new byte[n];
-        if (!ReadFull(s, b)) throw new InvalidDataException("Файл повреждён или обрезан.");
+        if (ReadUpTo(s, b, n) < n) throw new InvalidDataException("Файл повреждён или обрезан.");
         return b;
     }
 
-    static bool ReadFull(Stream s, byte[] b) {
+    internal static int ReadUpTo(Stream s, byte[] b, int n) {
         int got = 0;
-        while (got < b.Length) {
-            int r = s.Read(b, got, b.Length - got);
-            if (r <= 0) return false;
+        while (got < n) {
+            int r = s.Read(b, got, n - got);
+            if (r <= 0) break;
             got += r;
         }
-        return true;
+        return got;
     }
+
+    // ---- показ и выгрузка ----
 
     // Значение для показа: в таблице длинный текст обрезается, в карточке - целиком
     public static string Format(object v, bool full) {
@@ -282,6 +427,7 @@ public class DbfTable {
 
     // Выгрузка в формате "Таблица XML 2003": Excel открывает его сам и не теряет нули в начале номеров
     public static void WriteSpreadsheet(DbfTable t, IList<int> rows, int count, string file) {
+        using (MemoReader memo = t.OpenMemo())
         using (StreamWriter w = new StreamWriter(file, false, new UTF8Encoding(false))) {
             w.WriteLine("<?xml version=\"1.0\" encoding=\"utf-8\"?>");
             w.WriteLine("<?mso-application progid=\"Excel.Sheet\"?>");
@@ -294,7 +440,7 @@ public class DbfTable {
             w.WriteLine("</Row>");
             for (int i = 0; i < count; i++) {
                 w.Write("<Row>");
-                foreach (object v in t.Rows[rows[i]]) {
+                foreach (object v in t.GetRow(rows[i], memo)) {
                     if (v == null)
                         w.Write("<Cell/>");
                     else if (v is decimal || (v is double && !double.IsNaN((double)v) && !double.IsInfinity((double)v)))
@@ -342,7 +488,7 @@ public class DbfViewer : Form {
     readonly Timer searchTimer = new Timer();
 
     DbfTable table;
-    string[] rowText;
+    object[] sortKeys;   // значения столбца сортировки, пока идёт сортировка
     readonly List<int> view = new List<int>();
     int sortColumn = -1;
     bool sortDescending;
@@ -567,7 +713,6 @@ public class DbfViewer : Form {
         fieldBox.Items.Add("все поля");
         fieldBox.SelectedIndex = 0;
         sortColumn = -1;
-        rowText = null;
         view.Clear();
         if (table != null) {
             foreach (DbfField f in table.Fields) {
@@ -578,8 +723,6 @@ public class DbfViewer : Form {
                 grid.Columns.Add(c);
                 fieldBox.Items.Add(f.Name);
             }
-            rowText = new string[table.Rows.Count];
-            for (int i = 0; i < rowText.Length; i++) rowText[i] = DbfTable.SearchText(table.Rows[i]);
             resizeColumns = true;
         }
         suspend = false;
@@ -588,14 +731,15 @@ public class DbfViewer : Form {
     internal void ApplyFilter() {
         if (suspend || loading) return;
         view.Clear();
-        string[] words = DbfTable.SplitWords(searchBox.Text);
-        if (table != null && (words.Length > 0 || table.Rows.Count <= ShowAllLimit)) {
-            int field = fieldBox.SelectedIndex - 1;   // -1 - искать во всех полях
-            for (int i = 0; i < table.Rows.Count; i++) {
-                string text = field < 0 ? rowText[i] : DbfTable.Format(table.Rows[i][field], true).ToLowerInvariant();
-                if (DbfTable.Matches(text, words)) view.Add(i);
+        if (table != null) {
+            SearchWord[] words = table.PrepareWords(searchBox.Text);
+            if (words.Length > 0 || table.Count <= ShowAllLimit) {
+                int field = fieldBox.SelectedIndex - 1;   // -1 - искать во всех полях
+                for (int i = 0; i < table.Count; i++) {
+                    if (table.Matches(i, words, field)) view.Add(i);
+                }
+                SortView();
             }
-            SortView();
         }
         grid.RowCount = 0;
         grid.RowCount = view.Count;
@@ -630,7 +774,7 @@ public class DbfViewer : Form {
             for (int i = 0; i < count && !results.Cancelled; i++) {
                 string name = (string)tableBox.Items[i];
                 results.SetProgress("Проверяю " + name + " (" + (i + 1) + " из " + count + ")...");
-                ScanTable(results, name, words);
+                ScanTable(results, name, query);
             }
         } finally {
             Enabled = true;
@@ -638,15 +782,14 @@ public class DbfViewer : Form {
         }
     }
 
-    void ScanTable(ScanResults results, string name, string[] words) {
+    void ScanTable(ScanResults results, string name, string query) {
         try {
-            DbfTable t = DbfTable.Load(Path.Combine(folder, name), encodingBox.Checked,
-                delegate(object[] values) { return DbfTable.Matches(DbfTable.SearchText(values), words); },
+            DbfTable t = DbfTable.Load(Path.Combine(folder, name), encodingBox.Checked, query,
                 delegate(int done, int expected) {
                     Application.DoEvents();
                     if (results.Cancelled || IsDisposed) throw new OperationCanceledException();
                 });
-            if (t.Rows.Count > 0) results.AddResult(name, t.Rows.Count, t.Total);
+            if (t.Count > 0) results.AddResult(name, t.Count, t.Total);
         } catch (OperationCanceledException) {
         } catch (Exception ex) {
             results.AddError(name, ex.Message);
@@ -669,30 +812,33 @@ public class DbfViewer : Form {
     }
 
     void SortView() {
-        if (sortColumn < 0 || table == null || sortColumn >= table.Fields.Count) return;
+        if (sortColumn < 0 || table == null || sortColumn >= table.Fields.Count || view.Count < 2) return;
+        sortKeys = new object[table.Count];
+        foreach (int row in view) sortKeys[row] = table.GetValue(row, sortColumn, null);
         view.Sort(new Comparison<int>(CompareRows));
+        sortKeys = null;
     }
 
     int CompareRows(int a, int b) {
-        int r = DbfTable.CompareValues(table.Rows[a][sortColumn], table.Rows[b][sortColumn]);
+        int r = DbfTable.CompareValues(sortKeys[a], sortKeys[b]);
         if (sortDescending) r = -r;
         return r != 0 ? r : a.CompareTo(b);
     }
 
     void UpdateStatus() {
         if (table == null) { status.Text = ""; return; }
-        if (DbfTable.SplitWords(searchBox.Text).Length == 0 && table.Rows.Count > ShowAllLimit) {
-            status.Text = "В таблице " + table.Rows.Count + " записей. Впишите в \"Поиск\" адрес, номер или фамилию - покажу только подходящие. Например: заводская 18";
+        if (DbfTable.SplitWords(searchBox.Text).Length == 0 && table.Count > ShowAllLimit) {
+            status.Text = "В таблице " + table.Count + " записей. Впишите в \"Поиск\" адрес, номер или фамилию - покажу только подходящие. Например: заводская 18";
             return;
         }
-        status.Text = "Показано записей: " + view.Count + " из " + table.Rows.Count
+        status.Text = "Показано записей: " + view.Count + " из " + table.Count
             + (table.Deleted > 0 ? " (удалённые записи не показываются: " + table.Deleted + ")" : "")
             + ".   Двойной щелчок или Enter по строке - карточка целиком.";
     }
 
     void OnCellValueNeeded(object sender, DataGridViewCellValueEventArgs e) {
         if (table == null || e.RowIndex >= view.Count || e.ColumnIndex >= table.Fields.Count) return;
-        e.Value = DbfTable.Format(table.Rows[view[e.RowIndex]][e.ColumnIndex], false);
+        e.Value = DbfTable.Format(table.GetValue(view[e.RowIndex], e.ColumnIndex, null), false);
     }
 
     void OnHeaderClick(object sender, DataGridViewCellMouseEventArgs e) {
@@ -739,7 +885,8 @@ public class DbfViewer : Form {
 
     internal void ShowCard(int viewRow) {
         if (table == null || viewRow < 0 || viewRow >= view.Count) return;
-        object[] values = table.Rows[view[viewRow]];
+        object[] values;
+        using (MemoReader memo = table.OpenMemo()) values = table.GetRow(view[viewRow], memo);
         Form card = new Form();
         card.Text = "Карточка - " + Path.GetFileName(table.FilePath);
         card.Size = new Size(650, 600);
