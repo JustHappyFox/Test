@@ -2312,7 +2312,13 @@ public class LiveBase {
         string dom = AddressMatch.Num(Field(t, row, t.FieldIndex("DOM")));
         if (dom.Length == 0) return "";
         return StreetDirectory.NormalizeCode(Field(t, row, t.FieldIndex("UL"))) + "|" + dom + "|"
-            + AddressMatch.Num(Field(t, row, t.FieldIndex("KOR"))) + "|" + AddressMatch.Num(Field(t, row, t.FieldIndex("KV")));
+            + Part(Field(t, row, t.FieldIndex("KOR"))) + "|" + Part(Field(t, row, t.FieldIndex("KV")));
+    }
+
+    // корпус/квартира "0" - то же, что пусто (частный дом)
+    static string Part(string v) {
+        string n = AddressMatch.Num(v);
+        return n == "0" ? "" : n;
     }
 
     string HouseKey(DbfTable t, int row) {
