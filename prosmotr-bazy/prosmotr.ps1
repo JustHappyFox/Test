@@ -1475,6 +1475,52 @@ public class AbonentQuery {
 
     public bool HasStreets { get { return street != null; } }
 
+    // Записи, среди которых ищем: null - вся таблица, иначе только эти (выбранные сельсоветы)
+    public int[] Scope;
+
+    int RowCount { get { return Scope == null ? t.Count : Scope.Length; } }
+
+    int RowAt(int i) { return Scope == null ? i : Scope[i]; }
+
+    // Абоненты, у которых в адресе (справочник улиц или текстовые поля) есть одно из названий.
+    // "Боровлянский" ищется как "боровлянск" - находится и "Боровлянский с/с", и "Боровлянского".
+    public int[] FindByNames(string[] names, out string report) {
+        List<string> stems = new List<string>();
+        foreach (string n in names) {
+            string w = n.Trim().ToLowerInvariant();
+            if (w.Length > 5 && (w.EndsWith("ий") || w.EndsWith("ой") || w.EndsWith("ая") || w.EndsWith("ое"))) w = w.Substring(0, w.Length - 2);
+            if (w.Length > 0) stems.Add(w);
+        }
+        SearchWord[] words = new SearchWord[stems.Count];
+        for (int i = 0; i < words.Length; i++) words[i] = Part(stems[i]);
+        int[] perName = new int[stems.Count];
+        Dictionary<string, int> sources = new Dictionary<string, int>();
+        List<int> rows = new List<int>();
+        for (int row = 0; row < t.Count; row++) {
+            for (int i = 0; i < words.Length; i++) {
+                string source = null;
+                if (streetLower != null && streetLower[row] != null && streetLower[row].IndexOf(stems[i], StringComparison.Ordinal) >= 0) source = "справочник улиц";
+                else foreach (int f in addressFields) if (t.FieldContains(row, f, words[i])) { source = "поле " + t.Fields[f].Name; break; }
+                if (source == null) continue;
+                perName[i]++;
+                int c;
+                sources.TryGetValue(source, out c);
+                sources[source] = c + 1;
+                rows.Add(row);
+                break;
+            }
+        }
+        StringBuilder r = new StringBuilder();
+        r.Append("Сельсоветы из списка: ");
+        for (int i = 0; i < stems.Count; i++) r.Append((i > 0 ? ", " : "") + names[i].Trim() + " - " + perName[i]);
+        r.Append(". Всего абонентов в них: " + rows.Count + " из " + t.Count + ". Где нашлись названия: ");
+        if (sources.Count == 0) r.Append("нигде");
+        bool first = true;
+        foreach (KeyValuePair<string, int> kv in sources) { r.Append((first ? "" : ", ") + kv.Key + " - " + kv.Value); first = false; }
+        report = r.ToString();
+        return rows.ToArray();
+    }
+
     public string FieldList(SearchMode mode) {
         int[] fields = mode == SearchMode.Account ? accountFields : mode == SearchMode.Address ? addressFields
             : mode == SearchMode.Meter ? meterFields : nameFields;
@@ -1546,7 +1592,10 @@ public class AbonentQuery {
         LastExplain = "цифр: " + digits.Length;
         if (digits.Length == 0) return found;
         SearchWord w = Part(digits.ToString());
-        for (int row = 0; row < t.Count; row++) if (InAny(row, accountFields, w)) found.Add(row);
+        for (int i = 0; i < RowCount; i++) {
+            int row = RowAt(i);
+            if (InAny(row, accountFields, w)) found.Add(row);
+        }
         return found;
     }
 
@@ -1557,7 +1606,8 @@ public class AbonentQuery {
         foreach (string w in DbfTable.SplitWords(query)) words.Add(Part(w));
         LastExplain = "слов: " + words.Count;
         if (words.Count == 0) return found;
-        for (int row = 0; row < t.Count; row++) {
+        for (int si = 0; si < RowCount; si++) {
+            int row = RowAt(si);
             bool ok = true;
             foreach (SearchWord w in words) if (!InAny(row, fields, w)) { ok = false; break; }
             if (ok) found.Add(row);
@@ -1633,7 +1683,8 @@ public class AbonentQuery {
         int[,] fieldHits = new int[text.Count, addressFields.Length];
         int[] dirHits = new int[text.Count];
         int candidates = 0, best = 0;
-        for (int row = 0; row < t.Count; row++) {
+        for (int si = 0; si < RowCount; si++) {
+            int row = RowAt(si);
             if (house != null && !Is(row, dom, house)) continue;
             if (korp != null && !Is(row, kor, korp)) continue;
             if (flat != null && !Is(row, kv, flat)) continue;
@@ -1745,6 +1796,11 @@ public class AbonentSearch : Form {
     AbonentQuery query;
     StreetDirectory directory;
     bool streetCodes;    // в UL у абонентов коды улиц, а не названия
+    int[] mine;          // абоненты выбранных сельсоветов (null - отбора нет или он ничего не нашёл)
+    string mineNote = "";
+    readonly CheckBox onlyMine = new CheckBox();
+
+    static readonly string[] DefaultSelsovety = { "Шершунский", "Папернянский", "Юзуфовский", "Острошицкий", "Боровлянский", "Колодищанский" };
     bool loading;
     List<int> found = new List<int>();
     internal SearchMode mode = SearchMode.Account;
@@ -1784,19 +1840,23 @@ public class AbonentSearch : Form {
         Label caption = new Label();
         caption.Text = "Искать по:";
         caption.AutoSize = true;
-        caption.Location = new Point(12, 12);
-        top.Controls.Add(caption);
-        int x = 90;
+        caption.Margin = new Padding(6, 9, 6, 0);
+        // первая строка - в ряд, по фактической ширине надписей
+        FlowLayoutPanel row = new FlowLayoutPanel();
+        row.AutoSize = true;
+        row.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+        row.WrapContents = false;
+        row.Location = new Point(4, 2);
+        row.Controls.Add(caption);
         for (int i = 0; i < modeButtons.Length; i++) {
             RadioButton rb = new RadioButton();
             rb.Text = ModeNames[i];
             rb.AutoSize = true;
-            rb.Location = new Point(x, 10);
+            rb.Margin = new Padding(3, 7, 8, 0);
             rb.Tag = (SearchMode)i;
             rb.CheckedChanged += new EventHandler(OnModeChanged);
             modeButtons[i] = rb;
-            top.Controls.Add(rb);
-            x += i == 0 ? 130 : 110;
+            row.Controls.Add(rb);
         }
         queryBox.Font = new Font(Font.FontFamily, 14f);
         queryBox.Location = new Point(12, 38);
@@ -1810,9 +1870,23 @@ public class AbonentSearch : Form {
         Button listButton = new Button();
         listButton.Text = "Поиск по списку...";
         listButton.AutoSize = true;
-        listButton.Location = new Point(x + 20, 6);
+        listButton.Margin = new Padding(12, 3, 3, 0);
         listButton.Click += delegate { OpenBatch(); };
-        top.Controls.Add(listButton);
+        row.Controls.Add(listButton);
+        onlyMine.Text = "Только мои сельсоветы";
+        onlyMine.AutoSize = true;
+        onlyMine.Checked = true;
+        onlyMine.Margin = new Padding(14, 7, 3, 0);
+        onlyMine.CheckedChanged += delegate { ApplyScope(); ApplySearch(); };
+        row.Controls.Add(onlyMine);
+        Button ssButton = new Button();
+        ssButton.Text = "Сельсоветы...";
+        ssButton.AutoSize = true;
+        ssButton.Margin = new Padding(6, 3, 3, 0);
+        ssButton.Click += delegate { EditSelsovety(); };
+        row.Controls.Add(ssButton);
+        top.Controls.Add(row);
+        Load += delegate { Width = Math.Max(Width, row.PreferredSize.Width + 60); };
         top.Controls.Add(queryBox);
         top.Controls.Add(hint);
 
@@ -1972,6 +2046,7 @@ public class AbonentSearch : Form {
             Report.Fields(table, "    ");
             directory = FindDirectory();
             query = new AbonentQuery(table, directory);
+            FindMine();
             Report.Line("Где ищется: лицевой - " + query.FieldList(SearchMode.Account) + " | адрес - " + query.FieldList(SearchMode.Address)
                 + " | счётчик - " + query.FieldList(SearchMode.Meter) + " | ФИО - " + query.FieldList(SearchMode.Name));
             Report.Line("--- поиски (сами слова не записываются) ---");
@@ -2052,8 +2127,11 @@ public class AbonentSearch : Form {
         grid.RowCount = 0;
         grid.RowCount = found.Count;
         grid.Invalidate();
-        string where = tableName + ", " + table.Count + " абонентов";
+        string where = query.Scope != null
+            ? "абонентов в моих сельсоветах " + query.Scope.Length + " из " + table.Count
+            : tableName + ", " + table.Count + " абонентов";
         if (directory != null) where += ", улицы - из " + directory.TableName;
+        where += mineNote;
         string warning = streetCodes && directory == null && mode == SearchMode.Address
             ? "   В поле улицы - коды, а справочник улиц не нашёлся: адрес ищется по дому и квартире, название улицы может не находиться."
             : "";
@@ -2096,6 +2174,100 @@ public class AbonentSearch : Form {
     internal void OpenCard(int index) {
         if (table == null || index < 0 || index >= found.Count) return;
         Card.Show(this, table, found[index], query.CardExtra(found[index]));
+    }
+
+    string SelsovetyFile {
+        get { return Path.Combine(Path.GetDirectoryName(Path.GetFullPath(settingsFile)), "selsovety.txt"); }
+    }
+
+    // список сельсоветов: из файла selsovety.txt (если его нет - создаём с вашими шестью)
+    string[] ReadSelsovety() {
+        string file = SelsovetyFile;
+        if (!File.Exists(file)) SaveSelsovety(DefaultSelsovety);
+        List<string> names = new List<string>();
+        try {
+            foreach (string line in File.ReadAllLines(file, Encoding.UTF8)) {
+                string n = line.Trim();
+                if (n.Length > 0 && !n.StartsWith("#")) names.Add(n);
+            }
+        } catch (Exception) {
+            names.AddRange(DefaultSelsovety);
+        }
+        return names.ToArray();
+    }
+
+    void SaveSelsovety(string[] names) {
+        List<string> lines = new List<string>();
+        lines.Add("# Сельсоветы, абоненты которых нужны в поиске - по одному в строке");
+        lines.AddRange(names);
+        Places.SaveSettings(SelsovetyFile, lines.ToArray());
+    }
+
+    void FindMine() {
+        string[] names = ReadSelsovety();
+        mine = null;
+        mineNote = "";
+        if (names.Length == 0) {
+            Report.Line("Сельсоветы: список пуст - ищу по всей базе");
+        } else {
+            string report;
+            int[] rows = query.FindByNames(names, out report);
+            Report.Line(report);
+            if (rows.Length > 0) {
+                mine = rows;
+            } else {
+                mineNote = "   Названия сельсоветов в базе не нашлись - показана вся база. Нажмите \"Отчёт\" и пришлите его.";
+                Report.Line("    названия сельсоветов не нашлись ни в справочнике улиц, ни в полях абонента - отбор не применён");
+            }
+        }
+        onlyMine.Enabled = mine != null;
+        onlyMine.Text = mine == null ? "Только мои сельсоветы (не нашлись)" : "Только мои сельсоветы (" + names.Length + ")";
+        ApplyScope();
+    }
+
+    void ApplyScope() {
+        if (query == null) return;
+        query.Scope = onlyMine.Checked ? mine : null;
+    }
+
+    void EditSelsovety() {
+        Form d = new Form();
+        d.Text = "Мои сельсоветы";
+        d.Size = new Size(360, 380);
+        d.StartPosition = FormStartPosition.CenterParent;
+        d.MinimizeBox = false;
+        d.MaximizeBox = false;
+        Label l = new Label();
+        l.Text = "По одному сельсовету в строке:";
+        l.AutoSize = true;
+        l.Location = new Point(12, 10);
+        TextBox box = new TextBox();
+        box.Multiline = true;
+        box.AcceptsReturn = true;
+        box.ScrollBars = ScrollBars.Vertical;
+        box.Location = new Point(12, 30);
+        box.Size = new Size(320, 260);
+        box.Text = string.Join("\r\n", ReadSelsovety());
+        Button ok = new Button();
+        ok.Text = "OK";
+        ok.Location = new Point(170, 300);
+        ok.DialogResult = DialogResult.OK;
+        Button cancel = new Button();
+        cancel.Text = "Отмена";
+        cancel.Location = new Point(255, 300);
+        cancel.DialogResult = DialogResult.Cancel;
+        d.CancelButton = cancel;
+        d.Controls.AddRange(new Control[] { l, box, ok, cancel });
+        if (d.ShowDialog(this) != DialogResult.OK) return;
+        List<string> names = new List<string>();
+        foreach (string line in box.Text.Replace("\r\n", "\n").Split('\n')) if (line.Trim().Length > 0) names.Add(line.Trim());
+        SaveSelsovety(names.ToArray());
+        if (query == null) return;
+        Cursor = Cursors.WaitCursor;
+        FindMine();
+        Cursor = Cursors.Default;
+        onlyMine.Checked = mine != null;
+        ApplySearch();
     }
 
     void OpenBatch() {
