@@ -4,10 +4,9 @@
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
+$refs = @([System.Windows.Forms.Form].Assembly.Location, [System.Drawing.Point].Assembly.Location)
 
-try {
-    $refs = @([System.Windows.Forms.Form].Assembly.Location, [System.Drawing.Point].Assembly.Location)
-    Add-Type -ReferencedAssemblies $refs -TypeDefinition @'
+$code = @'
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -687,6 +686,33 @@ public class DbfViewer : Form {
     }
 }
 '@
+
+# Перед запуском Windows собирает программу и пишет при этом временные файлы в папку TEMP.
+# Если туда записать не получилось (антивирус, переполненная папка), пробуем другие папки.
+$tempDirs = @((Join-Path $here 'tmp'), 'D:\temp')
+if ($env:PUBLIC) { $tempDirs += (Join-Path $env:PUBLIC 'prosmotr-tmp') }
+$attempt = 0
+while ($true) {
+    try {
+        Add-Type -ReferencedAssemblies $refs -TypeDefinition $code
+        break
+    } catch {
+        if ($attempt -ge $tempDirs.Count) {
+            [void][System.Windows.Forms.MessageBox]::Show("Не удалось подготовить программу к запуску:`n`n$_`n`nПопробуйте запустить zapusk.bat ещё раз.", 'Просмотр базы - ошибка')
+            exit
+        }
+        $dir = $tempDirs[$attempt]
+        $attempt++
+        try {
+            if (-not (Test-Path $dir)) { [void](New-Item -ItemType Directory -Path $dir) }
+            $env:TMP = $dir
+            $env:TEMP = $dir
+        } catch { }
+        Start-Sleep -Seconds 1
+    }
+}
+
+try {
     [DbfViewer]::Run((Join-Path $here 'nastroiki.txt'))
 } catch {
     [void][System.Windows.Forms.MessageBox]::Show("$_", 'Просмотр базы - ошибка')
