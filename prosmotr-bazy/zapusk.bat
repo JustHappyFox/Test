@@ -1,2 +1,3 @@
 @echo off
-start "" /min powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File "%~dp0prosmotr.ps1"
+rem Start without the PowerShell window (it hides right after start)
+start "" /min powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File "%~dp0prosmotr.ps1"

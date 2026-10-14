@@ -1,5 +1,6 @@
 ﻿# Поиск абонента в базе FoxPro (таблицы .dbf) - ТОЛЬКО ЧТЕНИЕ.
 # Таблицы открываются только на чтение, в базу ничего не записывается.
+# Запуск: zapusk.vbs (без чёрного окна) или zapusk.bat.
 
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing
@@ -1381,9 +1382,246 @@ public class SearchResult {
     public string Note = "";    // пояснение для строки состояния
     public string How = "";     // как искали - для отчёта
     public double Seconds;
+    public Dictionary<int, int> Tariff = new Dictionary<int, int>();      // строка -> номер тарифа (T1, T2...)
+    public Dictionary<int, string> Power = new Dictionary<int, string>(); // строка -> мощность (доп. сведения)
+
+    public string TariffText(int row) {
+        int n;
+        return Tariff.TryGetValue(row, out n) ? "T" + n : "";
+    }
+
+    public string PowerText(int row) {
+        string v;
+        return Power.TryGetValue(row, out v) ? v : "";
+    }
 }
 
 public delegate bool CancelCheck();
+
+// ---- сведения из соседних таблиц ----
+// Тарифы: у многотарифного счётчика на каждый тариф (T1, T2, T3) свой лицевой; связка лежит в ABDIF_T.DBF:
+// основной лицевой (MAINNAB), лицевой тарифа (NAB) и номер тарифа.
+// Дополнительные сведения (в программе базы - Ctrl+D): DOP.DBF / DOGOVOR.DBF, оттуда же мощность.
+public class ExtraInfo {
+    // тарифы
+    string tariffPath;
+    DateTime tariffTime, tariffChecked;
+    long tariffSize;
+    readonly Dictionary<string, int> tariffOf = new Dictionary<string, int>();   // лицевой -> номер тарифа
+    readonly Dictionary<string, string> mainOf = new Dictionary<string, string>(); // лицевой -> основной лицевой
+    int mainField = -1, nabField = -1, numField = -1;
+    readonly object sync = new object();
+    public string TariffNote = "";
+
+    // дополнительные сведения
+    public readonly List<LiveBase> Tables = new List<LiveBase>();
+    public LiveBase PowerBase;
+    public int PowerField = -1;
+    public string PowerNote = "";
+
+    public static string Nab(string s) {
+        string t = s.Trim();
+        string r = t.TrimStart('0');
+        return r.Length == 0 && t.Length > 0 ? "0" : r;
+    }
+
+    public static ExtraInfo Open(string folder) {
+        ExtraInfo x = new ExtraInfo();
+        string tariff = Find(folder, "ABDIF_T.DBF");
+        if (tariff != null) {
+            x.tariffPath = tariff;
+            try { x.LoadTariffs(true); }
+            catch (Exception ex) { x.TariffNote = "таблица тарифов не прочиталась: " + ex.Message; x.tariffPath = null; }
+        } else x.TariffNote = "таблицы тарифов ABDIF_T.DBF нет";
+        Report.Line("Тарифы (T1, T2, T3): " + x.TariffNote);
+
+        foreach (string name in new string[] { "DOP.DBF", "DOGOVOR.DBF" }) {
+            string path = Find(folder, name);
+            if (path == null) { Report.Line("Доп. сведения: таблицы " + name + " нет"); continue; }
+            try {
+                LiveBase b = LiveBase.Open(path);
+                if (b.Header.FieldIndex("NAB") < 0) { Report.Line("Доп. сведения: в " + name + " нет поля NAB - не связать с абонентом"); continue; }
+                x.Tables.Add(b);
+                Report.Line("Доп. сведения " + name + ": записей " + b.Header.Expected + ", индексы: "
+                    + (b.Tags.Count == 0 ? "нет" : TagList(b)) + ". Поля:");
+                Report.Fields(b.Sample, "    ");
+            } catch (Exception ex) {
+                Report.Line("Доп. сведения: " + name + " не открылась - " + ex.Message);
+            }
+        }
+        x.FindPower();
+        Report.Line("Мощность: " + x.PowerNote);
+        return x;
+    }
+
+    static string TagList(LiveBase b) {
+        List<string> l = new List<string>();
+        foreach (IndexTag t in b.Tags) l.Add(t.Name + " (" + t.Expr + ")");
+        return string.Join(", ", l.ToArray());
+    }
+
+    static string Find(string folder, string name) {
+        foreach (string f in Directory.GetFiles(folder))
+            if (string.Compare(Path.GetFileName(f), name, StringComparison.OrdinalIgnoreCase) == 0) return f;
+        return null;
+    }
+
+    // поле мощности: по имени (MOSH..., MOCH..., POW...), число с одним знаком после запятой
+    void FindPower() {
+        int best = 0;
+        foreach (LiveBase b in Tables) {
+            for (int i = 0; i < b.Header.Fields.Count; i++) {
+                DbfField f = b.Header.Fields[i];
+                if (f.Type != 'N' && f.Type != 'F') continue;
+                string n = f.Name.ToUpperInvariant();
+                int score = 0;
+                if (n.Contains("MOSH") || n.Contains("MOSC") || n.Contains("MOCH") || n.Contains("MOSN") || n.Contains("MOWN") || n.Contains("MOW")) score = 10;
+                else if (n.StartsWith("MOS") || n.StartsWith("MOЩ") || n.StartsWith("MO")) score = 7;
+                else if (n.Contains("POW") || n.Contains("PMAX") || n.Contains("PUST") || n.Contains("PRAZ")) score = 6;
+                if (f.Decimals == 1) score += 3;
+                else if (f.Decimals > 0) score += 1;
+                if (score > best) { best = score; PowerBase = b; PowerField = i; }
+            }
+        }
+        if (PowerBase != null && best >= 6) {
+            PowerNote = "поле " + Path.GetFileName(PowerBase.FilePath) + "." + PowerBase.Header.Fields[PowerField].Name;
+            return;
+        }
+        // по имени не нашлось: единственное число с одним знаком после запятой в DOP
+        PowerBase = null;
+        PowerField = -1;
+        foreach (LiveBase b in Tables) {
+            int found = -1, count = 0;
+            for (int i = 0; i < b.Header.Fields.Count; i++)
+                if ((b.Header.Fields[i].Type == 'N' || b.Header.Fields[i].Type == 'F') && b.Header.Fields[i].Decimals == 1) { found = i; count++; }
+            if (count == 1) { PowerBase = b; PowerField = found; PowerNote = "поле " + Path.GetFileName(b.FilePath) + "." + b.Header.Fields[found].Name + " (угадано: единственное число вида 0.0)"; return; }
+        }
+        PowerNote = "поле мощности не найдено - пришлите отчёт (в нём список полей таблиц доп. сведений)";
+    }
+
+    // ---- тарифы ----
+
+    void LoadTariffs(bool first) {
+        FileInfo fi = new FileInfo(tariffPath);
+        DbfTable t = DbfTable.Load(tariffPath, false);
+        mainField = t.FieldIndex("MAINNAB");
+        nabField = t.FieldIndex("NAB");
+        if (first) {
+            numField = -1;
+            // номер тарифа - числовое поле, где только 1..9
+            for (int j = 0; j < t.Fields.Count && numField < 0; j++) {
+                if (j == mainField || j == nabField) continue;
+                DbfField f = t.Fields[j];
+                if (f.Type != 'N' && !(f.Type == 'C' && f.Length <= 2)) continue;
+                int filled = 0, ok = 0;
+                for (int r = 0; r < t.Count && r < 2000; r++) {
+                    string v = DbfTable.Format(t.GetValue(r, j, null), true).Trim();
+                    if (v.Length == 0) continue;
+                    filled++;
+                    int n;
+                    if (int.TryParse(v, out n) && n >= 1 && n <= 9) ok++;
+                }
+                if (filled > 0 && ok == filled) numField = j;
+            }
+        }
+        Dictionary<string, int> tariff = new Dictionary<string, int>();
+        Dictionary<string, string> main = new Dictionary<string, string>();
+        if (nabField >= 0 && numField >= 0) {
+            for (int r = 0; r < t.Count; r++) {
+                string nab = Nab(DbfTable.Format(t.GetValue(r, nabField, null), true));
+                int n;
+                if (nab.Length == 0 || !int.TryParse(DbfTable.Format(t.GetValue(r, numField, null), true).Trim(), out n)) continue;
+                tariff[nab] = n;
+                if (mainField >= 0) main[nab] = Nab(DbfTable.Format(t.GetValue(r, mainField, null), true));
+            }
+        }
+        lock (sync) {
+            tariffOf.Clear();
+            mainOf.Clear();
+            foreach (KeyValuePair<string, int> kv in tariff) tariffOf[kv.Key] = kv.Value;
+            foreach (KeyValuePair<string, string> kv in main) mainOf[kv.Key] = kv.Value;
+            tariffTime = fi.LastWriteTime;
+            tariffSize = fi.Length;
+            tariffChecked = DateTime.Now;
+        }
+        if (first) {
+            TariffNote = Path.GetFileName(tariffPath) + ", записей " + t.Count + ", лицевых с тарифом " + tariff.Count
+                + "; поля: основной - " + (mainField < 0 ? "нет" : t.Fields[mainField].Name) + ", лицевой - " + (nabField < 0 ? "нет" : t.Fields[nabField].Name)
+                + ", номер тарифа - " + (numField < 0 ? "не найден" : t.Fields[numField].Name);
+            Report.Line("Поля таблицы тарифов:");
+            Report.Fields(t, "    ");
+        }
+    }
+
+    // не реже раза в минуту смотрим, не поменялась ли таблица тарифов (данные - свежие)
+    void FreshTariffs() {
+        if (tariffPath == null) return;
+        bool check;
+        lock (sync) check = DateTime.Now - tariffChecked > TimeSpan.FromSeconds(60);
+        if (!check) return;
+        try {
+            FileInfo fi = new FileInfo(tariffPath);
+            bool changed;
+            lock (sync) { changed = fi.LastWriteTime != tariffTime || fi.Length != tariffSize; tariffChecked = DateTime.Now; }
+            if (changed) LoadTariffs(false);
+        } catch (Exception) { }
+    }
+
+    // номер тарифа лицевого (0 - не тарифный) и основной лицевой
+    public int Tariff(string nab, out string main) {
+        FreshTariffs();
+        string k = Nab(nab);
+        lock (sync) {
+            int n;
+            if (!tariffOf.TryGetValue(k, out n)) { main = null; return 0; }
+            if (!mainOf.TryGetValue(k, out main)) main = null;
+            return n;
+        }
+    }
+
+    // ---- мощность и карточка ----
+
+    public Dictionary<string, string> Power(List<string> nabs) {
+        Dictionary<string, string> result = new Dictionary<string, string>();
+        if (PowerBase == null || nabs.Count == 0) return result;
+        DbfTable t;
+        Dictionary<string, int> rows = PowerBase.LookupNabs(nabs, out t);
+        if (t == null) return result;
+        foreach (KeyValuePair<string, int> kv in rows) {
+            int start;
+            byte[] buf = t.RecordBuffer(kv.Value, out start);
+            DbfField f = t.Fields[PowerField];
+            result[kv.Key] = Encoding.ASCII.GetString(buf, start + f.Offset, f.Length).Trim();
+        }
+        return result;
+    }
+
+    // для карточки: все поля из таблиц доп. сведений (пары "подпись, значение")
+    public List<string> Details(string nab) {
+        List<string> pairs = new List<string>();
+        foreach (LiveBase b in Tables) {
+            DbfTable t;
+            Dictionary<string, int> rows;
+            string title = "--- Доп. сведения (" + Path.GetFileName(b.FilePath) + ")";
+            try { rows = b.LookupNabs(new List<string>(new string[] { nab }), out t); }
+            catch (Exception ex) { pairs.Add(title); pairs.Add("не прочиталось: " + ex.Message); continue; }
+            int row;
+            if (t == null) { pairs.Add(title); pairs.Add("нет индекса по номеру абонента"); continue; }
+            if (!rows.TryGetValue(Nab(nab), out row)) { pairs.Add(title); pairs.Add("записи нет"); continue; }
+            pairs.Add(title);
+            pairs.Add("");
+            object[] values;
+            using (MemoReader memo = t.OpenMemo()) values = t.GetRow(row, memo);
+            for (int j = 0; j < values.Length; j++) {
+                string v = DbfTable.Format(values[j], true);
+                if (string.Compare(t.Fields[j].Name, "NAB", StringComparison.OrdinalIgnoreCase) == 0) continue;
+                pairs.Add(FieldNames.Title(t.Fields[j].Name));
+                pairs.Add(v);
+            }
+        }
+        return pairs;
+    }
+}
 
 // База абонентов "вживую": при запуске читаются только заголовок, начало таблицы и список индексов.
 // Каждый поиск идёт по индексу FoxPro прямо в файлах базы - данные всегда свежие.
@@ -1395,6 +1633,7 @@ public class LiveBase {
     public List<IndexTag> Tags = new List<IndexTag>();
     public List<string> IndexFiles = new List<string>();
     public int RecordCount;
+    public ExtraInfo Extra;      // тарифы и доп. сведения из соседних таблиц
 
     public const int FetchLimit = 300;    // больше записей за один поиск не показываем (адрес - до 5000: потом отбор по дому)
     const int SeekLimit = 5000;
@@ -1994,9 +2233,88 @@ public class LiveBase {
                     && !Dir.InSelsovety(DbfTable.Format(part.GetValue(row, ul, null), true), selsovety)) { res.Hidden++; continue; }
                 res.Rows.Add(row);
             }
+            if (Extra != null && res.Rows.Count > 0) AddExtras(res);
         }
         res.Seconds = (DateTime.Now - started).TotalSeconds;
         return res;
+    }
+
+    // Тариф (T1, T2...) и мощность для найденных; лицевые одного счётчика - рядом, по порядку тарифов
+    void AddExtras(SearchResult res) {
+        int nab = res.Table.FieldIndex("NAB");
+        if (nab < 0) return;
+        Dictionary<int, string> mainOf = new Dictionary<int, string>();
+        List<string> nabs = new List<string>();
+        foreach (int row in res.Rows) {
+            string v = DbfTable.Format(res.Table.GetValue(row, nab, null), true);
+            string main;
+            int t = Extra.Tariff(v, out main);
+            if (t > 0) { res.Tariff[row] = t; mainOf[row] = main == null ? ExtraInfo.Nab(v) : main; }
+            if (nabs.Count < 100) nabs.Add(v);
+        }
+        if (res.Tariff.Count > 0) {
+            // группа тарифов встаёт на место первой из её строк
+            Dictionary<string, int> groupAt = new Dictionary<string, int>();
+            Dictionary<int, int> pos = new Dictionary<int, int>();
+            for (int i = 0; i < res.Rows.Count; i++) {
+                int row = res.Rows[i];
+                string m;
+                if (mainOf.TryGetValue(row, out m)) { if (!groupAt.ContainsKey(m)) groupAt[m] = i; pos[row] = groupAt[m]; }
+                else pos[row] = i;
+            }
+            List<int> order = new List<int>(res.Rows);
+            Dictionary<int, int> original = new Dictionary<int, int>();
+            for (int i = 0; i < order.Count; i++) original[order[i]] = i;
+            order.Sort(delegate(int a, int b) {
+                int c = pos[a].CompareTo(pos[b]);
+                if (c == 0) { int ta, tb; res.Tariff.TryGetValue(a, out ta); res.Tariff.TryGetValue(b, out tb); c = ta.CompareTo(tb); }
+                return c != 0 ? c : original[a].CompareTo(original[b]);
+            });
+            res.Rows = order;
+        }
+        try {
+            Dictionary<string, string> power = Extra.Power(nabs);
+            foreach (int row in res.Rows) {
+                string p;
+                if (power.TryGetValue(ExtraInfo.Nab(DbfTable.Format(res.Table.GetValue(row, nab, null), true)), out p)) res.Power[row] = p;
+            }
+        } catch (Exception ex) {
+            res.How += "; мощность не прочиталась: " + ex.Message;
+        }
+    }
+
+    // Записи по номерам абонентов (по индексу NAB): номер (без нулей впереди) -> строка в table. null - нет индекса
+    public Dictionary<string, int> LookupNabs(List<string> nabs, out DbfTable table) {
+        Dictionary<string, int> result = new Dictionary<string, int>();
+        table = null;
+        IndexTag t = TagFor("NAB");
+        if (t == null) return result;
+        int f = Header.FieldIndex("NAB");
+        int width = Header.Fields[f].Length;
+        Seeker s = new Seeker();
+        try {
+            foreach (string raw in nabs) {
+                string v = raw.Trim();
+                if (v.Length == 0) continue;
+                List<string> variants = new List<string>();
+                AddVariant(variants, v);
+                AddVariant(variants, ExtraInfo.Nab(v));
+                string core = ExtraInfo.Nab(v);
+                for (int w = core.Length + 1; w <= width && Header.Fields[f].Type == 'C'; w++) AddVariant(variants, core.PadLeft(w, '0'));
+                foreach (string x in variants) s.Seek(t, KeyFor(t, new string[] { x }, false));
+            }
+        } finally {
+            s.Close();
+        }
+        int deleted;
+        using (FileStream fs = OpenTable()) table = Fetch(fs, new List<int>(s.Found.Keys), 2000, out deleted);
+        Dictionary<string, bool> wanted = new Dictionary<string, bool>();
+        foreach (string raw in nabs) wanted[ExtraInfo.Nab(raw)] = true;
+        for (int row = 0; row < table.Count; row++) {
+            string k = ExtraInfo.Nab(DbfTable.Format(table.GetValue(row, f, null), true));
+            if (wanted.ContainsKey(k) && !result.ContainsKey(k)) result[k] = row;
+        }
+        return result;
     }
 
     static string Digits(string s) {
@@ -2989,6 +3307,11 @@ public static class Card {
 
     // extra - пары "подпись, значение", показываются первыми
     public static void Show(IWin32Window owner, DbfTable table, int row, string[] extra) {
+        Show(owner, table, row, extra, null);
+    }
+
+    // after - пары, которые показываются после полей записи (доп. сведения из других таблиц)
+    public static void Show(IWin32Window owner, DbfTable table, int row, string[] extra, List<string> after) {
         object[] values;
         using (MemoReader memo = table.OpenMemo()) values = table.GetRow(row, memo);
         Form card = new Form();
@@ -3013,6 +3336,14 @@ public static class Card {
             for (int i = 0; i + 1 < extra.Length; i += 2) g.Rows.Add(extra[i], extra[i + 1]);
         for (int j = 0; j < values.Length; j++)
             g.Rows.Add(FieldNames.Title(table.Fields[j].Name), DbfTable.Format(values[j], true));
+        if (after != null)
+            for (int i = 0; i + 1 < after.Count; i += 2) {
+                int r = g.Rows.Add(after[i], after[i + 1]);
+                if (after[i].StartsWith("---")) {
+                    g.Rows[r].DefaultCellStyle.BackColor = SystemColors.Control;
+                    g.Rows[r].DefaultCellStyle.Font = new Font(g.Font, FontStyle.Bold);
+                }
+            }
         card.Controls.Add(g);
         card.Show(owner);
     }
@@ -4558,6 +4889,7 @@ public class AbonentSearch : Form {
         grid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
         grid.ClipboardCopyMode = DataGridViewClipboardCopyMode.EnableWithoutHeaderText;
         grid.CellValueNeeded += new DataGridViewCellValueEventHandler(OnCellValueNeeded);
+        grid.CellFormatting += new DataGridViewCellFormattingEventHandler(OnCellFormatting);
         grid.CellDoubleClick += delegate(object s, DataGridViewCellEventArgs e) { if (e.RowIndex >= 0) OpenCard(e.RowIndex); };
         grid.KeyDown += new KeyEventHandler(OnGridKey);
 
@@ -4585,8 +4917,27 @@ public class AbonentSearch : Form {
         Controls.Add(bottom);
         Controls.Add(top);
 
-        Shown += delegate { Start(); };
+        Shown += delegate { BringUp(); Start(); };
         FormClosing += delegate { cancelScan = true; };
+    }
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    static extern bool ShowWindow(IntPtr hWnd, int cmd);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    static extern bool SetForegroundWindow(IntPtr hWnd);
+
+    // Запущенное из свёрнутого или скрытого окна PowerShell окно Windows показывает свёрнутым -
+    // разворачиваем и выводим на передний план сами
+    void BringUp() {
+        try {
+            if (WindowState == FormWindowState.Minimized) WindowState = FormWindowState.Normal;
+            ShowWindow(Handle, 9);   // SW_RESTORE
+            SetForegroundWindow(Handle);
+        } catch (Exception) { }
+        Activate();
+        TopMost = true;
+        TopMost = false;
     }
 
     Button BottomButton(string text, EventHandler click) {
@@ -4745,8 +5096,13 @@ public class AbonentSearch : Form {
                 PostStatus("Читаю справочники улиц...");
                 DateTime t1 = DateTime.Now;
                 b.Dir = PrepareDirectory(b, dirFolder, table, dirTable, dirKey, links);
+                double dirs = (DateTime.Now - t1).TotalSeconds;
+                PostStatus("Читаю тарифы и доп. сведения...");
+                DateTime t2 = DateTime.Now;
+                try { b.Extra = ExtraInfo.Open(dirFolder); }
+                catch (Exception ex) { Report.Line("Тарифы и доп. сведения не прочитались: " + ex.Message); }
                 Report.Line("Время открытия: таблица и индексы - " + opened.ToString("0.0") + " с, справочники - "
-                    + (DateTime.Now - t1).TotalSeconds.ToString("0.0") + " с");
+                    + dirs.ToString("0.0") + " с, тарифы и доп. сведения - " + (DateTime.Now - t2).TotalSeconds.ToString("0.0") + " с");
                 sel = LoadSelection(b);
             } catch (Exception ex) {
                 error = ex.Message;
@@ -4763,6 +5119,12 @@ public class AbonentSearch : Form {
                     if (t.State != 0 || t.Check.Length > 0) Report.Line("    " + t.Label + ": " + t.Check + (t.Learned.Length > 0 ? "; " + t.Learned : ""));
                 string learned = b.WeightsReport();
                 if (learned.Length > 0) Report.Line(learned);
+                if (b.Extra != null)
+                    foreach (LiveBase x in b.Extra.Tables) {
+                        IndexTag t = x.TagFor("NAB");
+                        Report.Line("    доп. сведения " + Path.GetFileName(x.FilePath) + ": индекс по NAB - "
+                            + (t == null ? "нет подходящего" : t.Label + ": " + t.Check + (t.Learned.Length > 0 ? "; " + t.Learned : "")));
+                    }
                 Report.Line("Чем ищется: лицевой - " + TagName(b, "NAB", false) + ", Л/С ЕРИП - " + TagName(b, "LS_ERIP", false)
                     + ", счётчик - " + TagName(b, "NCH", false) + ", снятый счётчик - " + TagName(b, "NSC", false)
                     + ", ФИО - " + TagName(b, "FIO", false) + ", адрес - " + TagName(b, "UL", true));
@@ -4864,17 +5226,18 @@ public class AbonentSearch : Form {
 
     AbonentQuery columns;
 
+    List<int> kinds = new List<int>();
+
     void BuildColumns() {
         columns = new AbonentQuery(DbfTable.CreateLike(live.Header), live.Dir);
+        kinds = ResultColumns.Kinds(columns, live.Extra);
         grid.RowCount = 0;
         grid.Columns.Clear();
-        foreach (int f in columns.Columns) {
-            DbfField field = live.Header.Fields[f];
+        foreach (int k in kinds) {
             DataGridViewTextBoxColumn c = new DataGridViewTextBoxColumn();
-            c.HeaderText = columns.ColumnTitle(f);
+            c.HeaderText = ResultColumns.Title(columns, k);
             c.SortMode = DataGridViewColumnSortMode.NotSortable;
-            string n = field.Name.ToUpperInvariant();
-            c.FillWeight = n == "FIO" ? 300 : n == "UL" ? 200 : (n == "NAB" || n == "NCH" || n == "TIPCH") ? 130 : 70;
+            c.FillWeight = ResultColumns.Weight(live.Header, k);
             grid.Columns.Add(c);
         }
     }
@@ -5017,8 +5380,15 @@ public class AbonentSearch : Form {
 
     void OnCellValueNeeded(object sender, DataGridViewCellValueEventArgs e) {
         SearchResult r = current;
-        if (r == null || e.RowIndex >= r.Rows.Count || e.ColumnIndex >= r.Query.Columns.Length) return;
-        e.Value = r.Query.CellText(r.Rows[e.RowIndex], r.Query.Columns[e.ColumnIndex]);
+        if (r == null || e.RowIndex >= r.Rows.Count || e.ColumnIndex >= kinds.Count) return;
+        e.Value = ResultColumns.Text(r, r.Rows[e.RowIndex], kinds[e.ColumnIndex]);
+    }
+
+    // лицевые тарифов (T1, T2...) - зеленоватым
+    void OnCellFormatting(object sender, DataGridViewCellFormattingEventArgs e) {
+        SearchResult r = current;
+        if (r == null || e.RowIndex < 0 || e.RowIndex >= r.Rows.Count) return;
+        if (r.Tariff.ContainsKey(r.Rows[e.RowIndex])) e.CellStyle.BackColor = ResultColumns.TariffColor;
     }
 
     void OnQueryKey(object sender, KeyEventArgs e) {
@@ -5044,8 +5414,7 @@ public class AbonentSearch : Form {
     internal void OpenCard(int index) {
         SearchResult r = current;
         if (r == null || index < 0 || index >= r.Rows.Count) return;
-        int row = r.Rows[index];
-        Card.Show(this, r.Table, row, r.Query.CardExtra(row));
+        ResultColumns.ShowCard(this, r, r.Rows[index], live == null ? null : live.Extra);
     }
 
     // ---- сельсоветы: выпадающий список с галочками, только отбирает показанное ----
@@ -5181,7 +5550,7 @@ public class AbonentSearch : Form {
             MessageBox.Show(this, "Подождите, пока откроется база.", Text);
             return;
         }
-        LastBatch = new BatchSearch(live, selected, mode, columns);
+        LastBatch = new BatchSearch(live, selected, mode, columns, kinds);
         LastBatch.Show(this);
     }
 
@@ -5262,6 +5631,58 @@ public class AbonentSearch : Form {
     }
 }
 
+// Столбцы списка найденного: тариф (T1, T2...), поля абонента, мощность (из доп. сведений)
+public static class ResultColumns {
+    public const int Tariff = -1, Power = -2;
+    public static readonly Color TariffColor = Color.FromArgb(214, 245, 214);
+
+    public static List<int> Kinds(AbonentQuery q, ExtraInfo x) {
+        List<int> list = new List<int>();
+        list.Add(Tariff);
+        list.AddRange(q.Columns);
+        if (x != null && x.PowerBase != null) list.Add(Power);
+        return list;
+    }
+
+    public static string Title(AbonentQuery q, int kind) {
+        if (kind == Tariff) return "Т";
+        if (kind == Power) return "Мощность";
+        return q.ColumnTitle(kind);
+    }
+
+    public static int Weight(DbfTable h, int kind) {
+        if (kind == Tariff) return 30;
+        if (kind == Power) return 70;
+        string n = h.Fields[kind].Name.ToUpperInvariant();
+        return n == "FIO" ? 300 : n == "UL" ? 200 : (n == "NAB" || n == "NCH" || n == "TIPCH") ? 130 : 70;
+    }
+
+    public static string Text(SearchResult r, int row, int kind) {
+        if (kind == Tariff) return r.TariffText(row);
+        if (kind == Power) return r.PowerText(row);
+        return r.Query.CellText(row, kind);
+    }
+
+    // карточка: сначала адрес по справочнику и тариф, после полей - доп. сведения (как Ctrl+D в программе базы)
+    public static void ShowCard(IWin32Window owner, SearchResult r, int row, ExtraInfo x) {
+        List<string> first = new List<string>();
+        string[] street = r.Query.CardExtra(row);
+        if (street != null) first.AddRange(street);
+        int t;
+        if (r.Tariff.TryGetValue(row, out t)) { first.Add("Тариф"); first.Add("T" + t + " (лицевые одного счётчика: таблица ABDIF_T)"); }
+        List<string> after = null;
+        int nab = r.Table.FieldIndex("NAB");
+        if (x != null && nab >= 0) {
+            Cursor old = Cursor.Current;
+            Cursor.Current = Cursors.WaitCursor;
+            try { after = x.Details(DbfTable.Format(r.Table.GetValue(row, nab, null), true)); }
+            catch (Exception ex) { after = new List<string>(new string[] { "--- Доп. сведения", "не прочитались: " + ex.Message }); }
+            finally { Cursor.Current = old; }
+        }
+        Card.Show(owner, r.Table, row, first.ToArray(), after);
+    }
+}
+
 // Выгрузка таблицы строк в Excel ("Таблица XML 2003": все значения - текст, нули в начале не теряются)
 public static class Spreadsheet {
     public static void Open(string name, string[] headers, List<string[]> rows) {
@@ -5316,7 +5737,10 @@ public class BatchSearch : Form {
 
     static readonly string[] ModeNames = { "&Лицевые счета", "&Адреса", "Номера &счётчиков", "&ФИО" };
 
-    public BatchSearch(LiveBase live, Dictionary<string, bool> selected, SearchMode mode, AbonentQuery query) {
+    readonly List<int> kinds;
+
+    public BatchSearch(LiveBase live, Dictionary<string, bool> selected, SearchMode mode, AbonentQuery query, List<int> kinds) {
+        this.kinds = kinds;
         this.live = live;
         this.selected = selected;
         this.mode = mode;
@@ -5402,14 +5826,14 @@ public class BatchSearch : Form {
         AddColumn("№", 35);
         AddColumn("Искали", 200);
         AddColumn("Результат", 220);
-        foreach (int f in query.Columns) AddColumn(query.ColumnTitle(f), 100);
+        foreach (int k in kinds) AddColumn(ResultColumns.Title(query, k), k == ResultColumns.Tariff ? 30 : 100);
 
         Panel bottom = new Panel();
         bottom.Dock = DockStyle.Bottom;
         bottom.Height = 34;
         status.Dock = DockStyle.Fill;
         status.TextAlign = ContentAlignment.MiddleLeft;
-        status.Text = "Найденные - белым, несколько абонентов на одну строку - жёлтым, не найденные - красным. Двойной щелчок - карточка.";
+        status.Text = "Найденные - белым, несколько абонентов на одну строку - жёлтым, тарифы (T1, T2...) - зелёным, не найденные - красным. Двойной щелчок - карточка.";
         Button excel = new Button();
         excel.Text = "В Excel";
         excel.Dock = DockStyle.Right;
@@ -5526,8 +5950,8 @@ public class BatchSearch : Form {
         if (column == 0) return it.Line.ToString();
         if (column == 1) return it.Text;
         if (column == 2) return it.Result;
-        if (it.Row < 0 || it.Res == null) return "";
-        return it.Res.Query.CellText(it.Row, it.Res.Query.Columns[column - 3]);
+        if (it.Row < 0 || it.Res == null || column - 3 >= kinds.Count) return "";
+        return ResultColumns.Text(it.Res, it.Row, kinds[column - 3]);
     }
 
     void OnCellValueNeeded(object sender, DataGridViewCellValueEventArgs e) {
@@ -5536,15 +5960,17 @@ public class BatchSearch : Form {
 
     void OnCellFormatting(object sender, DataGridViewCellFormattingEventArgs e) {
         if (e.RowIndex < 0 || e.RowIndex >= items.Count) return;
-        int kind = items[e.RowIndex].Kind;
+        Item it = items[e.RowIndex];
+        int kind = it.Kind;
         if (kind == 2) e.CellStyle.BackColor = Color.FromArgb(255, 220, 220);
+        else if (it.Res != null && it.Res.Tariff.ContainsKey(it.Row)) e.CellStyle.BackColor = ResultColumns.TariffColor;
         else if (kind == 1) e.CellStyle.BackColor = Color.FromArgb(255, 245, 200);
     }
 
     void OpenCard(int index) {
         if (index < 0 || index >= items.Count || items[index].Row < 0) return;
         Item it = items[index];
-        Card.Show(this, it.Res.Table, it.Row, it.Res.Query.CardExtra(it.Row));
+        ResultColumns.ShowCard(this, it.Res, it.Row, live.Extra);
     }
 
     void Export() {
@@ -5563,33 +5989,74 @@ public class BatchSearch : Form {
 }
 '@
 
-# Перед запуском Windows собирает программу и пишет при этом временные файлы в папку TEMP.
-# Если туда записать не получилось (антивирус, переполненная папка), пробуем другие папки.
-$tempDirs = @((Join-Path $here 'tmp'), 'D:\temp')
-if ($env:PUBLIC) { $tempDirs += (Join-Path $env:PUBLIC 'prosmotr-tmp') }
-$attempt = 0
-while ($true) {
-    try {
-        Add-Type -ReferencedAssemblies $refs -TypeDefinition $code
-        break
-    } catch {
-        if ($attempt -ge $tempDirs.Count) {
-            [void][System.Windows.Forms.MessageBox]::Show("Не удалось подготовить программу к запуску:`n`n$_`n`nПопробуйте запустить zapusk.bat ещё раз.", 'Просмотр базы - ошибка')
-            exit
-        }
-        $dir = $tempDirs[$attempt]
-        $attempt++
+# Программа собирается из этого скрипта один раз и сохраняется готовой (файл poisk_*.dll на этом компьютере,
+# в папке профиля пользователя) - следующие запуски не тратят время на сборку.
+# Изменился скрипт - у файла другое имя, программа соберётся заново.
+$stamp = '' + $code.Length
+try {
+    $sha = New-Object System.Security.Cryptography.SHA1CryptoServiceProvider
+    $stamp += '_' + ([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($code)), 0, 6) -replace '-', '')
+} catch {
+    $stamp += '_' + ($code.GetHashCode() -band 0x7FFFFFFF)
+}
+$name = "poisk_$stamp.dll"
+$cacheDirs = @()
+if ($env:LOCALAPPDATA) { $cacheDirs += (Join-Path $env:LOCALAPPDATA 'poisk-abonenta') }
+if ($env:TEMP) { $cacheDirs += (Join-Path $env:TEMP 'poisk-abonenta') }
+
+function Test-Ready { return ($null -ne ('AbonentSearch' -as [type])) }
+
+foreach ($d in $cacheDirs) {
+    $dll = Join-Path $d $name
+    if ((-not (Test-Ready)) -and (Test-Path $dll)) {
+        try { [void][Reflection.Assembly]::LoadFrom($dll) } catch { }
+    }
+}
+
+if (-not (Test-Ready)) {
+    foreach ($d in $cacheDirs) {
         try {
-            if (-not (Test-Path $dir)) { [void](New-Item -ItemType Directory -Path $dir) }
-            $env:TMP = $dir
-            $env:TEMP = $dir
+            if (-not (Test-Path $d)) { [void](New-Item -ItemType Directory -Path $d) }
+            # прежние версии программы больше не нужны
+            Get-ChildItem -Path $d -Filter 'poisk_*.dll' -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -ne $name } | Remove-Item -ErrorAction SilentlyContinue
+            $dll = Join-Path $d $name
+            Add-Type -ReferencedAssemblies $refs -TypeDefinition $code -OutputAssembly $dll -OutputType Library
+            if (-not (Test-Ready)) { [void][Reflection.Assembly]::LoadFrom($dll) }
+            if (Test-Ready) { break }
         } catch { }
-        Start-Sleep -Seconds 1
+    }
+}
+
+# Сохранить не получилось - собираем как раньше, только в памяти.
+# Если Windows не может записать временные файлы в папку TEMP (антивирус, переполненная папка), пробуем другие папки.
+if (-not (Test-Ready)) {
+    $tempDirs = @((Join-Path $here 'tmp'), 'D:\temp')
+    if ($env:PUBLIC) { $tempDirs += (Join-Path $env:PUBLIC 'prosmotr-tmp') }
+    $attempt = 0
+    while ($true) {
+        try {
+            Add-Type -ReferencedAssemblies $refs -TypeDefinition $code
+            break
+        } catch {
+            if ($attempt -ge $tempDirs.Count) {
+                [void][System.Windows.Forms.MessageBox]::Show("Не удалось подготовить программу к запуску:`n`n$_`n`nПопробуйте запустить ещё раз.", 'Поиск абонента - ошибка')
+                exit
+            }
+            $dir = $tempDirs[$attempt]
+            $attempt++
+            try {
+                if (-not (Test-Path $dir)) { [void](New-Item -ItemType Directory -Path $dir) }
+                $env:TMP = $dir
+                $env:TEMP = $dir
+            } catch { }
+            Start-Sleep -Seconds 1
+        }
     }
 }
 
 try {
     [AbonentSearch]::Run($here)
 } catch {
-    [void][System.Windows.Forms.MessageBox]::Show("$_", 'Просмотр базы - ошибка')
+    [void][System.Windows.Forms.MessageBox]::Show("$_", 'Поиск абонента - ошибка')
 }
