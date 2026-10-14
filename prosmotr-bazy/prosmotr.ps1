@@ -497,7 +497,7 @@ public class DbfTable {
         }
     }
 
-    static string Xml(string s) {
+    internal static string Xml(string s) {
         StringBuilder sb = new StringBuilder(s.Length);
         foreach (char c in s) {
             switch (c) {
@@ -1426,6 +1426,7 @@ public class AbonentQuery {
     public string LastExplain = "";  // как прошёл последний поиск - для отчёта (без самих слов)
     readonly string[] street;        // адрес по справочнику улиц для каждой записи (если справочник есть)
     readonly string[] streetLower;
+    readonly string streetSource;
 
     // слова, которые в адресе ничего не значат: тип улицы и населённого пункта
     static readonly string[] Skip = {
@@ -1456,6 +1457,7 @@ public class AbonentQuery {
         addressFields = address.ToArray();
 
         if (dir != null && ul >= 0) {
+            streetSource = dir.TableName;
             street = new string[t.Count];
             streetLower = new string[t.Count];
             for (int r = 0; r < t.Count; r++) {
@@ -1489,6 +1491,26 @@ public class AbonentQuery {
     // адрес по справочнику для записи или null
     public string StreetOf(int row) {
         return street == null ? null : street[row];
+    }
+
+    // текст для списка: улица по справочнику вместо кода
+    public string CellText(int row, int field) {
+        string value = DbfTable.Format(t.GetValue(row, field, null), false);
+        if (!IsStreetColumn(field)) return value;
+        string s = street[row];
+        return s == null ? "код " + value : s;
+    }
+
+    public string ColumnTitle(int field) {
+        if (IsStreetColumn(field)) return "Населённый пункт, улица";
+        string label = FieldNames.Label(t.Fields[field].Name);
+        return label == null ? t.Fields[field].Name : label;
+    }
+
+    // дополнительная строка карточки: адрес по справочнику
+    public string[] CardExtra(int row) {
+        string s = StreetOf(row);
+        return s == null ? null : new string[] { "Адрес по справочнику " + streetSource, s };
     }
 
     public bool IsStreetColumn(int field) {
@@ -1785,6 +1807,12 @@ public class AbonentSearch : Form {
         hint.ForeColor = SystemColors.GrayText;
         hint.AutoSize = true;
         hint.Location = new Point(12, 76);
+        Button listButton = new Button();
+        listButton.Text = "Поиск по списку...";
+        listButton.AutoSize = true;
+        listButton.Location = new Point(x + 20, 6);
+        listButton.Click += delegate { OpenBatch(); };
+        top.Controls.Add(listButton);
         top.Controls.Add(queryBox);
         top.Controls.Add(hint);
 
@@ -2008,8 +2036,7 @@ public class AbonentSearch : Form {
         foreach (int f in query.Columns) {
             DbfField field = table.Fields[f];
             DataGridViewTextBoxColumn c = new DataGridViewTextBoxColumn();
-            string label = query.IsStreetColumn(f) ? "Населённый пункт, улица" : FieldNames.Label(field.Name);
-            c.HeaderText = label == null ? field.Name : label;
+            c.HeaderText = query.ColumnTitle(f);
             c.SortMode = DataGridViewColumnSortMode.NotSortable;
             string n = field.Name.ToUpperInvariant();
             c.FillWeight = n == "FIO" ? 300 : n == "UL" ? 200 : (n == "NAB" || n == "NCH" || n == "TIPCH") ? 130 : 70;
@@ -2040,13 +2067,7 @@ public class AbonentSearch : Form {
 
     void OnCellValueNeeded(object sender, DataGridViewCellValueEventArgs e) {
         if (table == null || e.RowIndex >= found.Count || e.ColumnIndex >= query.Columns.Length) return;
-        int row = found[e.RowIndex], field = query.Columns[e.ColumnIndex];
-        string value = DbfTable.Format(table.GetValue(row, field, null), false);
-        if (query.IsStreetColumn(field)) {
-            string street = query.StreetOf(row);
-            value = street == null ? "код " + value : street;
-        }
-        e.Value = value;
+        e.Value = query.CellText(found[e.RowIndex], query.Columns[e.ColumnIndex]);
     }
 
     void OnQueryKey(object sender, KeyEventArgs e) {
@@ -2074,9 +2095,15 @@ public class AbonentSearch : Form {
 
     internal void OpenCard(int index) {
         if (table == null || index < 0 || index >= found.Count) return;
-        string street = query.StreetOf(found[index]);
-        Card.Show(this, table, found[index], street == null ? null
-            : new string[] { "Адрес по справочнику " + directory.TableName, street });
+        Card.Show(this, table, found[index], query.CardExtra(found[index]));
+    }
+
+    void OpenBatch() {
+        if (table == null || loading) {
+            MessageBox.Show(this, "Подождите, пока загрузится база абонентов.", Text);
+            return;
+        }
+        new BatchSearch(table, query, mode).Show(this);
     }
 
     // Выбор папки и таблицы абонентов, если сама не нашлась или нашлась не та
@@ -2149,6 +2176,265 @@ public class AbonentSearch : Form {
         folder = folderBox.Text.Trim();
         tableName = ((TableInfo)list.SelectedItem).Name;
         LoadTable();
+    }
+}
+
+// Выгрузка таблицы строк в Excel ("Таблица XML 2003": все значения - текст, нули в начале не теряются)
+public static class Spreadsheet {
+    public static void Open(string name, string[] headers, List<string[]> rows) {
+        string file = Path.Combine(Path.GetTempPath(), name + "_" + DateTime.Now.ToString("yyyyMMdd_HHmmss") + ".xml");
+        using (StreamWriter w = new StreamWriter(file, false, new UTF8Encoding(false))) {
+            w.WriteLine("<?xml version=\"1.0\" encoding=\"utf-8\"?>");
+            w.WriteLine("<?mso-application progid=\"Excel.Sheet\"?>");
+            w.WriteLine("<Workbook xmlns=\"urn:schemas-microsoft-com:office:spreadsheet\" xmlns:ss=\"urn:schemas-microsoft-com:office:spreadsheet\">");
+            w.WriteLine("<Styles><Style ss:ID=\"h\"><Font ss:Bold=\"1\"/></Style></Styles>");
+            w.WriteLine("<Worksheet ss:Name=\"" + DbfTable.Xml(name) + "\"><Table>");
+            w.Write("<Row>");
+            foreach (string h in headers) w.Write("<Cell ss:StyleID=\"h\"><Data ss:Type=\"String\">" + DbfTable.Xml(h) + "</Data></Cell>");
+            w.WriteLine("</Row>");
+            foreach (string[] row in rows) {
+                w.Write("<Row>");
+                foreach (string v in row)
+                    w.Write(v == null || v.Length == 0 ? "<Cell/>" : "<Cell><Data ss:Type=\"String\">" + DbfTable.Xml(v) + "</Data></Cell>");
+                w.WriteLine("</Row>");
+            }
+            w.WriteLine("</Table></Worksheet></Workbook>");
+        }
+        try { Process.Start("excel.exe", "\"" + file + "\""); }
+        catch { Process.Start(file); }
+    }
+}
+
+// Поиск по списку: вставляете столбик лицевых, счётчиков, ФИО или адресов - получаете итог по каждой строке
+public class BatchSearch : Form {
+    readonly DbfTable table;
+    readonly AbonentQuery query;
+    SearchMode mode;
+    readonly RadioButton[] modeButtons = new RadioButton[4];
+    internal readonly TextBox input = new TextBox();
+    readonly DataGridView grid = new DataGridView();
+    internal readonly Label status = new Label();
+    readonly Button findButton = new Button();
+    readonly List<Item> items = new List<Item>();
+    bool running;
+
+    const int MaxPerLine = 20;   // если по строке нашлось много - показываем первые
+
+    class Item {
+        public int Line;
+        public string Text;
+        public string Result;
+        public int Row = -1;      // запись абонента или -1, если не найден
+        public int Kind;          // 0 - найден один, 1 - несколько, 2 - не найден
+    }
+
+    static readonly string[] ModeNames = { "&Лицевые счета", "&Адреса", "Номера &счётчиков", "&ФИО" };
+
+    public BatchSearch(DbfTable table, AbonentQuery query, SearchMode mode) {
+        this.table = table;
+        this.query = query;
+        this.mode = mode;
+        Text = "Поиск по списку";
+        Size = new Size(1000, 700);
+        StartPosition = FormStartPosition.CenterScreen;
+
+        SplitContainer split = new SplitContainer();
+        split.Dock = DockStyle.Fill;
+        split.Orientation = Orientation.Horizontal;
+
+        Panel head = new Panel();
+        head.Dock = DockStyle.Top;
+        head.Height = 58;
+        Label l1 = new Label();
+        l1.Text = "В списке:";
+        l1.AutoSize = true;
+        l1.Location = new Point(10, 10);
+        head.Controls.Add(l1);
+        int x = 80;
+        for (int i = 0; i < modeButtons.Length; i++) {
+            RadioButton rb = new RadioButton();
+            rb.Text = ModeNames[i];
+            rb.AutoSize = true;
+            rb.Location = new Point(x, 8);
+            rb.Tag = (SearchMode)i;
+            rb.Checked = i == (int)mode;
+            rb.CheckedChanged += delegate(object s, EventArgs e) { if (((RadioButton)s).Checked) this.mode = (SearchMode)((RadioButton)s).Tag; };
+            modeButtons[i] = rb;
+            head.Controls.Add(rb);
+            x += 150;
+        }
+        Label l2 = new Label();
+        l2.Text = "Вставьте список - по одному значению в строке (можно столбик из Excel), и нажмите \"Найти\":";
+        l2.AutoSize = true;
+        l2.Location = new Point(10, 36);
+        head.Controls.Add(l2);
+
+        input.Multiline = true;
+        input.AcceptsReturn = true;
+        input.ScrollBars = ScrollBars.Both;
+        input.WordWrap = false;
+        input.Dock = DockStyle.Fill;
+        input.Font = new Font(FontFamily.GenericMonospace, 10f);
+
+        Panel buttons = new Panel();
+        buttons.Dock = DockStyle.Right;
+        buttons.Width = 130;
+        findButton.Text = "Найти";
+        findButton.Location = new Point(10, 6);
+        findButton.Size = new Size(110, 32);
+        findButton.Click += delegate { Run(); };
+        Button clear = new Button();
+        clear.Text = "Очистить";
+        clear.Location = new Point(10, 44);
+        clear.Size = new Size(110, 28);
+        clear.Click += delegate { input.Clear(); input.Focus(); };
+        buttons.Controls.Add(findButton);
+        buttons.Controls.Add(clear);
+
+        split.Panel1.Controls.Add(input);
+        split.Panel1.Controls.Add(buttons);
+        split.Panel1.Controls.Add(head);
+
+        grid.Dock = DockStyle.Fill;
+        grid.VirtualMode = true;
+        grid.ReadOnly = true;
+        grid.AllowUserToAddRows = false;
+        grid.AllowUserToDeleteRows = false;
+        grid.AllowUserToResizeRows = false;
+        grid.RowHeadersVisible = false;
+        grid.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
+        grid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
+        grid.ClipboardCopyMode = DataGridViewClipboardCopyMode.EnableWithoutHeaderText;
+        grid.CellValueNeeded += new DataGridViewCellValueEventHandler(OnCellValueNeeded);
+        grid.CellFormatting += new DataGridViewCellFormattingEventHandler(OnCellFormatting);
+        grid.CellDoubleClick += delegate(object s, DataGridViewCellEventArgs e) { OpenCard(e.RowIndex); };
+        AddColumn("№", 35);
+        AddColumn("Искали", 200);
+        AddColumn("Результат", 110);
+        foreach (int f in query.Columns) AddColumn(query.ColumnTitle(f), 100);
+
+        Panel bottom = new Panel();
+        bottom.Dock = DockStyle.Bottom;
+        bottom.Height = 34;
+        status.Dock = DockStyle.Fill;
+        status.TextAlign = ContentAlignment.MiddleLeft;
+        status.Text = "Найденные - белым, несколько абонентов на одну строку - жёлтым, не найденные - красным. Двойной щелчок - карточка.";
+        Button excel = new Button();
+        excel.Text = "В Excel";
+        excel.Dock = DockStyle.Right;
+        excel.Width = 120;
+        excel.Click += delegate { Export(); };
+        bottom.Controls.Add(status);
+        bottom.Controls.Add(excel);
+
+        split.Panel2.Controls.Add(grid);
+        split.Panel2.Controls.Add(bottom);
+        Controls.Add(split);
+        Shown += delegate { split.SplitterDistance = 230; input.Focus(); };
+    }
+
+    void AddColumn(string title, int weight) {
+        DataGridViewTextBoxColumn c = new DataGridViewTextBoxColumn();
+        c.HeaderText = title;
+        c.FillWeight = weight;
+        c.SortMode = DataGridViewColumnSortMode.NotSortable;
+        grid.Columns.Add(c);
+    }
+
+    internal void Run() {
+        if (running) return;
+        List<string> lines = new List<string>();
+        foreach (string raw in input.Text.Replace("\r\n", "\n").Split('\n')) {
+            string line = raw.Replace('\t', ' ').Trim();
+            if (line.Length > 0) lines.Add(line);
+        }
+        if (lines.Count == 0) { MessageBox.Show(this, "Вставьте список: по одному значению в строке.", Text); return; }
+        running = true;
+        findButton.Enabled = false;
+        Cursor = Cursors.WaitCursor;
+        items.Clear();
+        grid.RowCount = 0;
+        DateTime started = DateTime.Now;
+        int single = 0, several = 0, none = 0;
+        try {
+            for (int i = 0; i < lines.Count; i++) {
+                if (i % 5 == 0) {
+                    status.Text = "Ищу: строка " + (i + 1) + " из " + lines.Count + "...";
+                    Application.DoEvents();
+                    if (IsDisposed) return;
+                }
+                List<int> found = query.Find(lines[i], mode);
+                if (found.Count == 0) {
+                    Add(i + 1, lines[i], "не найден", -1, 2);
+                    none++;
+                    continue;
+                }
+                string result = found.Count == 1 ? "найден" : "найдено " + found.Count + (found.Count > MaxPerLine ? " (показаны " + MaxPerLine + ")" : "");
+                if (found.Count == 1) single++; else several++;
+                for (int k = 0; k < found.Count && k < MaxPerLine; k++) Add(i + 1, lines[i], result, found[k], found.Count == 1 ? 0 : 1);
+            }
+        } finally {
+            if (!IsDisposed) {
+                running = false;
+                findButton.Enabled = true;
+                Cursor = Cursors.Default;
+            }
+        }
+        grid.RowCount = items.Count;
+        grid.Invalidate();
+        status.Text = "Строк в списке: " + lines.Count + ". Найдено по одному абоненту: " + single
+            + ", по несколько: " + several + ", не найдено: " + none + ". Двойной щелчок - карточка.";
+        Report.Search("Поиск по списку, в списке: " + ModeNames[(int)mode].Replace("&", "").ToLowerInvariant() + "; строк " + lines.Count
+            + ", найдено по одному " + single + ", по несколько " + several + ", не найдено " + none
+            + ", время " + (DateTime.Now - started).TotalSeconds.ToString("0.0") + " с");
+    }
+
+    void Add(int line, string text, string result, int row, int kind) {
+        Item it = new Item();
+        it.Line = line;
+        it.Text = text;
+        it.Result = result;
+        it.Row = row;
+        it.Kind = kind;
+        items.Add(it);
+    }
+
+    string Cell(Item it, int column) {
+        if (column == 0) return it.Line.ToString();
+        if (column == 1) return it.Text;
+        if (column == 2) return it.Result;
+        if (it.Row < 0) return "";
+        return query.CellText(it.Row, query.Columns[column - 3]);
+    }
+
+    void OnCellValueNeeded(object sender, DataGridViewCellValueEventArgs e) {
+        if (e.RowIndex < items.Count) e.Value = Cell(items[e.RowIndex], e.ColumnIndex);
+    }
+
+    void OnCellFormatting(object sender, DataGridViewCellFormattingEventArgs e) {
+        if (e.RowIndex < 0 || e.RowIndex >= items.Count) return;
+        int kind = items[e.RowIndex].Kind;
+        if (kind == 2) e.CellStyle.BackColor = Color.FromArgb(255, 220, 220);
+        else if (kind == 1) e.CellStyle.BackColor = Color.FromArgb(255, 245, 200);
+    }
+
+    void OpenCard(int index) {
+        if (index < 0 || index >= items.Count || items[index].Row < 0) return;
+        Card.Show(this, table, items[index].Row, query.CardExtra(items[index].Row));
+    }
+
+    void Export() {
+        if (items.Count == 0) { MessageBox.Show(this, "Сначала найдите что-нибудь.", Text); return; }
+        string[] headers = new string[grid.Columns.Count];
+        for (int c = 0; c < headers.Length; c++) headers[c] = grid.Columns[c].HeaderText;
+        List<string[]> rows = new List<string[]>();
+        foreach (Item it in items) {
+            string[] r = new string[headers.Length];
+            for (int c = 0; c < r.Length; c++) r[c] = Cell(it, c);
+            rows.Add(r);
+        }
+        try { Spreadsheet.Open("Поиск_по_списку", headers, rows); }
+        catch (Exception ex) { MessageBox.Show(this, "Не удалось выгрузить в Excel:\n" + ex.Message, Text); }
     }
 }
 '@
