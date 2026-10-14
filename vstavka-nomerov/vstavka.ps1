@@ -1,11 +1,8 @@
-﻿# Вставка номеров: по нажатию клавиши печатает цифры из буфера обмена в активное окно.
-# Всё, кроме цифр (пробелы, скобки, дефисы, буквы), отбрасывается.
-# Цифры печатаются в темпе человека: слишком быстрый ввод программа может принять
-# за сканер штрихкодов и сбросить окна.
+﻿# Вставка номеров в DOS-базу: по F9 делает то же самое, что меню окна
+# "Изменить -> Вставить", но из буфера берутся только цифры.
 
-$KEY   = 'F9'   # клавиша вставки
-$PAUSE = 150    # пауза между цифрами, мс (если вкладки всё равно закрываются - поставьте 300)
-$HOLD  = 30     # сколько "держать" каждую цифру, мс
+$KEY   = 'F9'     # клавиша вставки
+$ENTER = $false   # $true - после номера сразу нажимать Enter
 
 $Host.UI.RawUI.WindowTitle = 'Вставка номеров'
 
@@ -13,7 +10,7 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type @"
 using System;
 using System.Runtime.InteropServices;
-using System.Threading;
+using System.Text;
 
 public static class K {
     [StructLayout(LayoutKind.Sequential)]
@@ -21,24 +18,14 @@ public static class K {
 
     [DllImport("user32.dll")] public static extern bool RegisterHotKey(IntPtr hWnd, int id, uint mod, uint vk);
     [DllImport("user32.dll")] public static extern int GetMessage(out MSG msg, IntPtr hWnd, uint min, uint max);
-    [DllImport("user32.dll")] static extern short GetAsyncKeyState(int vk);
-    [DllImport("user32.dll")] static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
-    [DllImport("user32.dll")] static extern uint MapVirtualKey(uint code, uint mapType);
+    [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassName(IntPtr hWnd, StringBuilder name, int max);
 
-    public static void WaitKeyUp(int vk) {
-        for (int i = 0; i < 300 && (GetAsyncKeyState(vk) & 0x8000) != 0; i++) Thread.Sleep(10);
-        Thread.Sleep(50);
-    }
-
-    public static void TypeDigits(string digits, int hold, int pause) {
-        foreach (char c in digits) {
-            byte vk = (byte)c;   // '0'..'9' совпадают с кодами клавиш 0..9
-            byte sc = (byte)MapVirtualKey(vk, 0);
-            keybd_event(vk, sc, 0, UIntPtr.Zero);
-            Thread.Sleep(hold);
-            keybd_event(vk, sc, 2, UIntPtr.Zero);
-            Thread.Sleep(pause);
-        }
+    public static string ClassOf(IntPtr hWnd) {
+        StringBuilder sb = new StringBuilder(256);
+        GetClassName(hWnd, sb, sb.Capacity);
+        return sb.ToString();
     }
 }
 "@
@@ -52,18 +39,36 @@ if (-not [K]::RegisterHotKey([IntPtr]::Zero, 1, 0x4000, $vk)) {
 }
 
 Write-Host 'Вставка номеров работает.' -ForegroundColor Green
-Write-Host "Скопируйте номер, встаньте в нужное поле и нажмите $KEY."
+Write-Host "Скопируйте номер, встаньте в нужное поле базы и нажмите $KEY."
 Write-Host 'Чтобы выключить - просто закройте это окно.'
 Write-Host ''
 
 $msg = New-Object K+MSG
 while ([K]::GetMessage([ref]$msg, [IntPtr]::Zero, 0, 0) -gt 0) {
     if ($msg.message -ne 0x0312) { continue }   # 0x0312 = WM_HOTKEY
-    try   { $digits = [System.Windows.Forms.Clipboard]::GetText() -replace '[^0-9]', '' }
-    catch { $digits = '' }
-    if ($digits) {
-        [K]::WaitKeyUp($vk)   # сначала отпустите клавишу, потом печатаем
-        [K]::TypeDigits($digits, $HOLD, $PAUSE)
-        Write-Host "Вставлено: $digits"
+
+    $win = [K]::GetForegroundWindow()
+    if ([K]::ClassOf($win) -ne 'ConsoleWindowClass') {
+        Write-Host "$KEY вставляет только в окно базы."
+        continue
     }
+
+    try { $text = [System.Windows.Forms.Clipboard]::GetText() } catch { $text = '' }
+    $digits = $text -replace '[^0-9]', ''
+    if (-not $digits) {
+        Write-Host 'В буфере нет цифр.'
+        continue
+    }
+
+    # оставляем в буфере только цифры, чтобы вставилось ровно это
+    $paste = $digits
+    if ($ENTER) { $paste += "`r`n" }
+    if ($text -ne $paste) {
+        try { [System.Windows.Forms.Clipboard]::SetText($paste) }
+        catch { Write-Host 'Буфер занят, нажмите ещё раз.'; continue }
+    }
+
+    # 0x0112 = WM_SYSCOMMAND, 0xFFF1 = пункт меню окна "Изменить -> Вставить"
+    [void][K]::PostMessage($win, 0x0112, [IntPtr]0xFFF1, [IntPtr]::Zero)
+    Write-Host "Вставлено: $digits"
 }
