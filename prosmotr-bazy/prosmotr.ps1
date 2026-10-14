@@ -1079,6 +1079,11 @@ public static class FieldNames {
 // Карточка записи: все поля целиком, с русскими подписями, где они известны
 public static class Card {
     public static void Show(IWin32Window owner, DbfTable table, int row) {
+        Show(owner, table, row, null);
+    }
+
+    // extra - пары "подпись, значение", показываются первыми
+    public static void Show(IWin32Window owner, DbfTable table, int row, string[] extra) {
         object[] values;
         using (MemoReader memo = table.OpenMemo()) values = table.GetRow(row, memo);
         Form card = new Form();
@@ -1099,6 +1104,8 @@ public static class Card {
         g.Columns[1].AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill;
         g.Columns[1].DefaultCellStyle.WrapMode = DataGridViewTriState.True;
         g.AutoSizeRowsMode = DataGridViewAutoSizeRowsMode.AllCells;
+        if (extra != null)
+            for (int i = 0; i + 1 < extra.Length; i += 2) g.Rows.Add(extra[i], extra[i + 1]);
         for (int j = 0; j < values.Length; j++)
             g.Rows.Add(FieldNames.Title(table.Fields[j].Name), DbfTable.Format(values[j], true));
         card.Controls.Add(g);
@@ -1183,29 +1190,206 @@ public class TableInfo {
     }
 }
 
-// Поиск абонента одной строкой: лицевой счёт, адрес или номер счётчика
+// Справочник улиц. Если у абонента в поле UL хранится код улицы (5114), то название улицы,
+// населённый пункт и сельсовет программа берёт из отдельной таблицы - ищем её сами.
+public class StreetDirectory {
+    public string TableName;
+    public string KeyField;
+    readonly Dictionary<string, string> names = new Dictionary<string, string>();
+    readonly Dictionary<string, string> lowerNames = new Dictionary<string, string>();
+
+    public string Name(string code) {
+        string s;
+        return names.TryGetValue(NormalizeCode(code), out s) ? s : null;
+    }
+
+    public string LowerName(string code) {
+        string s;
+        return lowerNames.TryGetValue(NormalizeCode(code), out s) ? s : null;
+    }
+
+    public double Coverage(List<string> codes) {
+        if (codes.Count == 0) return 0;
+        int hit = 0;
+        foreach (string c in codes) if (names.ContainsKey(c)) hit++;
+        return (double)hit / codes.Count;
+    }
+
+    public static string NormalizeCode(string s) {
+        s = s.Trim();
+        string t = s.TrimStart('0');
+        return t.Length == 0 && s.Length > 0 ? "0" : t;
+    }
+
+    static bool IsDigits(string s) {
+        if (s.Length == 0) return false;
+        foreach (char c in s) if (c < '0' || c > '9') return false;
+        return true;
+    }
+
+    static bool HasLetter(string s) {
+        foreach (char c in s) if (char.IsLetter(c)) return true;
+        return false;
+    }
+
+    // Коды улиц у абонентов, если в UL почти везде числа; иначе null (там названия)
+    public static List<string> Codes(DbfTable abon, int ul) {
+        if (ul < 0) return null;
+        Dictionary<string, bool> codes = new Dictionary<string, bool>();
+        int filled = 0, numeric = 0;
+        for (int r = 0; r < abon.Count; r++) {
+            string v = DbfTable.Format(abon.GetValue(r, ul, null), true).Trim();
+            if (v.Length == 0) continue;
+            filled++;
+            if (!IsDigits(v.Replace(",00", "").Replace(".00", ""))) continue;
+            numeric++;
+            codes[NormalizeCode(v)] = true;
+        }
+        if (filled == 0 || numeric < filled * 0.9) return null;
+        return new List<string>(codes.Keys);
+    }
+
+    public static StreetDirectory Load(string path, string keyField) {
+        DbfTable d = DbfTable.Load(path, false);
+        int key = d.FieldIndex(keyField);
+        if (key < 0) return null;
+        StreetDirectory dir = new StreetDirectory();
+        dir.TableName = Path.GetFileName(path);
+        dir.KeyField = d.Fields[key].Name;
+        for (int r = 0; r < d.Count; r++) {
+            string code = NormalizeCode(DbfTable.Format(d.GetValue(r, key, null), true));
+            if (code.Length == 0 || dir.names.ContainsKey(code)) continue;
+            StringBuilder text = new StringBuilder();
+            for (int j = 0; j < d.Fields.Count; j++) {
+                if (j == key || d.Fields[j].Type != 'C') continue;
+                string v = DbfTable.Format(d.GetValue(r, j, null), true).Trim();
+                if (v.Length == 0 || !HasLetter(v)) continue;
+                if (text.Length > 0) text.Append(", ");
+                text.Append(v);
+            }
+            dir.names[code] = text.ToString();
+            dir.lowerNames[code] = text.ToString().ToLowerInvariant();
+        }
+        return dir;
+    }
+
+    // Ищем таблицу, где есть поле с теми же кодами (каждый код - один раз) и текстом при них.
+    // Берём, только если там нашлись почти все коды улиц абонентов.
+    public static StreetDirectory Detect(string folder, string abonTable, List<string> codes, LoadProgress progress) {
+        List<TableInfo> tables = TableInfo.List(folder, null);
+        string bestTable = null, bestKey = null;
+        double bestCoverage = 0.9;
+        int bestRecords = int.MaxValue;
+        for (int i = 0; i < tables.Count; i++) {
+            if (progress != null) progress(i, tables.Count);
+            TableInfo info = tables[i];
+            if (info.Abonents || info.Records < 2 || info.Records > 50000) continue;
+            if (string.Compare(info.Name, abonTable, StringComparison.OrdinalIgnoreCase) == 0) continue;
+            if (info.Name.ToUpperInvariant().StartsWith("ARC")) continue;
+            string path = Path.Combine(folder, info.Name);
+            DbfTable d;
+            try {
+                DbfTable h = DbfTable.LoadHeader(path);
+                bool text = false;
+                foreach (DbfField f in h.Fields) if (f.Type == 'C' && f.Length >= 5) text = true;
+                if (!text) continue;
+                d = DbfTable.Load(path, false);
+            } catch (Exception) {
+                continue;
+            }
+            if (d.Count < 2) continue;
+            for (int k = 0; k < d.Fields.Count; k++) {
+                DbfField f = d.Fields[k];
+                if (!((f.Type == 'N' && f.Length <= 10) || (f.Type == 'C' && f.Length <= 10))) continue;
+                Dictionary<string, bool> values = new Dictionary<string, bool>();
+                int filled = 0;
+                for (int r = 0; r < d.Count; r++) {
+                    string v = NormalizeCode(DbfTable.Format(d.GetValue(r, k, null), true));
+                    if (v.Length == 0) continue;
+                    filled++;
+                    values[v] = true;
+                }
+                if (filled < 2 || values.Count < filled * 0.95) continue;   // код справочника не повторяется
+                int hit = 0;
+                foreach (string c in codes) if (values.ContainsKey(c)) hit++;
+                double coverage = (double)hit / codes.Count;
+                if (coverage > bestCoverage || (coverage == bestCoverage && bestTable != null && d.Count < bestRecords)) {
+                    bestCoverage = coverage;
+                    bestRecords = d.Count;
+                    bestTable = info.Name;
+                    bestKey = f.Name;
+                }
+            }
+        }
+        if (bestTable == null) return null;
+        return Load(Path.Combine(folder, bestTable), bestKey);
+    }
+}
+
+public enum SearchMode { Account, Address, Meter, Name }
+
+// Поиск абонента: по лицевому счёту, адресу, номеру счётчика или ФИО - что выбрано
 public class AbonentQuery {
     readonly DbfTable t;
-    readonly int[] textFields;   // где искать слова: ФИО, улица
-    readonly int[] idFields;     // где искать длинные номера: лицевой, счётчик, телефон
+    readonly int[] accountFields, addressFields, meterFields, nameFields;
     readonly int dom, kor, kv, ul;
     public readonly int[] Columns;   // что показывать в списке найденного
+    readonly string[] street;        // адрес по справочнику улиц для каждой записи (если справочник есть)
+    readonly string[] streetLower;
 
-    static readonly string[] Skip = { "ул", "улица", "пер", "переулок", "пр", "пр-т", "проспект", "г", "аг", "п", "пос", "дер", "с/с" };
+    // слова, которые в адресе ничего не значат: тип улицы и населённого пункта
+    static readonly string[] Skip = {
+        "ул", "улица", "пер", "переулок", "пр", "пр-т", "просп", "проспект", "пл", "площадь", "б-р", "бульвар",
+        "ш", "шоссе", "туп", "тупик", "проезд", "мкр", "микрорайон", "наб", "набережная", "тракт",
+        "г", "город", "аг", "агрогородок", "п", "пос", "поселок", "посёлок", "гп", "рп", "дер", "деревня",
+        "с", "село", "х", "хутор", "с/с", "сс", "сельсовет", "р-н", "район", "обл", "область" };
 
-    public AbonentQuery(DbfTable t) {
+    public AbonentQuery(DbfTable t, StreetDirectory dir) {
         this.t = t;
-        textFields = Existing(new string[] { "FIO", "UL", "NP" });
-        idFields = Existing(new string[] { "NAB", "NCH", "NSC", "TEL", "LS", "LIC", "LSCH" });
+        accountFields = Existing(new string[] { "NAB", "LS", "LIC", "LSCH" });
+        meterFields = Existing(new string[] { "NCH" });
+        nameFields = Existing(new string[] { "FIO" });
         dom = t.FieldIndex("DOM");
         kor = t.FieldIndex("KOR");
         kv = t.FieldIndex("KV");
         ul = t.FieldIndex("UL");
-        Columns = Existing(new string[] { "NAB", "FIO", "UL", "DOM", "KOR", "KV", "NCH", "TEL" });
+
+        // слова адреса (населённый пункт, улица) ищем во всех текстовых полях абонента,
+        // кроме ФИО и номеров - где бы ни хранился населённый пункт
+        string[] notAddress = { "FIO", "NAB", "LS", "LIC", "LSCH", "NCH", "NSC", "TIPCH", "TEL", "DOM", "KOR", "KV" };
+        List<int> address = new List<int>();
+        for (int i = 0; i < t.Fields.Count; i++) {
+            bool skip = false;
+            foreach (string n in notAddress) if (string.Compare(t.Fields[i].Name, n, StringComparison.OrdinalIgnoreCase) == 0) skip = true;
+            if (!skip && (t.Fields[i].Type == 'C' || i == ul)) address.Add(i);
+        }
+        addressFields = address.ToArray();
+
+        if (dir != null && ul >= 0) {
+            street = new string[t.Count];
+            streetLower = new string[t.Count];
+            for (int r = 0; r < t.Count; r++) {
+                string code = DbfTable.Format(t.GetValue(r, ul, null), true);
+                street[r] = dir.Name(code);
+                streetLower[r] = dir.LowerName(code);
+            }
+        }
+        Columns = Existing(new string[] { "NAB", "FIO", "UL", "DOM", "KOR", "KV", "NCH", "TIPCH", "TEL" });
         if (Columns.Length == 0) {
             Columns = new int[Math.Min(8, t.Fields.Count)];
             for (int i = 0; i < Columns.Length; i++) Columns[i] = i;
         }
+    }
+
+    public bool HasStreets { get { return street != null; } }
+
+    // адрес по справочнику для записи или null
+    public string StreetOf(int row) {
+        return street == null ? null : street[row];
+    }
+
+    public bool IsStreetColumn(int field) {
+        return field == ul && street != null;
     }
 
     int[] Existing(string[] names) {
@@ -1217,60 +1401,119 @@ public class AbonentQuery {
         return list.ToArray();
     }
 
-    class Parsed {
-        public List<SearchWord> Text = new List<SearchWord>();
-        public List<SearchWord> Ids = new List<SearchWord>();
-        public SearchWord House, Korp, Flat;
-    }
-
-    public List<int> Find(string query) {
-        List<int> found = new List<int>();
-        Parsed q = Parse(query);
-        if (q.Text.Count == 0 && q.Ids.Count == 0 && q.House == null && q.Korp == null && q.Flat == null) return found;
-        for (int row = 0; row < t.Count; row++) if (Match(row, q)) found.Add(row);
+    public List<int> Find(string query, SearchMode mode) {
+        List<int> found;
+        switch (mode) {
+            case SearchMode.Account: found = FindAccount(query); break;
+            case SearchMode.Address: found = FindAddress(query); break;
+            case SearchMode.Meter: found = FindWords(query, meterFields); break;
+            default: found = FindWords(query, nameFields); break;
+        }
         if (found.Count <= 20000) SortByAddress(found);
         return found;
     }
 
-    Parsed Parse(string query) {
-        Parsed q = new Parsed();
+    // лицевой: берём из строки только цифры, нули впереди не важны
+    List<int> FindAccount(string query) {
+        List<int> found = new List<int>();
+        StringBuilder digits = new StringBuilder();
+        foreach (char c in query) if (c >= '0' && c <= '9') digits.Append(c);
+        if (digits.Length == 0) return found;
+        SearchWord w = Part(digits.ToString());
+        for (int row = 0; row < t.Count; row++) if (InAny(row, accountFields, w)) found.Add(row);
+        return found;
+    }
+
+    // номер счётчика или ФИО: все слова должны быть в этом поле
+    List<int> FindWords(string query, int[] fields) {
+        List<int> found = new List<int>();
+        List<SearchWord> words = new List<SearchWord>();
+        foreach (string w in DbfTable.SplitWords(query)) words.Add(Part(w));
+        if (words.Count == 0) return found;
+        for (int row = 0; row < t.Count; row++) {
+            bool ok = true;
+            foreach (SearchWord w in words) if (!InAny(row, fields, w)) { ok = false; break; }
+            if (ok) found.Add(row);
+        }
+        return found;
+    }
+
+    // слово ищется как часть поля (и короткие числа тоже - это часть номера, а не дом)
+    SearchWord Part(string word) {
+        SearchWord w = t.PrepareWord(word);
+        w.WholeNumber = false;
+        return w;
+    }
+
+    // Адрес целиком, как его скопировали: "Острошицкий Городок Заводская ул. 18",
+    // "аг. Острошицкий Городок, ул. Заводская, д. 18, кв. 5", "заводская 18 5".
+    // Дом, корпус и квартира должны совпасть точно; из слов (населённый пункт, улица)
+    // показываем записи, где их совпало больше всего - лишние слова не мешают.
+    List<int> FindAddress(string query) {
+        List<int> found = new List<int>();
+        List<SearchWord> text = new List<SearchWord>();
+        List<string> textLower = new List<string>();
         List<string> numbers = new List<string>();
-        string pending = null;   // слово "дом", "корп" или "кв" перед числом
-        foreach (string w in DbfTable.SplitWords(query.Replace('.', ' '))) {
+        List<string> early = new List<string>();   // числа до названия: номер строки из списка или сам дом
+        SearchWord house = null, korp = null, flat = null;
+        string pending = null;   // "дом", "корп" или "кв" перед числом
+        bool seenText = false;
+        foreach (string raw in DbfTable.SplitWords(query.Replace('.', ' '))) {
+            string w = raw;
+            // слитно: "кв5", "д18", "к2"
+            string marker = null;
+            if (w.Length > 2 && w.StartsWith("кв") && IsDigitAt(w, 2)) { marker = "кв"; w = w.Substring(2); }
+            else if (w.Length > 1 && (w[0] == 'д' || w[0] == 'к') && IsDigitAt(w, 1)) { marker = w[0] == 'д' ? "дом" : "корп"; w = w.Substring(1); }
+            if (marker != null) pending = marker;
+
             if (w == "д" || w == "дом") { pending = "дом"; continue; }
             if (w == "к" || w == "корп" || w == "корпус") { pending = "корп"; continue; }
             if (w == "кв" || w == "квартира") { pending = "кв"; continue; }
             if (Array.IndexOf(Skip, w) >= 0) { pending = null; continue; }
-            bool digitFirst = w[0] >= '0' && w[0] <= '9';
-            bool longNumber = IsDigits(w) && w.Length >= 5;
-            if (digitFirst && !longNumber && w.Length <= 6) {   // 18, 18а, 18/2 - дом, корпус или квартира
-                if (pending == "корп" && q.Korp == null) q.Korp = t.PrepareWord(w);
-                else if (pending == "кв" && q.Flat == null) q.Flat = t.PrepareWord(w);
-                else if (pending == "дом" && q.House == null) q.House = t.PrepareWord(w);
-                else numbers.Add(w);
+
+            if (IsDigitAt(w, 0)) {
+                if (IsDigits(w) && w.Length >= 5) { pending = null; continue; }   // лицевой или код - не адрес
+                if (pending == "корп" && korp == null) korp = t.PrepareWord(w);
+                else if (pending == "кв" && flat == null) flat = t.PrepareWord(w);
+                else if (pending == "дом" && house == null) house = t.PrepareWord(w);
+                else if (seenText) numbers.Add(w);
+                else early.Add(w);
                 pending = null;
                 continue;
             }
             pending = null;
-            if (HasDigit(w)) q.Ids.Add(t.PrepareWord(w));   // лицевой, номер счётчика, телефон
-            else q.Text.Add(t.PrepareWord(w));               // фамилия, улица
+            if (HasDigit(w)) continue;
+            text.Add(Part(w));
+            textLower.Add(w);
+            seenText = true;
         }
-        // числа без пояснений: первое - дом, второе - квартира ("заводская 18 5")
+        // числа до названия улицы - обычно номер строки из списка, их пропускаем;
+        // но если слов нет совсем ("18"), это и есть дом
+        if (text.Count == 0) numbers.InsertRange(0, early);
+        // числа без пояснений: первое - дом, второе - квартира
         foreach (string n in numbers) {
-            if (q.House == null) q.House = t.PrepareWord(n);
-            else if (q.Flat == null) q.Flat = t.PrepareWord(n);
-            else if (q.Korp == null) q.Korp = t.PrepareWord(n);
+            if (house == null) house = t.PrepareWord(n);
+            else if (flat == null) flat = t.PrepareWord(n);
+            else if (korp == null) korp = t.PrepareWord(n);
         }
-        return q;
-    }
+        if (text.Count == 0 && house == null && korp == null && flat == null) return found;
 
-    bool Match(int row, Parsed q) {
-        foreach (SearchWord w in q.Text) if (!InAny(row, textFields, w)) return false;
-        foreach (SearchWord w in q.Ids) if (!InAny(row, idFields, w)) return false;
-        if (q.House != null && !Is(row, dom, q.House)) return false;
-        if (q.Korp != null && !Is(row, kor, q.Korp)) return false;
-        if (q.Flat != null && !Is(row, kv, q.Flat)) return false;
-        return true;
+        int best = 0;
+        for (int row = 0; row < t.Count; row++) {
+            if (house != null && !Is(row, dom, house)) continue;
+            if (korp != null && !Is(row, kor, korp)) continue;
+            if (flat != null && !Is(row, kv, flat)) continue;
+            int score = 0;
+            for (int i = 0; i < text.Count; i++) {
+                if (InAny(row, addressFields, text[i])) score++;
+                else if (streetLower != null && streetLower[row] != null && streetLower[row].IndexOf(textLower[i], StringComparison.Ordinal) >= 0) score++;
+            }
+            if (score < best) continue;
+            if (score > best) { best = score; found.Clear(); }
+            found.Add(row);
+        }
+        if (text.Count > 0 && best == 0) found.Clear();   // ни одно слово адреса не нашлось - улицы нет
+        return found;
     }
 
     bool InAny(int row, int[] fields, SearchWord w) {
@@ -1295,7 +1538,7 @@ public class AbonentQuery {
         foreach (int r in rows) {
             SortItem it = new SortItem();
             it.Row = r;
-            it.Street = ul < 0 ? "" : DbfTable.Format(t.GetValue(r, ul, null), true);
+            it.Street = street != null && street[r] != null ? street[r] : ul < 0 ? "" : DbfTable.Format(t.GetValue(r, ul, null), true);
             it.House = dom < 0 ? "" : DbfTable.Format(t.GetValue(r, dom, null), true);
             it.Flat = kv < 0 ? "" : DbfTable.Format(t.GetValue(r, kv, null), true);
             items.Add(it);
@@ -1316,11 +1559,17 @@ public class AbonentQuery {
         return string.Compare(a, b, StringComparison.CurrentCultureIgnoreCase);
     }
 
+    // пусто - раньше всех (частный дом без квартиры), без цифр - позже всех
     static int LeadingNumber(string s) {
         int n = 0, i = 0;
         s = s.Trim();
+        if (s.Length == 0) return -1;
         while (i < s.Length && i < 9 && s[i] >= '0' && s[i] <= '9') n = n * 10 + (s[i++] - '0');
         return i == 0 ? int.MaxValue : n;
+    }
+
+    static bool IsDigitAt(string s, int i) {
+        return i < s.Length && s[i] >= '0' && s[i] <= '9';
     }
 
     static bool IsDigits(string s) {
@@ -1342,8 +1591,21 @@ public class AbonentSearch : Form {
     string tableName;
     DbfTable table;
     AbonentQuery query;
+    StreetDirectory directory;
+    bool streetCodes;    // в UL у абонентов коды улиц, а не названия
     bool loading;
     List<int> found = new List<int>();
+    internal SearchMode mode = SearchMode.Account;
+    readonly RadioButton[] modeButtons = new RadioButton[4];
+    readonly Label hint = new Label();
+
+    static readonly string[] ModeNames = { "&Лицевой счёт", "&Адрес", "№ &счётчика", "&ФИО" };
+    static readonly string[] Prompts = { "лицевой счёт", "адрес", "номер счётчика", "фамилию" };
+    static readonly string[] Hints = {
+        "Например:  044060216   (нули впереди можно не писать)",
+        "Вставьте адрес целиком:  Острошицкий Городок Заводская ул. 18   или коротко:  заводская 18 кв 5",
+        "Номер счётчика целиком или его часть",
+        "Например:  иванов   или   иванов иван" };
 
     internal readonly TextBox queryBox = new TextBox();
     readonly DataGridView grid = new DataGridView();
@@ -1365,23 +1627,33 @@ public class AbonentSearch : Form {
 
         Panel top = new Panel();
         top.Dock = DockStyle.Top;
-        top.Height = 92;
+        top.Height = 100;
         Label caption = new Label();
-        caption.Text = "Лицевой счёт, адрес или номер счётчика:";
+        caption.Text = "Искать по:";
         caption.AutoSize = true;
-        caption.Location = new Point(12, 10);
+        caption.Location = new Point(12, 12);
+        top.Controls.Add(caption);
+        int x = 90;
+        for (int i = 0; i < modeButtons.Length; i++) {
+            RadioButton rb = new RadioButton();
+            rb.Text = ModeNames[i];
+            rb.AutoSize = true;
+            rb.Location = new Point(x, 10);
+            rb.Tag = (SearchMode)i;
+            rb.CheckedChanged += new EventHandler(OnModeChanged);
+            modeButtons[i] = rb;
+            top.Controls.Add(rb);
+            x += i == 0 ? 130 : 110;
+        }
         queryBox.Font = new Font(Font.FontFamily, 14f);
-        queryBox.Location = new Point(12, 30);
+        queryBox.Location = new Point(12, 38);
         queryBox.Width = top.Width - 24;
         queryBox.Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top;
-        queryBox.TextChanged += delegate { timer.Stop(); timer.Start(); };
+        queryBox.TextChanged += new EventHandler(OnQueryChanged);
         queryBox.KeyDown += new KeyEventHandler(OnQueryKey);
-        Label hint = new Label();
-        hint.Text = "Например:   044060216      заводская 18      заводская 18 кв 5      иванов      номер счётчика";
         hint.ForeColor = SystemColors.GrayText;
         hint.AutoSize = true;
-        hint.Location = new Point(12, 68);
-        top.Controls.Add(caption);
+        hint.Location = new Point(12, 76);
         top.Controls.Add(queryBox);
         top.Controls.Add(hint);
 
@@ -1428,7 +1700,42 @@ public class AbonentSearch : Form {
         return b;
     }
 
+    // адрес, скопированный из Excel, приходит с табуляциями - показываем их пробелами
+    void OnQueryChanged(object sender, EventArgs e) {
+        string text = queryBox.Text;
+        if (text.IndexOf('\t') >= 0 || text.IndexOf('\r') >= 0 || text.IndexOf('\n') >= 0) {
+            int caret = queryBox.SelectionStart;
+            queryBox.Text = text.Replace("\r\n", " ").Replace('\t', ' ').Replace('\r', ' ').Replace('\n', ' ').TrimEnd();
+            queryBox.SelectionStart = Math.Min(caret, queryBox.Text.Length);
+            return;   // смена текста вызовет этот обработчик ещё раз
+        }
+        timer.Stop();
+        timer.Start();
+    }
+
+    void OnModeChanged(object sender, EventArgs e) {
+        RadioButton rb = (RadioButton)sender;
+        if (!rb.Checked) return;
+        mode = (SearchMode)rb.Tag;
+        hint.Text = Hints[(int)mode];
+        SaveSettings();
+        queryBox.Focus();
+        queryBox.SelectAll();
+        ApplySearch();
+    }
+
+    void SaveSettings() {
+        if (folder == null) return;
+        Places.SaveSettings(settingsFile, new string[] {
+            folder, tableName == null ? "" : tableName, ((int)mode).ToString(),
+            directory == null ? "" : directory.TableName, directory == null ? "" : directory.KeyField });
+    }
+
     void Start() {
+        int saved;
+        if (int.TryParse(Places.ReadSetting(settingsFile, 2), out saved) && saved >= 0 && saved < modeButtons.Length) mode = (SearchMode)saved;
+        modeButtons[(int)mode].Checked = true;
+        hint.Text = Hints[(int)mode];
         queryBox.Focus();
         SetBusy(true, "Ищу папку базы...");
         folder = Places.FindFolder(Places.ReadSetting(settingsFile, 0));
@@ -1467,7 +1774,8 @@ public class AbonentSearch : Form {
                 status.Text = "Загружаю базу абонентов " + tableName + ": " + done + " из " + expected + "...";
                 Application.DoEvents();
             });
-            query = new AbonentQuery(table);
+            directory = FindDirectory();
+            query = new AbonentQuery(table, directory);
         } catch (OperationCanceledException) {
             return;
         } catch (Exception ex) {
@@ -1476,10 +1784,37 @@ public class AbonentSearch : Form {
             SetBusy(false, "Не удалось прочитать " + path + ": " + ex.Message);
             return;
         }
-        Places.SaveSettings(settingsFile, new string[] { folder, tableName });
+        SaveSettings();
         BuildColumns();
         SetBusy(false, null);
         ApplySearch();
+    }
+
+    // Если в поле улицы коды - нужен справочник: сначала запомненный, иначе ищем
+    StreetDirectory FindDirectory() {
+        List<string> codes = StreetDirectory.Codes(table, table.FieldIndex("UL"));
+        streetCodes = codes != null;
+        if (codes == null) return null;
+        string savedTable = Places.ReadSetting(settingsFile, 3), savedKey = Places.ReadSetting(settingsFile, 4);
+        if (savedTable != null && savedKey != null && File.Exists(Path.Combine(folder, savedTable))) {
+            try {
+                StreetDirectory d = StreetDirectory.Load(Path.Combine(folder, savedTable), savedKey);
+                if (d != null && d.Coverage(codes) >= 0.9) return d;
+            } catch (Exception) { }
+        }
+        status.Text = "В поле улицы - коды. Ищу справочник улиц...";
+        status.Refresh();
+        try {
+            return StreetDirectory.Detect(folder, tableName, codes, delegate(int done, int total) {
+                if (IsDisposed) throw new OperationCanceledException();
+                status.Text = "В поле улицы - коды. Ищу справочник улиц: проверено " + done + " из " + total + " таблиц...";
+                Application.DoEvents();
+            });
+        } catch (OperationCanceledException) {
+            throw;
+        } catch (Exception) {
+            return null;
+        }
     }
 
     void SetBusy(bool busy, string text) {
@@ -1495,33 +1830,43 @@ public class AbonentSearch : Form {
         foreach (int f in query.Columns) {
             DbfField field = table.Fields[f];
             DataGridViewTextBoxColumn c = new DataGridViewTextBoxColumn();
-            string label = FieldNames.Label(field.Name);
+            string label = query.IsStreetColumn(f) ? "Населённый пункт, улица" : FieldNames.Label(field.Name);
             c.HeaderText = label == null ? field.Name : label;
             c.SortMode = DataGridViewColumnSortMode.NotSortable;
             string n = field.Name.ToUpperInvariant();
-            c.FillWeight = n == "FIO" ? 300 : n == "UL" ? 200 : (n == "NAB" || n == "NCH") ? 130 : 70;
+            c.FillWeight = n == "FIO" ? 300 : n == "UL" ? 200 : (n == "NAB" || n == "NCH" || n == "TIPCH") ? 130 : 70;
             grid.Columns.Add(c);
         }
     }
 
     internal void ApplySearch() {
         if (loading || table == null) return;
-        found = query.Find(queryBox.Text);
+        found = query.Find(queryBox.Text, mode);
         grid.RowCount = 0;
         grid.RowCount = found.Count;
         grid.Invalidate();
         string where = tableName + ", " + table.Count + " абонентов";
+        if (directory != null) where += ", улицы - из " + directory.TableName;
+        string warning = streetCodes && directory == null && mode == SearchMode.Address
+            ? "   В поле улицы - коды, а справочник улиц не нашёлся: адрес ищется по дому и квартире, название улицы может не находиться."
+            : "";
         if (DbfTable.SplitWords(queryBox.Text).Length == 0)
-            status.Text = "Впишите лицевой счёт, адрес или номер счётчика.   База: " + where;
+            status.Text = "Впишите " + Prompts[(int)mode] + ".   База: " + where + warning;
         else if (found.Count == 0)
-            status.Text = "Ничего не найдено.   База: " + where;
+            status.Text = "Ничего не найдено.   База: " + where + warning;
         else
             status.Text = "Найдено: " + found.Count + ". Двойной щелчок или Enter - карточка.   База: " + where;
     }
 
     void OnCellValueNeeded(object sender, DataGridViewCellValueEventArgs e) {
         if (table == null || e.RowIndex >= found.Count || e.ColumnIndex >= query.Columns.Length) return;
-        e.Value = DbfTable.Format(table.GetValue(found[e.RowIndex], query.Columns[e.ColumnIndex], null), false);
+        int row = found[e.RowIndex], field = query.Columns[e.ColumnIndex];
+        string value = DbfTable.Format(table.GetValue(row, field, null), false);
+        if (query.IsStreetColumn(field)) {
+            string street = query.StreetOf(row);
+            value = street == null ? "код " + value : street;
+        }
+        e.Value = value;
     }
 
     void OnQueryKey(object sender, KeyEventArgs e) {
@@ -1548,7 +1893,9 @@ public class AbonentSearch : Form {
 
     internal void OpenCard(int index) {
         if (table == null || index < 0 || index >= found.Count) return;
-        Card.Show(this, table, found[index]);
+        string street = query.StreetOf(found[index]);
+        Card.Show(this, table, found[index], street == null ? null
+            : new string[] { "Адрес по справочнику " + directory.TableName, street });
     }
 
     // Выбор папки и таблицы абонентов, если сама не нашлась или нашлась не та
