@@ -1368,6 +1368,8 @@ public class SearchResult {
     public bool TooMany;        // нашлось слишком много - показана часть
     public bool Scanned;        // искали перебором всей базы
     public string Error;
+    public bool Partial;        // частичное совпадение (иначе - только точное)
+    public AddressMatch Address; // как понят адрес (точный поиск адреса)
     public string Note = "";    // пояснение для строки состояния
     public string How = "";     // как искали - для отчёта
     public double Seconds;
@@ -1711,35 +1713,37 @@ public class LiveBase {
         public void Close() { foreach (IndexReader r in readers.Values) r.Dispose(); }
     }
 
-    public SearchResult Search(string text, SearchMode mode, Dictionary<string, bool> selsovety) {
-        return Search(text, mode, selsovety, FetchLimit);
+    public SearchResult Search(string text, SearchMode mode, Dictionary<string, bool> selsovety, bool partial) {
+        return Search(text, mode, selsovety, FetchLimit, partial);
     }
 
-    // Ошибка чтения бывает, если программа базы как раз дописывает индекс - тогда пробуем ещё раз
-    public SearchResult Search(string text, SearchMode mode, Dictionary<string, bool> selsovety, int limit) {
-        SearchResult r = SearchOnce(text, mode, selsovety, limit);
+    // Ошибка чтения бывает, если программа базы как раз дописывает индекс - тогда пробуем ещё раз.
+    // partial - частичное совпадение (начало номера, похожие слова); иначе - только точное
+    public SearchResult Search(string text, SearchMode mode, Dictionary<string, bool> selsovety, int limit, bool partial) {
+        SearchResult r = SearchOnce(text, mode, selsovety, limit, partial);
         if (r.Error != null) {
             System.Threading.Thread.Sleep(300);
-            SearchResult again = SearchOnce(text, mode, selsovety, limit);
+            SearchResult again = SearchOnce(text, mode, selsovety, limit, partial);
             again.How += "; (со второй попытки, первая: " + r.Error + ")";
             return again;
         }
         return r;
     }
 
-    SearchResult SearchOnce(string text, SearchMode mode, Dictionary<string, bool> selsovety, int limit) {
+    SearchResult SearchOnce(string text, SearchMode mode, Dictionary<string, bool> selsovety, int limit, bool partial) {
         DateTime started = DateTime.Now;
         SearchResult res = new SearchResult();
         res.Text = text;
         res.Mode = mode;
+        res.Partial = partial;
         Seeker s = new Seeker();
         try {
             bool ok;
             switch (mode) {
-                case SearchMode.Account: ok = SeekAccount(text, s, res); break;
-                case SearchMode.Meter: ok = SeekMeter(text, s, res); break;
-                case SearchMode.Name: ok = SeekName(text, s, res); break;
-                default: ok = SeekAddress(text, s, res, selsovety); break;
+                case SearchMode.Account: ok = SeekAccount(text, s, res, partial); break;
+                case SearchMode.Meter: ok = SeekMeter(text, s, res, partial); break;
+                case SearchMode.Name: ok = SeekName(text, s, res, partial); break;
+                default: ok = partial || Dir == null ? SeekAddress(text, s, res) : SeekAddressExact(text, s, res); break;
             }
             if (!ok) { res.NoIndex = res.Error == null && res.Note.Length == 0; return Finish(res, null, selsovety, started); }
             List<int> recNos = new List<int>(s.Found.Keys);
@@ -1762,24 +1766,34 @@ public class LiveBase {
     }
 
     // Перебор всей таблицы - если нужного индекса нет (долго, но находит всё)
-    public SearchResult Scan(string text, SearchMode mode, Dictionary<string, bool> selsovety, LoadProgress progress) {
+    public SearchResult Scan(string text, SearchMode mode, Dictionary<string, bool> selsovety, LoadProgress progress, bool partial) {
         DateTime started = DateTime.Now;
         SearchResult res = new SearchResult();
         res.Text = text;
         res.Mode = mode;
         res.Scanned = true;
+        res.Partial = partial;
         DbfTable part;
         if (mode == SearchMode.Address && Dir != null && Header.FieldIndex("UL") >= 0) {
-            AddressParts a = AddressParts.Parse(text);
             Dictionary<string, bool> codes = new Dictionary<string, bool>();
-            int best;
-            foreach (string c in Dir.BestStreets(a.Words, null, out best)) codes[c] = true;
+            if (partial) {
+                int best;
+                foreach (string c in Dir.BestStreets(AddressParts.Parse(text).Words, null, out best)) codes[c] = true;
+            } else {
+                res.Address = Dir.Match(text);
+                if (res.Address.Problem != null) { res.Note = res.Address.Problem; return Finish(res, null, selsovety, started); }
+                foreach (string c in res.Address.Codes) codes[c] = true;
+            }
             DbfField ul = Header.Fields[Header.FieldIndex("UL")];
             part = DbfTable.Load(FilePath, null, delegate(byte[] rec, int start) {
                 return codes.ContainsKey(StreetDirectory.NormalizeCode(Encoding.ASCII.GetString(rec, start + ul.Offset, ul.Length)));
             }, progress, 20000);
         } else {
-            string words = mode == SearchMode.Account ? Digits(text) : text;
+            // предварительный отбор: запись должна содержать номер (или фамилию); точность проверяется потом
+            string words = text;
+            if (mode == SearchMode.Account) { words = Digits(text).TrimStart('0'); if (words.Length == 0) words = Digits(text); }
+            else if (mode == SearchMode.Meter) words = LongestDigits(text).TrimStart('0');
+            else if (mode == SearchMode.Name && !partial) { string[] w = DbfTable.SplitWords(text.Replace('.', ' ')); words = w.Length > 0 ? w[0] : ""; }
             part = DbfTable.Load(FilePath, words, null, progress, 20000);
         }
         res.TooMany = part.Truncated;
@@ -1793,7 +1807,9 @@ public class LiveBase {
         part.FilePath = FilePath;
         res.Table = part;
         res.Query = new AbonentQuery(part, Dir);
-        if (part.Count > 0) {
+        res.Query.Partial = res.Partial;
+        res.Query.Address = res.Address;
+        if (part.Count > 0 && res.Note.Length == 0) {
             List<int> rows = res.Query.Find(res.Text, res.Mode);
             int ul = part.FieldIndex("UL");
             foreach (int row in rows) {
@@ -1810,6 +1826,16 @@ public class LiveBase {
         StringBuilder sb = new StringBuilder();
         foreach (char c in s) if (c >= '0' && c <= '9') sb.Append(c);
         return sb.ToString();
+    }
+
+    static string LongestDigits(string s) {
+        string best = "", cur = "";
+        foreach (char c in s + " ") {
+            if (c >= '0' && c <= '9') { cur += c; continue; }
+            if (cur.Length > best.Length) best = cur;
+            cur = "";
+        }
+        return best;
     }
 
     // Как в этой таблице обычно записано поле: длина числа, нули впереди, прижато вправо, заглавные буквы
@@ -1857,8 +1883,9 @@ public class LiveBase {
         return v.PadLeft(Header.Fields[f].Length);
     }
 
-    // Лицевой: точный номер в нескольких видах (с нулями впереди и без), потом - номера, начинающиеся так
-    bool SeekAccount(string text, Seeker s, SearchResult res) {
+    // Лицевой: точный номер в нескольких видах (с нулями впереди и без);
+    // при частичном совпадении ещё номера, начинающиеся так, и номер внутри длинного Л/С
+    bool SeekAccount(string text, Seeker s, SearchResult res, bool partial) {
         string digits = Digits(text);
         if (digits.Length == 0) { res.Note = "Впишите номер."; return false; }
         string core = digits.TrimStart('0');
@@ -1868,14 +1895,12 @@ public class LiveBase {
             IndexTag t = TagFor(field);
             if (t == null) continue;
             any = true;
-            Style st = StyleOf(field);
             int f = Header.FieldIndex(field);
             int width = Header.Fields[f].Length;
             List<string> exact = new List<string>();
             AddVariant(exact, digits);
             AddVariant(exact, core);
-            if (st.Digits > core.Length) AddVariant(exact, core.PadLeft(st.Digits, '0'));
-            if (Header.Fields[f].Type == 'C' && width > core.Length) AddVariant(exact, core.PadLeft(width, '0'));
+            if (Header.Fields[f].Type == 'C') for (int w = core.Length + 1; w <= width; w++) AddVariant(exact, core.PadLeft(w, '0'));
             foreach (string v in exact) {
                 s.Seek(t, KeyFor(t, new string[] { v }, false));
                 if (Header.Fields[f].Type == 'C') s.Seek(t, KeyFor(t, new string[] { v.PadLeft(width) }, false));
@@ -1883,6 +1908,7 @@ public class LiveBase {
             if (s.Found.Count > 0) { res.How = "точный номер (поле " + field + ")"; return true; }
         }
         if (!any) return false;
+        if (!partial) { res.How = "точный номер"; return true; }
         // начало номера (только если номер не короче 4 цифр - иначе слишком много)
         if (digits.Length >= 4) {
             foreach (string field in AccountFields) {
@@ -1912,26 +1938,39 @@ public class LiveBase {
         return true;
     }
 
-    // Счётчик: точный номер, потом начало номера; если не нашлось - то же по снятому счётчику (NSC)
-    bool SeekMeter(string text, Seeker s, SearchResult res) {
-        string typed = text.Trim();
+    // Счётчик: точный номер (нули впереди, пробелы, "№" не важны); при частичном совпадении - ещё начало номера.
+    // Если не нашлось - то же по снятому счётчику (NSC)
+    bool SeekMeter(string text, Seeker s, SearchResult res, bool partial) {
+        string typed = text.Replace("№", " ").Trim();
         if (typed.Length == 0) { res.Note = "Впишите номер."; return false; }
-        string digits = Digits(typed);
         bool any = false;
         foreach (string field in new string[] { "NCH", "NSC" }) {
             IndexTag t = TagFor(field);
             if (t == null) continue;
             any = true;
             Style st = StyleOf(field);
+            int width = Header.Fields[Header.FieldIndex(field)].Length;
             List<string> variants = new List<string>();
             AddVariant(variants, typed);
             AddVariant(variants, typed.ToUpperInvariant());
-            if (digits.Length >= 4) { AddVariant(variants, digits); AddVariant(variants, digits.TrimStart('0')); }
+            foreach (string key in AbonentQuery.MeterKeys(typed)) {
+                AddVariant(variants, key);
+                AddVariant(variants, key.ToUpperInvariant());
+                if (key.Length > 0 && char.IsDigit(key[0])) for (int w = key.Length + 1; w <= Math.Min(width, 12); w++) AddVariant(variants, key.PadLeft(w, '0'));
+            }
             foreach (string v in variants) s.Seek(t, KeyFor(t, new string[] { Aligned(field, v, st) }, false));
-            if (s.Found.Count == 0 && !st.Right) foreach (string v in variants) if (v.Length >= 3) s.Seek(t, KeyFor(t, new string[] { v }, true));
+            if (partial && s.Found.Count == 0 && !st.Right) foreach (string v in variants) if (v.Length >= 3) s.Seek(t, KeyFor(t, new string[] { v }, true));
             if (s.Found.Count > 0) { res.How = field == "NSC" ? "по снятому счётчику (NSC)" : "поле " + field; return true; }
         }
         return any;
+    }
+
+    static byte[] WholeWord(byte[] key, IndexTag t, bool whole) {
+        if (key == null || !whole || key.Length >= t.KeyLen) return key;
+        byte[] k = new byte[key.Length + 1];
+        Buffer.BlockCopy(key, 0, k, 0, key.Length);
+        k[key.Length] = (byte)' ';
+        return k;
     }
 
     static string Title(string s) {
@@ -1944,8 +1983,9 @@ public class LiveBase {
         return sb.ToString();
     }
 
-    // ФИО: начало ФИО целиком ("иванов иван"), если не нашлось - по фамилии
-    bool SeekName(string text, Seeker s, SearchResult res) {
+    // ФИО: точно - фамилия (и имя, отчество, если вписаны) целыми словами: "иванов" не находит "Иванова";
+    // частично - ФИО, начинающиеся так. Если целиком не нашлось - по одной фамилии (дальше сверяется в записях)
+    bool SeekName(string text, Seeker s, SearchResult res, bool partial) {
         string[] words = DbfTable.SplitWords(text.Replace('.', ' '));
         if (words.Length == 0) { res.Note = "Впишите фамилию."; return false; }
         IndexTag t = TagFor("FIO");
@@ -1958,15 +1998,39 @@ public class LiveBase {
             AddVariant(variants, Title(q));
             AddVariant(variants, q.ToUpperInvariant());
             AddVariant(variants, q);
-            foreach (string v in variants) s.Seek(t, KeyFor(t, new string[] { v }, true));
+            // целое слово: после него в ФИО пробел (кроме инициала - "иванов и")
+            bool whole = !partial && words[n - 1].Length > 1;
+            foreach (string v in variants) s.Seek(t, WholeWord(KeyFor(t, new string[] { v }, true), t, whole));
             if (s.Found.Count > 0) { res.How = n == words.Length ? "начало ФИО" : "по фамилии"; return true; }
         }
         return true;
     }
 
-    // Адрес: по справочнику улиц находим улицы, подходящие по словам (населённый пункт, улица),
-    // и по индексу берём абонентов этих улиц (сразу с домом, если индекс по улице и дому)
-    bool SeekAddress(string text, Seeker s, SearchResult res, Dictionary<string, bool> selsovety) {
+    // Точный адрес: населённый пункт -> улица в нём -> дом -> корпус -> квартира (см. StreetDirectory.Match).
+    // По индексу берём абонентов найденных улиц - сразу с домом, если индекс по улице и дому.
+    bool SeekAddressExact(string text, Seeker s, SearchResult res) {
+        AddressMatch m = Dir.Match(text);
+        res.Address = m;
+        if (m.Problem != null) { res.Note = m.Problem; return false; }
+        IndexTag t = TagFor("UL", true);
+        if (t == null) return false;
+        int got = 0;
+        if (m.House != null && t.Terms.Count > 1 && t.TermFields[1] == "DOM") {
+            Style st = StyleOf("DOM");
+            List<string> houses = new List<string>();
+            foreach (string h in new string[] { m.House, m.House.ToUpperInvariant() }) {
+                AddVariant(houses, h);
+                AddVariant(houses, Aligned("DOM", h, st));
+            }
+            foreach (string code in m.Codes) foreach (string h in houses) got += s.Seek(t, KeyFor(t, new string[] { code, h }, false));
+        }
+        // дом записан в базе иначе (или дом не указан) - берём улицы целиком, дом сверяется в записях
+        if (got == 0) foreach (string code in m.Codes) s.Seek(t, KeyFor(t, new string[] { code }, false));
+        return true;
+    }
+
+    // Частичное совпадение адреса: улицы, где совпало больше всего слов (как раньше)
+    bool SeekAddress(string text, Seeker s, SearchResult res) {
         AddressParts a = AddressParts.Parse(text);
         if (a.Words.Count == 0) { res.Note = a.House != null ? "Впишите улицу или населённый пункт, не только номер дома." : "Впишите адрес."; return false; }
         IndexTag t = TagFor("UL", true);
@@ -2001,7 +2065,109 @@ public class LiveBase {
     }
 }
 
-// Адрес, разобранный на части: слова (населённый пункт, улица), дом, корпус, квартира
+// ---- точный адрес: населённый пункт -> улица в нём -> дом -> корпус -> квартира ----
+
+// Слово адреса после разбора
+public class AddrToken {
+    public string Text;
+    public char Kind;      // w - слово или число названия, h - "дом", k - "корпус", f - "квартира",
+                           // t - тип населённого пункта (аг., д.), s - тип улицы (ул., пер.), r - лишнее (область, район, "с/с")
+    public bool Ss;        // название сельсовета (стоит перед "с/с")
+    public bool Bound;     // число сразу после "дом"/"корп"/"кв" - не часть названия
+    public bool Used;      // уже узнано как название
+    public bool Digit { get { return Text.Length > 0 && char.IsDigit(Text[0]); } }
+}
+
+// Слова адреса и названия из справочников приводятся к одному виду: маленькие буквы, ё -> е,
+// без знаков препинания, сокращения через дефис ("пр-т", "с/с") - одним словом
+public static class AddressText {
+    static readonly string[][] Glued = {
+        new string[] { "пр-т", "прт" }, new string[] { "б-р", "бр" }, new string[] { "р-н", "рн" }, new string[] { "с/с", "сс" },
+        new string[] { "кв-л", "квл" }, new string[] { "кв-ра", "квра" }, new string[] { "пр-д", "прд" }, new string[] { "г.п.", "гп" },
+        new string[] { "р.п.", "рп" }, new string[] { "а.г.", "аг" } };
+    public static readonly string[] TownTypes = {
+        "г", "город", "аг", "агрогородок", "п", "пос", "поселок", "гп", "рп", "кп", "д", "дер", "деревня", "с", "село",
+        "х", "хут", "хутор", "ст", "станция" };
+    public static readonly string[] StreetTypes = {
+        "ул", "улица", "пер", "переулок", "пр", "прт", "просп", "проспект", "пл", "площадь", "бр", "бульв", "бульвар",
+        "ш", "шоссе", "туп", "тупик", "проезд", "прд", "мкр", "мкрн", "микрорайон", "наб", "набережная", "тракт",
+        "линия", "квл", "квартал", "аллея", "спуск" };
+    static readonly string[] Regions = { "беларусь", "республика", "рб" };
+
+    public static List<string> Words(string s) {
+        string t = " " + s.ToLowerInvariant().Replace('ё', 'е') + " ";
+        foreach (string[] g in Glued) t = t.Replace(g[0], " " + g[1] + " ");
+        StringBuilder sb = new StringBuilder();
+        foreach (char c in t) sb.Append(char.IsLetterOrDigit(c) || c == '/' ? c : ' ');
+        List<string> list = new List<string>();
+        foreach (string w in sb.ToString().Split(new char[] { ' ' }, StringSplitOptions.RemoveEmptyEntries)) list.Add(w.Trim('/'));
+        list.RemoveAll(delegate(string w) { return w.Length == 0; });
+        return list;
+    }
+
+    // слова названия из справочника - без типов ("аг. Боровляны" -> боровляны, "Заводская ул." -> заводская)
+    public static string[] NameWords(string s) {
+        List<string> list = new List<string>();
+        foreach (string w in Words(s))
+            if (Array.IndexOf(TownTypes, w) < 0 && Array.IndexOf(StreetTypes, w) < 0) list.Add(w);
+        return list.ToArray();
+    }
+
+    public static List<AddrToken> Tokens(string query) {
+        List<string> words = new List<string>();
+        foreach (string w in Words(query)) {
+            // слитно: "д18", "кв5", "к2"
+            string marker = null;
+            if (w.Length > 2 && w.StartsWith("кв") && char.IsDigit(w[2])) marker = "кв";
+            else if (w.Length > 1 && (w[0] == 'д' || w[0] == 'к') && char.IsDigit(w[1])) marker = w.Substring(0, 1);
+            if (marker != null) { words.Add(marker); words.Add(w.Substring(marker.Length)); }
+            else words.Add(w);
+        }
+        List<AddrToken> toks = new List<AddrToken>();
+        for (int i = 0; i < words.Count; i++) {
+            string w = words[i];
+            bool nextDigit = i + 1 < words.Count && char.IsDigit(words[i + 1][0]);
+            AddrToken t = new AddrToken();
+            t.Text = w;
+            AddrToken prev = toks.Count > 0 ? toks[toks.Count - 1] : null;
+            if (w == "дом" || (w == "д" && nextDigit)) t.Kind = 'h';
+            else if ((w == "к" || w == "корп" || w == "корпус") && nextDigit) t.Kind = 'k';
+            else if (w == "кв" || w == "квартира" || w == "квра") t.Kind = 'f';
+            else if (w == "к") t.Kind = 'r';
+            else if (Array.IndexOf(TownTypes, w) >= 0) t.Kind = 't';
+            else if (Array.IndexOf(StreetTypes, w) >= 0) t.Kind = 's';
+            else if (w == "сс" || w == "сельсовет") { t.Kind = 'r'; if (prev != null && prev.Kind == 'w' && !prev.Digit) prev.Ss = true; }
+            else if (w == "рн" || w == "район" || w == "обл" || w == "область") { t.Kind = 'r'; if (prev != null && prev.Kind == 'w' && !prev.Digit) prev.Kind = 'r'; }
+            else if (Array.IndexOf(Regions, w) >= 0) t.Kind = 'r';
+            else t.Kind = 'w';
+            if (t.Kind == 'w' && t.Digit && prev != null && (prev.Kind == 'h' || prev.Kind == 'k' || prev.Kind == 'f')) t.Bound = true;
+            toks.Add(t);
+        }
+        return toks;
+    }
+}
+
+// Адрес, узнанный по справочнику. Каждая указанная часть должна совпасть точно, не указанная - не ограничивает.
+public class AddressMatch {
+    public List<string> Codes = new List<string>();   // коды улиц, где искать
+    public string House, Korp, Flat;
+    public string Problem;          // почему искать нечего (null - всё понятно)
+    public string Said = "";        // что поняли: "аг. Боровляны -> Заводская ул. -> дом 18" (для строки состояния)
+    public string Explain = "";     // то же без названий - для отчёта
+
+    // дом, корпус, квартира для сравнения: без пробелов и дефисов, маленькими буквами, без нулей впереди
+    public static string Num(string s) {
+        if (s == null) return "";
+        StringBuilder sb = new StringBuilder();
+        foreach (char c in s.ToLowerInvariant()) if (c != ' ' && c != '-' && c != '.' && c != ',') sb.Append(c);
+        string r = sb.ToString();
+        int z = 0;
+        while (z < r.Length - 1 && r[z] == '0' && char.IsDigit(r[z + 1])) z++;
+        return r.Substring(z);
+    }
+}
+
+// Адрес, разобранный на части: слова (населённый пункт, улица), дом, корпус, квартира (для частичного совпадения)
 public class AddressParts {
     public List<string> Words = new List<string>();
     public string House, Korp, Flat;
@@ -2845,6 +3011,8 @@ public class StreetDirectory {
     readonly Dictionary<string, string> names = new Dictionary<string, string>();
     readonly Dictionary<string, string> lowerNames = new Dictionary<string, string>();
     readonly Dictionary<string, string> ssOf = new Dictionary<string, string>();  // код улицы -> сельсовет
+    readonly Dictionary<string, string> townOf = new Dictionary<string, string>();    // код улицы -> населённый пункт ("аг. Боровляны")
+    readonly Dictionary<string, string> streetOf = new Dictionary<string, string>();  // код улицы -> своё название ("Заводская ул.")
 
     public int Count { get { return names.Count; } }
 
@@ -3140,8 +3308,296 @@ public class StreetDirectory {
             dir.names[code] = display.ToString();
             dir.lowerNames[code] = display.ToString().ToLowerInvariant().Replace('ё', 'е');
             dir.ssOf[code] = CleanSs(ss);
+            dir.townOf[code] = town;
+            dir.streetOf[code] = own.ToString();
         }
         return dir;
+    }
+
+    // ---- точный адрес ----
+
+    class NameEntry {
+        public string[] Words;
+        public string Key;
+        public List<string> Codes = new List<string>();
+    }
+
+    List<NameEntry> towns;                                        // населённые пункты: слова названия -> их улицы
+    Dictionary<string, string> streetKey;                    // код улицы -> слова названия улицы
+    Dictionary<string, NameEntry> streets;                        // название улицы -> улицы с таким названием (во всех нас. пунктах)
+
+    void PrepareMatch() {
+        lock (names) {
+            if (towns != null) return;
+            Dictionary<string, NameEntry> t = new Dictionary<string, NameEntry>();
+            streets = new Dictionary<string, NameEntry>();
+            streetKey = new Dictionary<string, string>();
+            foreach (string code in names.Keys) {
+                string town;
+                if (townOf.TryGetValue(code, out town) && town.Length > 0) Add(t, AddressText.NameWords(town), code);
+                string own;
+                string[] sw = streetOf.TryGetValue(code, out own) ? AddressText.NameWords(own) : new string[0];
+                streetKey[code] = string.Join(" ", sw);
+                Add(streets, sw, code);
+            }
+            towns = new List<NameEntry>(t.Values);
+        }
+    }
+
+    static void Add(Dictionary<string, NameEntry> map, string[] words, string code) {
+        if (words.Length == 0) return;
+        string key = string.Join(" ", words);
+        NameEntry n;
+        if (!map.TryGetValue(key, out n)) { n = new NameEntry(); n.Words = words; n.Key = key; map[key] = n; }
+        n.Codes.Add(code);
+    }
+
+    // слова, которые могут быть названием: подряд, ещё не узнанные
+    static List<int> NameSlots(List<AddrToken> toks) {
+        List<int> list = new List<int>();
+        for (int i = 0; i < toks.Count; i++) if (toks[i].Kind == 'w' && !toks[i].Ss && !toks[i].Bound) list.Add(i);
+        return list;
+    }
+
+    // где в адресе стоит название целиком (все его слова подряд); -1 - нет
+    static int Find(List<AddrToken> toks, List<int> slots, string[] words, bool[] used) {
+        for (int p = 0; p + words.Length <= slots.Count; p++) {
+            bool ok = true;
+            for (int k = 0; k < words.Length && ok; k++) {
+                int i = slots[p + k];
+                if (used[p + k] || toks[i].Text != words[k]) ok = false;
+                if (k > 0 && slots[p + k] - slots[p + k - 1] > 2) ok = false;   // между словами - не больше одного служебного ("аг.", "ул.")
+            }
+            if (ok) return p;
+        }
+        return -1;
+    }
+
+    class Reading {
+        public NameEntry Town, Street;
+        public int TownAt = -1, StreetAt = -1;
+        public double Score;
+    }
+
+    // сколько слов узнано; рядом стоящее "ул." или "аг." подсказывает, улица это или населённый пункт
+    static double Score(Reading r, List<AddrToken> toks, List<int> slots) {
+        double score = 0;
+        if (r.Town != null) {
+            score += r.Town.Words.Length;
+            if (Near(toks, slots[r.TownAt], slots[r.TownAt + r.Town.Words.Length - 1], 's')) score -= 0.5;
+        }
+        if (r.Street != null) {
+            score += r.Street.Words.Length;
+            if (Near(toks, slots[r.StreetAt], slots[r.StreetAt + r.Street.Words.Length - 1], 't')) score -= 0.5;
+        }
+        return score;
+    }
+
+    static bool Near(List<AddrToken> toks, int first, int last, char kind) {
+        return (first > 0 && toks[first - 1].Kind == kind) || (last + 1 < toks.Count && toks[last + 1].Kind == kind);
+    }
+
+    // самое длинное название улицы из списка, которое есть в адресе
+    static void BestStreet(List<AddrToken> toks, List<int> slots, bool[] used, IEnumerable<NameEntry> list, Reading r) {
+        foreach (NameEntry n in list) {
+            if (r.Street != null && n.Words.Length <= r.Street.Words.Length) continue;
+            int p = Find(toks, slots, n.Words, used);
+            if (p >= 0) { r.Street = n; r.StreetAt = p; }
+        }
+    }
+
+    // Адрес как его вписали -> улицы (коды), дом, корпус, квартира.
+    // Сначала населённый пункт, потом улица именно в нём, потом дом, корпус, квартира.
+    public AddressMatch Match(string query) {
+        PrepareMatch();
+        AddressMatch m = new AddressMatch();
+        List<AddrToken> toks = AddressText.Tokens(query);
+        List<int> slots = NameSlots(toks);
+
+        // все прочтения: каждый найденный в адресе населённый пункт + улица в нём; или только улица
+        List<Reading> readings = new List<Reading>();
+        Reading none = new Reading();
+        BestStreet(toks, slots, new bool[slots.Count], streets.Values, none);
+        readings.Add(none);
+        foreach (NameEntry town in towns) {
+            int p = Find(toks, slots, town.Words, new bool[slots.Count]);
+            if (p < 0) continue;
+            Reading r = new Reading();
+            r.Town = town;
+            r.TownAt = p;
+            bool[] used = new bool[slots.Count];
+            for (int k = 0; k < town.Words.Length; k++) used[p + k] = true;
+            List<NameEntry> inTown = new List<NameEntry>();
+            Dictionary<string, NameEntry> byKey = new Dictionary<string, NameEntry>();
+            foreach (string code in town.Codes) {
+                string key = streetKey[code];
+                if (key.Length == 0) continue;
+                NameEntry n;
+                if (!byKey.TryGetValue(key, out n)) { n = new NameEntry(); n.Key = key; n.Words = key.Split(' '); byKey[key] = n; inTown.Add(n); }
+                n.Codes.Add(code);
+            }
+            BestStreet(toks, slots, used, inTown, r);
+            readings.Add(r);
+        }
+        // лучшее прочтение: узнано больше слов; при равенстве - с населённым пунктом, потом - что раньше в строке
+        foreach (Reading r in readings) r.Score = Score(r, toks, slots);
+        Reading best = none;
+        foreach (Reading r in readings) {
+            if (r == none) continue;
+            if (r.Score > best.Score || (r.Score == best.Score && (best.Town == null || r.TownAt < best.TownAt))) best = r;
+        }
+        if (best.Town != null) for (int k = 0; k < best.Town.Words.Length; k++) toks[slots[best.TownAt + k]].Used = true;
+        if (best.Street != null) for (int k = 0; k < best.Street.Words.Length; k++) toks[slots[best.StreetAt + k]].Used = true;
+
+        // сельсовет: перед "с/с" или просто его название среди оставшихся слов
+        List<string> ssWanted = new List<string>();
+        List<string> leftover = new List<string>();
+        int firstName = int.MaxValue;
+        if (best.Town != null) firstName = Math.Min(firstName, slots[best.TownAt]);
+        if (best.Street != null) firstName = Math.Min(firstName, slots[best.StreetAt]);
+        for (int i = 0; i < toks.Count; i++) {
+            AddrToken t = toks[i];
+            if (t.Kind != 'w' || t.Used || t.Digit || t.Bound) continue;
+            string ss = SsByWord(t.Text);
+            if (ss != null) { if (!ssWanted.Contains(ss)) ssWanted.Add(ss); t.Used = true; continue; }
+            if (t.Ss) { leftover.Add(t.Text); continue; }
+            if (t.Text.Length == 1 && i > 0 && toks[i - 1].Digit && !toks[i - 1].Used) continue;   // буква дома: "18 а"
+            leftover.Add(t.Text);
+        }
+
+        // дом, корпус, квартира
+        string[] slot = new string[3];   // 0 - дом, 1 - корпус, 2 - квартира
+        List<int> bare = new List<int>();
+        List<string> values = new List<string>();
+        int pending = -1, lastValue = -1;
+        bool hasName = best.Town != null || best.Street != null;
+        for (int i = 0; i < toks.Count; i++) {
+            AddrToken t = toks[i];
+            if (t.Kind == 'h') { pending = 0; continue; }
+            if (t.Kind == 'k') { pending = 1; continue; }
+            if (t.Kind == 'f') { pending = 2; continue; }
+            if (t.Kind != 'w' || t.Used) continue;
+            if (!t.Digit) {
+                // буква дома, написанная отдельно: "18 а"
+                if (t.Text.Length == 1 && lastValue >= 0 && i > 0 && toks[i - 1].Digit) values[lastValue] += t.Text;
+                continue;
+            }
+            bool longNumber = t.Text.Length >= 5 && IsDigits(t.Text);
+            if (longNumber || (!t.Bound && pending < 0 && hasName && i < firstName)) { pending = -1; lastValue = -1; continue; }   // лицевой, индекс, номер строки списка
+            values.Add(t.Text);
+            lastValue = values.Count - 1;
+            if (pending >= 0 && slot[pending] == null) slot[pending] = "#" + lastValue;
+            else bare.Add(lastValue);
+            pending = -1;
+        }
+        // числа без пояснений: первое - дом, второе - квартира, третье - корпус
+        int[] order = { 0, 2, 1 };
+        foreach (int b in bare) foreach (int o in order) if (slot[o] == null) { slot[o] = "#" + b; break; }
+        m.House = slot[0] == null ? null : values[int.Parse(slot[0].Substring(1))];
+        m.Korp = slot[1] == null ? null : values[int.Parse(slot[1].Substring(1))];
+        m.Flat = slot[2] == null ? null : values[int.Parse(slot[2].Substring(1))];
+
+        // улицы, где искать
+        string townText = best.Town == null ? null : TownLabel(best.Town.Codes);
+        if (best.Town != null && best.Street != null) m.Codes.AddRange(best.Street.Codes);
+        else if (best.Town != null) {
+            if (leftover.Count > 0) {
+                m.Problem = "В " + townText + " нет улицы «" + string.Join(" ", leftover.ToArray()) + "»" + Elsewhere(leftover) + ".";
+                m.Explain = "нас. пункт узнан, улица не найдена в нём";
+                return m;
+            }
+            m.Codes.AddRange(best.Town.Codes);
+        } else if (best.Street != null) m.Codes.AddRange(best.Street.Codes);
+        else {
+            m.Problem = leftover.Count > 0 ? "Не нашёл в справочниках улиц и населённых пунктов: «" + string.Join(" ", leftover.ToArray()) + "»."
+                : m.House != null ? "Впишите улицу или населённый пункт, не только номер дома." : "Впишите адрес.";
+            m.Explain = leftover.Count > 0 ? "не узнано ни нас. пункта, ни улицы" : "нет названий";
+            return m;
+        }
+        if (leftover.Count > 0) {
+            m.Codes.Clear();
+            m.Problem = "Не понял в адресе: «" + string.Join(" ", leftover.ToArray()) + "» - такого нет в справочниках" + (best.Town != null ? " для " + townText : "") + ".";
+            m.Explain = "лишние неузнанные слова: " + leftover.Count;
+            return m;
+        }
+        if (ssWanted.Count > 0) {
+            List<string> keep = new List<string>();
+            foreach (string c in m.Codes) { string s; if (ssOf.TryGetValue(c, out s) && ssWanted.Contains(s)) keep.Add(c); }
+            if (keep.Count == 0) {
+                m.Codes.Clear();
+                m.Problem = "В " + string.Join(", ", ssWanted.ToArray()) + " с/с такого адреса нет.";
+                return m;
+            }
+            m.Codes = keep;
+        }
+
+        StringBuilder said = new StringBuilder();
+        if (townText != null) said.Append(townText);
+        if (best.Street != null) said.Append((said.Length > 0 ? " -> " : "") + StreetLabel(m.Codes, best.Town == null));
+        else said.Append(" -> все улицы");
+        if (m.House != null) said.Append(" -> дом " + m.House);
+        if (m.Korp != null) said.Append(", корп. " + m.Korp);
+        if (m.Flat != null) said.Append(", кв. " + m.Flat);
+        m.Said = said.ToString();
+        m.Explain = "нас. пункт: " + (best.Town == null ? "не указан" : "узнан (вариантов " + TownCount(best.Town.Codes) + ")")
+            + ", улица: " + (best.Street == null ? (best.Town != null ? "не указана - весь нас. пункт" : "нет") : "узнана")
+            + (ssWanted.Count > 0 ? ", сельсовет указан" : "") + ", улиц для поиска: " + m.Codes.Count
+            + ", дом: " + (m.House != null ? "да" : "нет") + ", корпус: " + (m.Korp != null ? "да" : "нет") + ", квартира: " + (m.Flat != null ? "да" : "нет");
+        return m;
+    }
+
+    string SsByWord(string w) {
+        if (w.Length < 5) return null;
+        string stem = Stem(w);
+        foreach (string s in ssOf.Values) if (s.Length > 0 && Stem(s).Replace('ё', 'е') == stem) return s;
+        return null;
+    }
+
+    // сколько разных населённых пунктов (одноимённые в разных сельсоветах - разные)
+    int TownCount(List<string> codes) {
+        Dictionary<string, bool> seen = new Dictionary<string, bool>();
+        foreach (string c in codes) {
+            string t, s;
+            townOf.TryGetValue(c, out t);
+            ssOf.TryGetValue(c, out s);
+            seen[t + "|" + s] = true;
+        }
+        return seen.Count;
+    }
+
+    string TownLabel(List<string> codes) {
+        List<string> list = new List<string>();
+        foreach (string c in codes) {
+            string t, s;
+            townOf.TryGetValue(c, out t);
+            ssOf.TryGetValue(c, out s);
+            string label = t + (s != null && s.Length > 0 ? " (" + s + " с/с)" : "");
+            if (!list.Contains(label)) list.Add(label);
+        }
+        return list.Count == 1 ? list[0].Substring(0, list[0].IndexOf(" (") > 0 ? list[0].IndexOf(" (") : list[0].Length) : string.Join(" или ", list.ToArray());
+    }
+
+    string StreetLabel(List<string> codes, bool withTown) {
+        List<string> list = new List<string>();
+        foreach (string c in codes) {
+            string st, t;
+            streetOf.TryGetValue(c, out st);
+            townOf.TryGetValue(c, out t);
+            string label = withTown && t != null && t.Length > 0 ? st + " (" + t + ")" : st;
+            if (!list.Contains(label)) list.Add(label);
+        }
+        if (list.Count > 4) return list[0] + " и ещё " + (list.Count - 1);
+        return string.Join(", ", list.ToArray());
+    }
+
+    // где ещё есть улица с таким названием - подсказка
+    string Elsewhere(List<string> words) {
+        NameEntry n;
+        if (!streets.TryGetValue(string.Join(" ", words.ToArray()), out n)) return "";
+        List<string> list = new List<string>();
+        foreach (string c in n.Codes) { string t; if (townOf.TryGetValue(c, out t) && t.Length > 0 && !list.Contains(t)) list.Add(t); }
+        if (list.Count == 0) return "";
+        return " (такая улица есть в: " + string.Join(", ", list.GetRange(0, Math.Min(5, list.Count)).ToArray()) + (list.Count > 5 ? "..." : "") + ")";
     }
 
     // Коды улиц, в адресе которых есть одно из названий (сельсоветы). "Боровлянский" ищется как "боровлянск".
@@ -3254,7 +3710,7 @@ public class AbonentQuery {
 
     public AbonentQuery(DbfTable t, StreetDirectory dir) {
         this.t = t;
-        accountFields = Existing(new string[] { "NAB", "LS", "LIC", "LSCH" });
+        accountFields = Existing(new string[] { "NAB", "LS", "LIC", "LSCH", "LS_ERIP" });
         meterFields = Existing(new string[] { "NCH" });
         oldMeter = t.FieldIndex("NSC");
         nameFields = Existing(new string[] { "FIO" });
@@ -3395,17 +3851,147 @@ public class AbonentQuery {
         return list.ToArray();
     }
 
+    public bool Partial;            // частичное совпадение; иначе - только точное
+    public AddressMatch Address;    // точный адрес, узнанный по справочнику (иначе адрес ищется по словам)
+    public string Miss = "";        // на чём адрес перестал совпадать ("дома 999 на этой улице нет")
+
     public List<int> Find(string query, SearchMode mode) {
         List<int> found;
         switch (mode) {
-            case SearchMode.Account: found = FindAccount(query); break;
-            case SearchMode.Address: found = FindAddress(query); break;
-            case SearchMode.Meter: found = FindMeter(query); break;
-            default: found = FindWords(query, nameFields); break;
+            case SearchMode.Account: found = Partial ? FindAccount(query) : FindAccountExact(query); break;
+            case SearchMode.Address: found = !Partial && Address != null ? FindAddressExact() : FindAddress(query); break;
+            case SearchMode.Meter: found = Partial ? FindMeter(query) : FindMeterExact(query); break;
+            default: found = Partial ? FindWords(query, nameFields) : FindNameExact(query); break;
         }
         if (found.Count <= 20000) SortByAddress(found);
         return found;
     }
+
+    // ---- точное совпадение ----
+
+    string Text(int row, int field) {
+        return field < 0 ? "" : DbfTable.Format(t.GetValue(row, field, null), true).Trim();
+    }
+
+    // лицевой: номер равен вписанному целиком (нули впереди не важны)
+    List<int> FindAccountExact(string query) {
+        List<int> found = new List<int>();
+        StringBuilder digits = new StringBuilder();
+        foreach (char c in query) if (c >= '0' && c <= '9') digits.Append(c);
+        LastExplain = "цифр: " + digits.Length + ", только точное совпадение";
+        if (digits.Length == 0) return found;
+        string core = digits.ToString().TrimStart('0');
+        if (core.Length == 0) core = "0";
+        for (int i = 0; i < RowCount; i++) {
+            int row = RowAt(i);
+            foreach (int f in accountFields) {
+                string v = Text(row, f);
+                if (v.Length == 0) continue;
+                string vc = v.TrimStart('0');
+                if ((vc.Length == 0 ? "0" : vc) == core) { found.Add(row); break; }
+            }
+        }
+        return found;
+    }
+
+    // номер счётчика для сравнения: только буквы и цифры, маленькие, без нулей впереди ("№ 0050-001" -> 50001)
+    public static string MeterKey(string s) {
+        StringBuilder sb = new StringBuilder();
+        foreach (char c in s.ToLowerInvariant()) if (char.IsLetterOrDigit(c)) sb.Append(c);
+        string r = sb.ToString().TrimStart('0');
+        return r.Length == 0 && sb.Length > 0 ? "0" : r;
+    }
+
+    // номер из запроса: весь запрос и каждое его слово с цифрами ("СЕ-208BY 10011761" -> и 10011761)
+    public static List<string> MeterKeys(string query) {
+        List<string> keys = new List<string>();
+        string q = query.Replace("№", " ");
+        string all = MeterKey(q);
+        if (all.Length > 0) keys.Add(all);
+        foreach (string w in q.Split(new char[] { ' ', '\t', ',', ';' }, StringSplitOptions.RemoveEmptyEntries)) {
+            int digits = 0;
+            foreach (char c in w) if (char.IsDigit(c)) digits++;
+            string k = MeterKey(w);
+            if (digits >= 3 && k.Length >= 4 && !keys.Contains(k)) keys.Add(k);
+        }
+        return keys;
+    }
+
+    // счётчик: номер совпадает целиком; не нашёлся среди текущих - ищем среди снятых (NSC)
+    List<int> FindMeterExact(string query) {
+        List<int> found = new List<int>();
+        List<string> keys = MeterKeys(query);
+        LastExplain = "вариантов номера: " + keys.Count + ", только точное совпадение";
+        if (keys.Count == 0) return found;
+        foreach (int f in meterFields)
+            for (int i = 0; i < RowCount; i++) { int row = RowAt(i); if (!found.Contains(row) && keys.Contains(MeterKey(Text(row, f)))) found.Add(row); }
+        if (found.Count == 0 && oldMeter >= 0) {
+            for (int i = 0; i < RowCount; i++) { int row = RowAt(i); if (keys.Contains(MeterKey(Text(row, oldMeter)))) found.Add(row); }
+            if (found.Count > 0) LastExplain += ", найден по снятому счётчику (NSC)";
+        }
+        return found;
+    }
+
+    static List<string> PersonWords(string s) {
+        List<string> list = new List<string>();
+        foreach (string w in s.ToLowerInvariant().Replace('ё', 'е').Split(new char[] { ' ', '.', ',', '\t' }, StringSplitOptions.RemoveEmptyEntries)) list.Add(w);
+        return list;
+    }
+
+    // ФИО: вписанные слова - это фамилия, имя, отчество по порядку, каждое целиком.
+    // Одна буква - инициал ("иванов и"); если в базе записан инициал ("Иванов И.И.") - он подходит к имени.
+    List<int> FindNameExact(string query) {
+        List<int> found = new List<int>();
+        List<string> q = PersonWords(query);
+        LastExplain = "слов: " + q.Count + ", только точное совпадение (с фамилии, словами целиком)";
+        if (q.Count == 0 || nameFields.Length == 0) return found;
+        for (int i = 0; i < RowCount; i++) {
+            int row = RowAt(i);
+            foreach (int f in nameFields) {
+                List<string> w = PersonWords(Text(row, f));
+                if (w.Count < q.Count) continue;
+                bool ok = true;
+                for (int k = 0; k < q.Count && ok; k++)
+                    ok = q[k] == w[k] || (q[k].Length == 1 && w[k].StartsWith(q[k])) || (w[k].Length == 1 && k > 0 && q[k].StartsWith(w[k]));
+                if (ok) { found.Add(row); break; }
+            }
+        }
+        return found;
+    }
+
+    // адрес: улица из найденных по справочнику, дом, корпус и квартира - точно (если вписаны)
+    List<int> FindAddressExact() {
+        List<int> found = new List<int>();
+        AddressMatch m = Address;
+        Dictionary<string, bool> codes = new Dictionary<string, bool>();
+        foreach (string c in m.Codes) codes[StreetDirectory.NormalizeCode(c)] = true;
+        string house = m.House == null ? null : AddressMatch.Num(m.House);
+        string korp = m.Korp == null ? null : AddressMatch.Num(m.Korp);
+        string flat = m.Flat == null ? null : AddressMatch.Num(m.Flat);
+        int onStreet = 0, inHouse = 0, inKorp = 0;
+        for (int i = 0; i < RowCount; i++) {
+            int row = RowAt(i);
+            if (ul < 0 || !codes.ContainsKey(StreetDirectory.NormalizeCode(Text(row, ul)))) continue;
+            onStreet++;
+            if (house != null && (dom < 0 || AddressMatch.Num(Text(row, dom)) != house)) continue;
+            inHouse++;
+            if (korp != null && (kor < 0 || AddressMatch.Num(Text(row, kor)) != korp)) continue;
+            inKorp++;
+            if (flat != null && (kv < 0 || AddressMatch.Num(Text(row, kv)) != flat)) continue;
+            found.Add(row);
+        }
+        // где оборвалась цепочка: улица -> дом -> корпус -> квартира
+        if (found.Count == 0) {
+            if (onStreet == 0) Miss = "Абонентов на этой улице нет.";
+            else if (inHouse == 0) Miss = "Дома " + m.House + " здесь нет.";
+            else if (inKorp == 0) Miss = "В доме " + m.House + " нет корпуса " + m.Korp + ".";
+            else Miss = "В доме " + m.House + (m.Korp != null ? " корп. " + m.Korp : "") + " нет квартиры " + m.Flat + ".";
+        }
+        LastExplain = m.Explain + "; записей на этих улицах прочитано: " + onStreet + ", по дому: " + inHouse + ", по корпусу: " + inKorp + ", итог: " + found.Count;
+        return found;
+    }
+
+    // ---- частичное совпадение (галочка "Частичное совпадение") ----
 
     // лицевой: берём из строки только цифры, нули впереди не важны
     List<int> FindAccount(string query) {
@@ -3667,14 +4253,15 @@ public class AbonentSearch : Form {
     readonly Label hint = new Label();
     readonly Button ssButton = new Button();
     readonly Button scanButton = new Button();
+    internal readonly CheckBox partialBox = new CheckBox();
 
     static readonly string[] ModeNames = { "&Лицевой счёт", "&Адрес", "№ &счётчика", "&ФИО" };
     static readonly string[] Prompts = { "лицевой счёт", "адрес", "номер счётчика", "фамилию" };
     static readonly string[] Hints = {
-        "Например:  044060216   (нули впереди можно не писать; можно начало номера)",
-        "Вставьте адрес целиком:  Острошицкий Городок Заводская ул. 18   или коротко:  заводская 18 кв 5",
-        "Номер счётчика целиком или его начало",
-        "С фамилии:  иванов   или   иванов иван" };
+        "Номер целиком:  044060216   (нули впереди можно не писать)",
+        "Населённый пункт, улица, дом, корпус, квартира:  Острошицкий Городок Заводская ул. 18 кв 5   или  заводская 18 кв 5",
+        "Номер счётчика целиком:  50001  (\"№\", пробелы и нули впереди не важны)",
+        "С фамилии, словами целиком:  иванов   или   иванов иван" };
 
     internal readonly TextBox queryBox = new TextBox();
     readonly DataGridView grid = new DataGridView();
@@ -3719,6 +4306,12 @@ public class AbonentSearch : Form {
             modeButtons[i] = rb;
             row.Controls.Add(rb);
         }
+        partialBox.Text = "Частичное со&впадение";
+        partialBox.AutoSize = true;
+        partialBox.Margin = new Padding(10, 7, 3, 0);
+        partialBox.CheckedChanged += delegate { StartSearch(); };
+        new ToolTip().SetToolTip(partialBox, "Без галочки - только точное совпадение.\nС галочкой - ещё номера, которые так начинаются, ФИО по началу слов, адрес по похожим словам.");
+        row.Controls.Add(partialBox);
         Button listButton = new Button();
         listButton.Text = "Поиск по списку...";
         listButton.AutoSize = true;
@@ -3856,7 +4449,7 @@ public class AbonentSearch : Form {
         logTimer.Stop();
         SearchResult r = current;
         if (r == null) return;
-        string line = "Поиск по: " + Prompts[(int)r.Mode] + (r.Scanned ? " (перебором)" : "") + "; "
+        string line = "Поиск по: " + Prompts[(int)r.Mode] + (r.Partial ? " (частичное совпадение)" : "") + (r.Scanned ? " (перебором)" : "") + "; "
             + (r.NoIndex ? "нет подходящего индекса" : r.How) + (r.Query != null && r.Query.LastExplain.Length > 0 ? "; " + r.Query.LastExplain : "")
             + (r.Note.Length > 0 ? "; " + r.Note : "") + " -> найдено " + r.Rows.Count + (r.Hidden > 0 ? ", скрыто (другие сельсоветы) " + r.Hidden : "")
             + (r.TooMany ? ", показана часть" : "") + ", " + r.Seconds.ToString("0.00") + " с";
@@ -4086,10 +4679,11 @@ public class AbonentSearch : Form {
         SearchMode m = mode;
         Dictionary<string, bool> ss = selected;
         LiveBase b = live;
+        bool partial = partialBox.Checked;
         status.Text = "Ищу...";
         Cursor = Cursors.AppStarting;
         System.Threading.Thread th = new System.Threading.Thread(delegate() {
-            SearchResult r = b.Search(text, m, ss);
+            SearchResult r = b.Search(text, m, ss, partial);
             Post(delegate { SearchDone(r, b); });
         });
         th.IsBackground = true;
@@ -4112,7 +4706,7 @@ public class AbonentSearch : Form {
         searching = false;
         Cursor = Cursors.Default;
         if (b != live) return;
-        if (again || r.Text != queryBox.Text || r.Mode != mode) { again = false; StartSearch(); return; }
+        if (again || r.Text != queryBox.Text || r.Mode != mode || r.Partial != partialBox.Checked) { again = false; StartSearch(); return; }
         Show(r);
         if (cardWhenDone) {
             cardWhenDone = false;
@@ -4132,6 +4726,7 @@ public class AbonentSearch : Form {
         SearchMode m = mode;
         Dictionary<string, bool> ss = selected;
         LiveBase b = live;
+        bool partial = partialBox.Checked;
         System.Threading.Thread th = new System.Threading.Thread(delegate() {
             SearchResult r = null;
             DateTime started = DateTime.Now;
@@ -4145,7 +4740,7 @@ public class AbonentSearch : Form {
                     double spent = (DateTime.Now - started).TotalSeconds;
                     string left = pct > 0 ? ", осталось примерно " + Math.Max(1, (int)(spent * (100 - pct) / pct / 60)) + " мин" : "";
                     PostStatus("Перебираю всю базу: " + pct + "%" + left + "...   Можно остановить кнопкой справа.");
-                });
+                }, partial);
             } catch (OperationCanceledException) {
                 r = null;
             } catch (Exception ex) {
@@ -4186,6 +4781,9 @@ public class AbonentSearch : Form {
         if (selected != null) where += ", сельсоветов выбрано " + selected.Count + " из " + live.Dir.Selsovety.Count;
         SearchResult r = current;
         string took = r == null ? "" : "   (" + r.Seconds.ToString("0.0") + " с)";
+        // как понят адрес: "аг. Боровляны -> Заводская ул. -> дом 18"
+        if (r != null && r.Address != null && r.Address.Said.Length > 0) took = "   Искал: " + r.Address.Said + "." + took;
+        string tip = r != null && !r.Partial && r.Mode != SearchMode.Address ? " Нужны и похожие номера - поставьте галочку \"Частичное совпадение\"." : "";
         if (r == null)
             status.Text = "Впишите " + Prompts[(int)mode] + ".   " + where;
         else if (r.Error != null)
@@ -4196,7 +4794,7 @@ public class AbonentSearch : Form {
             status.Text = r.Note + "   " + where;
         else if (r.Rows.Count == 0)
             status.Text = (r.Hidden > 0 ? "В выбранных сельсоветах не найдено, а в других нашлось: " + r.Hidden + " - отметьте их в списке \"Сельсоветы\"."
-                : "Ничего не найдено.") + took + "   " + where;
+                : "Ничего не найдено. " + (!r.TooMany && r.Query != null ? r.Query.Miss : "") + tip) + took + "   " + where;
         else
             status.Text = "Найдено: " + r.Rows.Count + (r.TooMany ? " (нашлось очень много, показана часть - уточните запрос)" : "")
                 + (r.Hidden > 0 ? ", ещё " + r.Hidden + " в других сельсоветах скрыто" : "")
@@ -4486,6 +5084,7 @@ public class BatchSearch : Form {
     readonly DataGridView grid = new DataGridView();
     internal readonly Label status = new Label();
     readonly Button findButton = new Button();
+    internal readonly CheckBox partialBox = new CheckBox();
     readonly List<Item> items = new List<Item>();
     bool running;
     volatile bool stop;
@@ -4536,6 +5135,11 @@ public class BatchSearch : Form {
             head.Controls.Add(rb);
             x += 150;
         }
+        partialBox.Text = "Частичное со&впадение";
+        partialBox.AutoSize = true;
+        partialBox.Location = new Point(x + 20, 8);
+        new ToolTip().SetToolTip(partialBox, "Без галочки - только точное совпадение.\nС галочкой - ещё номера, которые так начинаются, ФИО по началу слов, адрес по похожим словам.");
+        head.Controls.Add(partialBox);
         Label l2 = new Label();
         l2.Text = "Вставьте список - по одному значению в строке (можно столбик из Excel), и нажмите \"Найти\":";
         l2.AutoSize = true;
@@ -4583,7 +5187,7 @@ public class BatchSearch : Form {
         grid.CellDoubleClick += delegate(object s, DataGridViewCellEventArgs e) { OpenCard(e.RowIndex); };
         AddColumn("№", 35);
         AddColumn("Искали", 200);
-        AddColumn("Результат", 110);
+        AddColumn("Результат", 220);
         foreach (int f in query.Columns) AddColumn(query.ColumnTitle(f), 100);
 
         Panel bottom = new Panel();
@@ -4630,15 +5234,18 @@ public class BatchSearch : Form {
         items.Clear();
         grid.RowCount = 0;
         SearchMode m = mode;
+        bool partial = partialBox.Checked;
         System.Threading.Thread th = new System.Threading.Thread(delegate() {
             DateTime started = DateTime.Now;
             int single = 0, several = 0, none = 0, done = 0;
             for (int i = 0; i < lines.Count && !stop; i++) {
-                SearchResult r = live.Search(lines[i], m, selected, 100);
+                SearchResult r = live.Search(lines[i], m, selected, 100, partial);
                 List<Item> add = new List<Item>();
                 if (r.Rows.Count == 0) {
                     string why = r.Error != null ? "ошибка: " + r.Error : r.NoIndex ? "нет индекса для поиска"
-                        : r.Hidden > 0 ? "в выбранных сельсоветах нет (в других: " + r.Hidden + ")" : "не найден";
+                        : r.Hidden > 0 ? "в выбранных сельсоветах нет (в других: " + r.Hidden + ")"
+                        : r.Note.Length > 0 ? "не найден: " + r.Note
+                        : !r.TooMany && r.Query != null && r.Query.Miss.Length > 0 ? "не найден: " + r.Query.Miss : "не найден";
                     add.Add(NewItem(i + 1, lines[i], why, null, -1, 2));
                     none++;
                 } else {
@@ -4658,7 +5265,7 @@ public class BatchSearch : Form {
             }
             double seconds = (DateTime.Now - started).TotalSeconds;
             int s1 = single, s2 = several, s3 = none, d = done;
-            Post(delegate { Finish(lines, d, s1, s2, s3, seconds); });
+            Post(delegate { Finish(lines, d, s1, s2, s3, seconds, partial); });
         });
         th.IsBackground = true;
         th.Start();
@@ -4668,7 +5275,7 @@ public class BatchSearch : Form {
         try { if (!IsDisposed) BeginInvoke(m); } catch (Exception) { }
     }
 
-    void Finish(List<string> lines, int done, int single, int several, int none, double seconds) {
+    void Finish(List<string> lines, int done, int single, int several, int none, double seconds, bool partial) {
         running = false;
         findButton.Text = "Найти";
         grid.RowCount = items.Count;
@@ -4685,7 +5292,7 @@ public class BatchSearch : Form {
         }
         List<string> shape = new List<string>();
         foreach (KeyValuePair<int, int> kv in lengths) shape.Add(kv.Key + " цифр - " + kv.Value);
-        Report.Search("Поиск по списку, в списке: " + ModeNames[(int)mode].Replace("&", "").ToLowerInvariant() + "; строк " + lines.Count
+        Report.Search("Поиск по списку, в списке: " + ModeNames[(int)mode].Replace("&", "").ToLowerInvariant() + (partial ? " (частичное совпадение)" : "") + "; строк " + lines.Count
             + (done < lines.Count ? " (остановлен на " + done + ")" : "") + ", найдено по одному " + single + ", по несколько " + several + ", не найдено " + none
             + ", время " + seconds.ToString("0.0") + " с; цифр в строках: " + string.Join(", ", shape.ToArray()));
     }
