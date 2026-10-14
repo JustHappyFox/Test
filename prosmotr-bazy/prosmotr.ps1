@@ -1628,30 +1628,48 @@ public class ExtraInfo {
     }
 
     // для карточки: все поля из таблиц доп. сведений (пары "подпись, значение")
-    public List<string> Details(string nab) {
-        List<string> pairs = new List<string>();
+    // запись абонента в каждой таблице доп. сведений (DOP, DOGOVOR)
+    public List<ExtraRecord> Records(string nab) {
+        List<ExtraRecord> list = new List<ExtraRecord>();
         foreach (LiveBase b in Tables) {
+            ExtraRecord e = new ExtraRecord();
+            e.Name = Path.GetFileName(b.FilePath);
+            list.Add(e);
             DbfTable t;
             Dictionary<string, int> rows;
-            string title = "--- Доп. сведения (" + Path.GetFileName(b.FilePath) + ")";
             try { rows = b.LookupNabs(new List<string>(new string[] { nab }), out t); }
-            catch (Exception ex) { pairs.Add(title); pairs.Add("не прочиталось: " + ex.Message); continue; }
+            catch (Exception ex) { e.Problem = "не прочиталось: " + ex.Message; continue; }
             int row;
-            if (t == null) { pairs.Add(title); pairs.Add("нет индекса по номеру абонента"); continue; }
-            if (!rows.TryGetValue(Nab(nab), out row)) { pairs.Add(title); pairs.Add("записи нет"); continue; }
-            pairs.Add(title);
+            if (t == null) { e.Problem = "нет индекса по номеру абонента"; continue; }
+            if (!rows.TryGetValue(Nab(nab), out row)) { e.Problem = "записи нет"; continue; }
+            e.Table = t;
+            using (MemoReader memo = t.OpenMemo()) e.Values = t.GetRow(row, memo);
+        }
+        return list;
+    }
+
+    public List<string> Details(string nab) {
+        List<string> pairs = new List<string>();
+        foreach (ExtraRecord e in Records(nab)) {
+            pairs.Add("--- Доп. сведения (" + e.Name + ")");
+            if (e.Problem != null) { pairs.Add(e.Problem); continue; }
             pairs.Add("");
-            object[] values;
-            using (MemoReader memo = t.OpenMemo()) values = t.GetRow(row, memo);
-            for (int j = 0; j < values.Length; j++) {
-                string v = DbfTable.Format(values[j], true);
-                if (string.Compare(t.Fields[j].Name, "NAB", StringComparison.OrdinalIgnoreCase) == 0) continue;
-                pairs.Add(FieldNames.Title(t.Fields[j].Name));
-                pairs.Add(v);
+            for (int j = 0; j < e.Values.Length; j++) {
+                if (string.Compare(e.Table.Fields[j].Name, "NAB", StringComparison.OrdinalIgnoreCase) == 0) continue;
+                pairs.Add(FieldNames.Title(e.Table.Fields[j].Name));
+                pairs.Add(DbfTable.Format(e.Values[j], true));
             }
         }
         return pairs;
     }
+}
+
+// Запись абонента в таблице доп. сведений
+public class ExtraRecord {
+    public string Name;        // таблица (DOP.DBF)
+    public DbfTable Table;
+    public object[] Values;
+    public string Problem;     // не прочиталось, записи нет...
 }
 
 // База абонентов "вживую": при запуске читаются только заголовок, начало таблицы и список индексов.
@@ -3579,6 +3597,540 @@ public static class FieldNames {
 }
 
 // Карточка записи: все поля целиком, с русскими подписями, где они известны
+// Как перейти к соседнему абоненту из списка найденного (PgUp/PgDn в карточке): false - дальше некуда
+public delegate bool CardMove(int delta, out SearchResult res, out int row);
+
+// Справочник "код -> название" для карточки (тарифы, льготы, место установки счётчика):
+// маленькая таблица базы, читается целиком один раз
+public class CodeBook {
+    readonly Dictionary<string, string> names = new Dictionary<string, string>();
+    public string Note = "";
+    static readonly Dictionary<string, CodeBook> cache = new Dictionary<string, CodeBook>(StringComparer.OrdinalIgnoreCase);
+
+    public static CodeBook Get(string folder, string table, string[] keys) {
+        string id = folder + "|" + table;
+        CodeBook b;
+        lock (cache) if (cache.TryGetValue(id, out b)) return b;
+        b = new CodeBook();
+        try { b.Load(folder, table, keys); }
+        catch (Exception ex) { b.Note = "не прочитался: " + ex.Message; }
+        Report.Line("Справочник для карточки " + table + ": " + b.Note);
+        lock (cache) cache[id] = b;
+        return b;
+    }
+
+    void Load(string folder, string table, string[] keys) {
+        string path = null;
+        foreach (string f in Directory.GetFiles(folder))
+            if (string.Compare(Path.GetFileName(f), table, StringComparison.OrdinalIgnoreCase) == 0) path = f;
+        if (path == null) { Note = "таблицы нет"; return; }
+        DbfTable h = DbfTable.LoadHeader(path);
+        if (h.Expected > 20000) { Note = "слишком большая (" + h.Expected + " записей)"; return; }
+        int key = -1;
+        foreach (string k in keys) if (key < 0) key = h.FieldIndex(k);
+        for (int i = 0; i < h.Fields.Count && key < 0; i++) if (h.Fields[i].Type == 'N') key = i;
+        // название - текстовое поле, лучше длинное и с "говорящим" именем (NAIM..., N...)
+        int name = -1, best = 0;
+        for (int i = 0; i < h.Fields.Count; i++) {
+            DbfField f = h.Fields[i];
+            if (i == key || f.Type != 'C') continue;
+            string n = f.Name.ToUpperInvariant();
+            int score = f.Length >= 10 ? 2 : 1;
+            if (n.Contains("NAIM") || n.Contains("NAME") || n.StartsWith("N")) score += 2;
+            if (score > best) { best = score; name = i; }
+        }
+        if (key < 0 || name < 0) { Note = "не понятно, где код и где название"; return; }
+        DbfTable t = DbfTable.Load(path, null, null, 20000);
+        for (int row = 0; row < t.Count; row++) {
+            string k = Code(DbfTable.Format(t.GetValue(row, key, null), true));
+            if (k.Length > 0 && !names.ContainsKey(k)) names[k] = DbfTable.Format(t.GetValue(row, name, null), true).Trim();
+        }
+        Note = "код - поле " + h.Fields[key].Name + ", название - поле " + h.Fields[name].Name + ", кодов " + names.Count;
+    }
+
+    static string Code(string s) {
+        s = s.Trim();
+        decimal d;
+        if (decimal.TryParse(s.Replace(',', '.'), NumberStyles.Number, CultureInfo.InvariantCulture, out d))
+            return d.ToString("0.##########", CultureInfo.InvariantCulture);
+        return s.ToUpperInvariant();
+    }
+
+    public string Name(string code) {
+        string s;
+        return names.TryGetValue(Code(code), out s) ? s : "";
+    }
+}
+
+// Карточка абонента как в программе базы: те же надписи и поля на тех же местах (экран в 80 знаков).
+// Ctrl+D - доп. сведения, F2 - все поля списком, PgUp/PgDn - соседний абонент из списка, Esc - закрыть.
+public class BaseCard : Form {
+    public static readonly Color Back = Color.FromArgb(0, 0, 160);
+    static readonly Color LabelColor = Color.White;
+    static readonly Color BoxColor = Color.FromArgb(0, 128, 168);
+    static readonly Color TitleColor = Color.FromArgb(255, 255, 85);
+    static readonly Color MarkColor = Color.FromArgb(255, 130, 130);
+    const int Cols = 80;
+
+    // Экран "АБОНЕНТ" из программы базы. {ПОЛЕ,ширина} - значение поля, {#...} - из справочников,
+    // {@N} - с колонки N, {-} - черта. Надпись перед полем показывается, только если поле есть в таблице.
+    static readonly string[] MainScreen = {
+        "№ Абонента:{NAB,10}{@35}{#T1,6}{@43}{#T2,6}{@51}{#T3,6}",
+        "Ф.И.О.:{FIO,71}",
+        "Н.П.:{#NP,32}{@44}{#TNP,4}{@50}с/с:{#SS,24}",
+        "Код:{UL,5} Ул.:{#ULN,32}{@59}Л\\С:{LS_ERIP,14}",
+        "Дом:{DOM,7}{@14}Кор.:{KOR,3}{@24}Кв.:{KV,5}{@34}Тел.:{TEL,7}{@50}№ Книги:{KNIGA,4}",
+        " Код лг.:{LGI,3} Наимен.:{#LGN,30}{@57}% Ск.:{SKID,3}",
+        " Код тар.:{KTAR,2} {#TARN,34}{@58}Жил.:{GIL,3} Лг.Жил.:{KLG,3}",
+        " Тип пом.:{TPO,3} Розеток:{ROZ,3} Точек осв.:{TOS,3}",
+        "{-}",
+        "Сч.:{NCH,20}{@28}{TIPCH,30}{@60}Разр.:{RAS,1} Г.пов.:{GODPR,4}",
+        "Кв.пов.:{KVP,2}",
+        "{@26}Место уст.ПУ:{#MESTO,30}",
+        "Пок.уст.:{NPOK,8} Д.пр.:{DPR,10} Пок.:{POK,8} Пр.пров.:{PPR,3} Опл.:{OPOK,8}",
+        "{-}",
+        "Дата зам.:{DZA,10} Пок.зам.сч.:{PZS,8} № Сч.:{NSC,20}",
+        "{@43}Тип:{TSC,30}",
+        "Пр.архива:{PRA,3} Дата откл.:{DOT,10} Пр.пл.:{PRP,5}{@62}№ уч-ка:{N_UCH,4}",
+        "Дата уч.без пр.:{DUC,10} Дата оконч.:{DOK,10} № Фидера:{N_F,15}",
+        "{-}",
+        "Мощность:{#POWER,8}",
+    };
+
+    // экран "ДОПОЛНИТЕЛЬНЫЕ СВЕДЕНИЯ" (Ctrl+D): сверху - абонент, ниже - поля таблиц DOP и DOGOVOR
+    static readonly string[] ExtraTop = { "№ Абонента:{NAB,10}", "Ф.И.О.:{FIO,71}" };
+
+    class CardValue {
+        public string Text = "";
+        public bool Right, Mark;
+    }
+
+    SearchResult res;
+    int row;
+    object[] values;
+    List<ExtraRecord> extra;
+    Dictionary<int, bool> used = new Dictionary<int, bool>();
+    bool extraPage;
+    readonly LiveBase live;
+    readonly CardMove move;
+    readonly ScreenPanel screen;
+    readonly Button prevButton, nextButton, extraButton, closeButton;
+    readonly FlowLayoutPanel bar;
+
+    public BaseCard(SearchResult r, int row, LiveBase live, CardMove move) {
+        this.live = live;
+        this.move = move;
+        Text = "Карточка абонента";
+        BackColor = Back;
+        StartPosition = FormStartPosition.CenterScreen;
+        KeyPreview = true;
+        MinimizeBox = false;
+        screen = new ScreenPanel(PickFont(11f));
+        screen.Dock = DockStyle.Fill;
+        bar = new FlowLayoutPanel();
+        bar.Dock = DockStyle.Bottom;
+        bar.Height = 36;
+        bar.WrapContents = false;
+        bar.Padding = new Padding(4, 4, 4, 0);
+        bar.BackColor = SystemColors.Control;
+        prevButton = AddButton("< Пред. (PgUp)", delegate { Step(-1); });
+        nextButton = AddButton("След. (PgDn) >", delegate { Step(1); });
+        extraButton = AddButton("Доп. сведения (Ctrl+D)", delegate { ToggleExtra(); });
+        AddButton("Все поля (F2)", delegate { ResultColumns.ShowList(this, res, this.row, live == null ? null : live.Extra); });
+        closeButton = AddButton("Закрыть (Esc)", delegate { Close(); });
+        prevButton.Enabled = nextButton.Enabled = move != null;
+        Controls.Add(bar);
+        Controls.Add(screen);
+        screen.BringToFront();
+        FormClosed += delegate { screen.CellFont.Dispose(); };
+        Open(r, row);
+    }
+
+    Button AddButton(string text, EventHandler click) {
+        Button b = new Button();
+        b.Text = text;
+        b.AutoSize = true;
+        b.UseVisualStyleBackColor = true;
+        b.Click += click;
+        bar.Controls.Add(b);
+        return b;
+    }
+
+    static Font PickFont(float size) {
+        foreach (string name in new string[] { "Consolas", "Lucida Console", "Courier New" }) {
+            Font f = new Font(name, size);
+            if (string.Compare(f.Name, name, StringComparison.OrdinalIgnoreCase) == 0) return f;
+            f.Dispose();
+        }
+        return new Font(FontFamily.GenericMonospace, size);
+    }
+
+    protected override bool ProcessCmdKey(ref Message msg, Keys keyData) {
+        switch (keyData) {
+            case Keys.Escape: if (extraPage) ToggleExtra(); else Close(); return true;
+            case Keys.Control | Keys.D: ToggleExtra(); return true;
+            case Keys.F2: ResultColumns.ShowList(this, res, row, live == null ? null : live.Extra); return true;
+            case Keys.PageUp: Step(-1); return true;
+            case Keys.PageDown: Step(1); return true;
+        }
+        return base.ProcessCmdKey(ref msg, keyData);
+    }
+
+    public void Step(int delta) {
+        SearchResult r;
+        int rw;
+        if (move != null && move(delta, out r, out rw)) Open(r, rw);
+        else System.Media.SystemSounds.Beep.Play();
+    }
+
+    public void ToggleExtra() {
+        extraPage = !extraPage;
+        Build();
+    }
+
+    void Open(SearchResult r, int rw) {
+        res = r;
+        row = rw;
+        using (MemoReader memo = r.Table.OpenMemo()) values = r.Table.GetRow(rw, memo);
+        extra = null;
+        Build();
+    }
+
+    void Build() {
+        screen.Begin(extraPage ? "ДОПОЛНИТЕЛЬНЫЕ СВЕДЕНИЯ" : "АБОНЕНТ");
+        used = new Dictionary<int, bool>();
+        if (extraPage) BuildExtra(); else BuildMain();
+        screen.End();
+        extraButton.Text = extraPage ? "Карточка (Ctrl+D)" : "Доп. сведения (Ctrl+D)";
+        Text = "Абонент " + Field("NAB") + (extraPage ? " - доп. сведения" : "") + " (только просмотр)";
+        if (WindowState == FormWindowState.Normal) {
+            Size content = screen.ContentSize;
+            Rectangle area = Screen.FromControl(this).WorkingArea;
+            int h = Math.Min(content.Height + bar.Height, area.Height - 60);
+            int w = content.Width + (h < content.Height + bar.Height ? SystemInformation.VerticalScrollBarWidth : 0);
+            ClientSize = new Size(Math.Min(w, area.Width - 40), h);
+        }
+        ActiveControl = closeButton;
+    }
+
+    void BuildMain() {
+        int r = 0;
+        bool line = false;
+        foreach (string t in MainScreen) {
+            if (t == "{-}") { line = r > 0; continue; }
+            int at = line ? r + 1 : r;
+            if (!Template(t, at)) continue;
+            if (line) screen.Line(r, null);
+            r = at + 1;
+            line = false;
+        }
+        // поля таблицы, которых нет на экране базы
+        List<int> rest = new List<int>();
+        for (int j = 0; j < values.Length; j++) if (!used.ContainsKey(j)) rest.Add(j);
+        if (rest.Count > 0) r = Flow(r, res.Table, values, rest);
+        List<string> notes = Notes();
+        if (notes.Count > 0) {
+            screen.Line(r++, null);
+            foreach (string n in notes) screen.Label(r++, 0, n, TitleColor);
+        }
+    }
+
+    void BuildExtra() {
+        int r = 0;
+        foreach (string t in ExtraTop) if (Template(t, r)) r++;
+        ExtraInfo x = live == null ? null : live.Extra;
+        if (x == null || x.Tables.Count == 0) {
+            screen.Line(r++, null);
+            screen.Label(r++, 0, "Таблиц доп. сведений (DOP.DBF, DOGOVOR.DBF) рядом с базой нет", LabelColor);
+            return;
+        }
+        if (extra == null) {
+            Cursor old = Cursor.Current;
+            Cursor.Current = Cursors.WaitCursor;
+            try { extra = x.Records(Field("NAB")); }
+            catch (Exception ex) {
+                extra = new List<ExtraRecord>();
+                ExtraRecord e = new ExtraRecord();
+                e.Name = "Доп. сведения";
+                e.Problem = "не прочитались: " + ex.Message;
+                extra.Add(e);
+            }
+            finally { Cursor.Current = old; }
+        }
+        foreach (ExtraRecord e in extra) {
+            screen.Line(r++, Path.GetFileNameWithoutExtension(e.Name).ToUpperInvariant());
+            if (e.Problem != null) { screen.Label(r++, 0, e.Problem, LabelColor); continue; }
+            List<int> fields = new List<int>();
+            for (int j = 0; j < e.Values.Length; j++)
+                if (string.Compare(e.Table.Fields[j].Name, "NAB", StringComparison.OrdinalIgnoreCase) != 0) fields.Add(j);
+            r = Flow(r, e.Table, e.Values, fields);
+        }
+    }
+
+    List<string> Notes() {
+        List<string> l = new List<string>();
+        string why;
+        if (res.Related.TryGetValue(row, out why)) l.Add("Добавлен к найденному: " + why);
+        else if (res.Added.ContainsKey(row)) l.Add("Добавлен к найденному: другой тариф того же счётчика");
+        if (!res.Related.ContainsKey(row) && res.Orange.ContainsKey(row)) l.Add("Оранжевым: на адресе больше одного счётчика");
+        int t;
+        if (res.Tariff.TryGetValue(row, out t)) l.Add("Тариф T" + t + ": у счётчика несколько лицевых (таблица ABDIF_T)");
+        return l;
+    }
+
+    // одна строка экрана по шаблону; false - на ней ничего не оказалось (полей нет в таблице)
+    bool Template(string line, int r) {
+        bool placed = false;
+        int col = 0, textCol = 0, i = 0;
+        StringBuilder text = new StringBuilder();
+        while (i < line.Length) {
+            if (line[i] != '{') {
+                if (text.Length == 0) textCol = col;
+                text.Append(line[i]);
+                col++;
+                i++;
+                continue;
+            }
+            int end = line.IndexOf('}', i);
+            string tok = line.Substring(i + 1, end - i - 1);
+            i = end + 1;
+            string label = text.ToString().TrimEnd();
+            text.Length = 0;
+            if (tok[0] == '@') {
+                if (label.Trim().Length > 0) { screen.Label(r, textCol, label, LabelColor); placed = true; }
+                col = int.Parse(tok.Substring(1));
+                continue;
+            }
+            int comma = tok.IndexOf(',');
+            int w = int.Parse(tok.Substring(comma + 1));
+            CardValue v = Resolve(tok.Substring(0, comma));
+            if (v != null) {
+                if (label.Trim().Length > 0) screen.Label(r, textCol, label, LabelColor);
+                if (v.Mark) screen.Label(r, col, v.Text, MarkColor);
+                else screen.Box(r, col, w, v.Text, v.Right);
+                placed = true;
+            }
+            col += w;
+        }
+        if (text.ToString().Trim().Length > 0) { screen.Label(r, textCol, text.ToString().TrimEnd(), LabelColor); placed = true; }
+        return placed;
+    }
+
+    // поля одно за другим, по строкам ("Надпись:[значение]")
+    int Flow(int r, DbfTable t, object[] vals, List<int> fields) {
+        int col = 0;
+        foreach (int j in fields) {
+            DbfField f = t.Fields[j];
+            string label = (FieldNames.Label(f.Name) ?? f.Name) + ":";
+            CardValue v = FieldValue(f, vals[j]);
+            int w = BoxWidth(f);
+            if (label.Length + w > Cols) w = Cols - label.Length;
+            if (col > 0 && col + label.Length + w > Cols) { r++; col = 0; }
+            screen.Label(r, col, label, LabelColor);
+            screen.Box(r, col + label.Length, w, v.Text, v.Right);
+            col += label.Length + w + 2;
+        }
+        return col > 0 ? r + 1 : r;
+    }
+
+    static int BoxWidth(DbfField f) {
+        switch (f.Type) {
+            case 'D': return 10;
+            case 'T': return 19;
+            case 'L': return 3;
+            case 'M': case 'G': return Cols;
+            case 'C': return Math.Max(1, Math.Min(f.Length, 60));
+            default: return Math.Max(1, f.Length);
+        }
+    }
+
+    CardValue Resolve(string key) {
+        if (key[0] == '#') return Computed(key.Substring(1));
+        int i = res.Table.FieldIndex(key);
+        if (i < 0) return null;
+        used[i] = true;
+        return FieldValue(res.Table.Fields[i], values[i]);
+    }
+
+    static CardValue FieldValue(DbfField f, object v) {
+        CardValue c = new CardValue();
+        c.Right = f.Type == 'N' || f.Type == 'F' || f.Type == 'I' || f.Type == 'Y' || f.Type == 'B';
+        if (v is bool) c.Text = (bool)v ? "да" : "нет";
+        else c.Text = DbfTable.Format(v, true).Replace("\r\n", " ").Replace('\r', ' ').Replace('\n', ' ').Trim();
+        return c;
+    }
+
+    string Field(string name) {
+        int i = res.Table.FieldIndex(name);
+        return i < 0 ? "" : DbfTable.Format(values[i], true).Trim();
+    }
+
+    static CardValue Plain(string text) {
+        CardValue c = new CardValue();
+        c.Text = text ?? "";
+        return c;
+    }
+
+    CardValue Computed(string key) {
+        StreetDirectory dir = live == null ? null : live.Dir;
+        string ul = Field("UL");
+        switch (key) {
+            case "T1": case "T2": case "T3": {
+                int t;
+                res.Tariff.TryGetValue(row, out t);
+                CardValue c = Plain((t == key[1] - '0' ? "(•) " : "( ) ") + key);
+                c.Mark = true;
+                return c;
+            }
+            case "NP": case "TNP": case "SS": case "ULN": {
+                if (res.Table.FieldIndex("UL") < 0) return null;
+                if (dir == null) return Plain("");
+                if (key == "SS") return Plain(dir.Selsovet(ul));
+                if (key == "ULN") return Plain(dir.Street(ul));
+                string town = dir.Town(ul) ?? "", type = "", name = town;
+                int sp = town.IndexOf(' ');
+                if (sp > 0 && town[sp - 1] == '.') { type = town.Substring(0, sp); name = town.Substring(sp + 1); }
+                return Plain(key == "NP" ? name : type);
+            }
+            case "LGN": return Lookup("LGI", "SPRLGOT.DBF", new string[] { "LGI", "KODLG", "KOD", "KLG", "KL" });
+            case "TARN": return Lookup("KTAR", "SPRTAR.DBF", new string[] { "KTAR", "KOD", "KT" });
+            case "MESTO": return Lookup("IDTPSCH", "TPSCH.DBF", new string[] { "IDTPSCH", "ID", "KOD" });
+            case "POWER": {
+                ExtraInfo x = live == null ? null : live.Extra;
+                if (x == null || x.PowerBase == null) return null;
+                string p = res.PowerText(row);
+                if (p.Length == 0)
+                    try {
+                        Dictionary<string, string> d = x.Power(new List<string>(new string[] { Field("NAB") }));
+                        if (!d.TryGetValue(ExtraInfo.Nab(Field("NAB")), out p)) p = "";
+                    } catch (Exception) { p = ""; }
+                CardValue c = Plain(p);
+                c.Right = true;
+                return c;
+            }
+        }
+        return null;
+    }
+
+    // название по коду из справочника базы; не нашлось - пусто (а поле с кодом показывается среди прочих)
+    CardValue Lookup(string field, string table, string[] keys) {
+        int i = res.Table.FieldIndex(field);
+        if (i < 0) return null;
+        string code = Field(field);
+        if (code.Length == 0 || live == null) return Plain("");
+        string name = CodeBook.Get(Path.GetDirectoryName(live.FilePath), table, keys).Name(code);
+        if (name.Length > 0) used[i] = true;
+        return Plain(name);
+    }
+
+    // Экран в знакоместах: надписи рисуются, значения - поля только для чтения (можно выделить и скопировать)
+    class ScreenPanel : Panel {
+        public readonly Font CellFont;
+        readonly float charW;
+        readonly int lineH;
+        string title = "";
+        int rows;
+        readonly List<KeyValuePair<Point, KeyValuePair<string, Color>>> texts = new List<KeyValuePair<Point, KeyValuePair<string, Color>>>();
+        readonly List<KeyValuePair<int, string>> lines = new List<KeyValuePair<int, string>>();
+        const int Edge = 2;
+
+        public ScreenPanel(Font font) {
+            CellFont = font;
+            DoubleBuffered = true;
+            ResizeRedraw = true;
+            AutoScroll = true;
+            BackColor = Back;
+            charW = TextRenderer.MeasureText(new string('Ж', 40), font, new Size(int.MaxValue, int.MaxValue), TextFormatFlags.NoPadding).Width / 40f;
+            lineH = font.Height + 7;
+        }
+
+        int X(int col) { return (int)Math.Round((Edge + col) * charW); }
+        int Y(int row) { return lineH + lineH / 2 + row * lineH; }
+
+        public Size ContentSize { get { return new Size(X(Cols + Edge), Y(rows) + lineH); } }
+
+        public void Begin(string caption) {
+            SuspendLayout();
+            AutoScrollPosition = new Point(0, 0);
+            while (Controls.Count > 0) { Control c = Controls[0]; Controls.RemoveAt(0); c.Dispose(); }
+            texts.Clear();
+            lines.Clear();
+            rows = 0;
+            title = caption;
+        }
+
+        public void End() {
+            AutoScrollMinSize = ContentSize;
+            ResumeLayout();
+            Invalidate();
+        }
+
+        public void Label(int row, int col, string text, Color color) {
+            texts.Add(new KeyValuePair<Point, KeyValuePair<string, Color>>(new Point(col, row), new KeyValuePair<string, Color>(text, color)));
+            rows = Math.Max(rows, row + 1);
+        }
+
+        public void Line(int row, string caption) {
+            lines.Add(new KeyValuePair<int, string>(row, caption));
+            rows = Math.Max(rows, row + 1);
+        }
+
+        public void Box(int row, int col, int width, string value, bool right) {
+            TextBox b = new TextBox();
+            b.ReadOnly = true;
+            b.BorderStyle = BorderStyle.None;
+            b.BackColor = BoxColor;
+            b.ForeColor = Color.White;
+            b.Font = CellFont;
+            b.Text = value;
+            b.TextAlign = right ? HorizontalAlignment.Right : HorizontalAlignment.Left;
+            b.Width = (int)Math.Ceiling(width * charW) + 3;
+            b.Location = new Point(X(col) - 1, Y(row) + (lineH - b.Height) / 2);
+            Controls.Add(b);
+            rows = Math.Max(rows, row + 1);
+        }
+
+        protected override void OnScroll(ScrollEventArgs se) {
+            base.OnScroll(se);
+            Invalidate();
+        }
+
+        protected override void OnMouseWheel(MouseEventArgs e) {
+            base.OnMouseWheel(e);
+            Invalidate();
+        }
+
+        protected override void OnPaint(PaintEventArgs e) {
+            base.OnPaint(e);
+            Graphics g = e.Graphics;
+            int dx = AutoScrollPosition.X, dy = AutoScrollPosition.Y;
+            Size size = ContentSize;
+            using (Pen pen = new Pen(Color.FromArgb(220, 220, 220))) {
+                Rectangle frame = new Rectangle(dx + (int)(charW * 0.7f), dy + lineH / 2, size.Width - (int)(charW * 1.4f), size.Height - lineH / 2 - lineH / 3);
+                g.DrawRectangle(pen, frame);
+                frame.Inflate(-3, -3);
+                g.DrawRectangle(pen, frame);
+                foreach (KeyValuePair<int, string> l in lines) {
+                    int y = dy + Y(l.Key) + lineH / 2;
+                    g.DrawLine(pen, dx + X(0), y, dx + X(Cols), y);
+                    if (l.Value != null) Caption(g, " " + l.Value + " ", dx + size.Width / 2, y);
+                }
+            }
+            Caption(g, " " + title + " ", dx + size.Width / 2, dy + lineH / 2);
+            int pad = (lineH - CellFont.Height) / 2;
+            foreach (KeyValuePair<Point, KeyValuePair<string, Color>> t in texts)
+                TextRenderer.DrawText(g, t.Value.Key, CellFont, new Point(dx + X(t.Key.X), dy + Y(t.Key.Y) + pad), t.Value.Value, TextFormatFlags.NoPadding);
+        }
+
+        void Caption(Graphics g, string text, int centerX, int centerY) {
+            Size s = TextRenderer.MeasureText(text, CellFont, new Size(int.MaxValue, int.MaxValue), TextFormatFlags.NoPadding);
+            Rectangle r = new Rectangle(centerX - s.Width / 2, centerY - s.Height / 2, s.Width, s.Height);
+            using (SolidBrush b = new SolidBrush(Back)) g.FillRectangle(b, r);
+            TextRenderer.DrawText(g, text, CellFont, r.Location, TitleColor, TextFormatFlags.NoPadding);
+        }
+    }
+}
+
 public static class Card {
     public static void Show(IWin32Window owner, DbfTable table, int row) {
         Show(owner, table, row, null);
@@ -3811,6 +4363,22 @@ public class StreetDirectory {
     public string LowerName(string code) {
         string s;
         return lowerNames.TryGetValue(NormalizeCode(code), out s) ? s : null;
+    }
+
+    // для карточки: населённый пункт ("аг. Боровляны"), улица ("Заводская ул."), сельсовет
+    public string Town(string code) {
+        string s;
+        return townOf.TryGetValue(NormalizeCode(code), out s) ? s : null;
+    }
+
+    public string Street(string code) {
+        string s;
+        return streetOf.TryGetValue(NormalizeCode(code), out s) ? s : null;
+    }
+
+    public string Selsovet(string code) {
+        string s;
+        return ssOf.TryGetValue(NormalizeCode(code), out s) ? s : null;
     }
 
     public double Coverage(List<string> codes) {
@@ -5709,7 +6277,19 @@ public class AbonentSearch : Form {
     internal void OpenCard(int index) {
         SearchResult r = current;
         if (r == null || index < 0 || index >= r.Rows.Count) return;
-        ResultColumns.ShowCard(this, r, r.Rows[index], live == null ? null : live.Extra);
+        int pos = index;
+        // PgUp/PgDn в карточке - соседний абонент этого же списка
+        CardMove move = delegate(int delta, out SearchResult rr, out int row) {
+            rr = null;
+            row = -1;
+            if (current != r || pos + delta < 0 || pos + delta >= r.Rows.Count) return false;
+            pos += delta;
+            rr = r;
+            row = r.Rows[pos];
+            if (pos < grid.RowCount) grid.CurrentCell = grid.Rows[pos].Cells[0];
+            return true;
+        };
+        ResultColumns.ShowCard(this, r, r.Rows[index], live, move);
     }
 
     // ---- сельсоветы: выпадающий список с галочками, только отбирает показанное ----
@@ -5993,8 +6573,20 @@ public static class ResultColumns {
         return r.Query.CellText(row, kind);
     }
 
-    // карточка: сначала адрес по справочнику и тариф, после полей - доп. сведения (как Ctrl+D в программе базы)
-    public static void ShowCard(IWin32Window owner, SearchResult r, int row, ExtraInfo x) {
+    // карточка как в программе базы; не открылась - все поля списком
+    public static void ShowCard(IWin32Window owner, SearchResult r, int row, LiveBase live, CardMove move) {
+        BaseCard card;
+        try { card = new BaseCard(r, row, live, move); }
+        catch (Exception ex) {
+            Report.Line("Карточка не открылась: " + ex.Message);
+            ShowList(owner, r, row, live == null ? null : live.Extra);
+            return;
+        }
+        card.Show(owner);
+    }
+
+    // все поля списком: сначала адрес по справочнику и тариф, после полей - доп. сведения (Ctrl+D в программе базы)
+    public static void ShowList(IWin32Window owner, SearchResult r, int row, ExtraInfo x) {
         List<string> first = new List<string>();
         string[] street = r.Query.CardExtra(row);
         if (street != null) first.AddRange(street);
@@ -6318,10 +6910,28 @@ public class BatchSearch : Form {
         else if (it.Res != null && it.Res.Tariff.ContainsKey(it.Row)) e.CellStyle.BackColor = ResultColumns.TariffColor;
     }
 
+    internal void OpenCardAt(int index) { OpenCard(index); }
+
     void OpenCard(int index) {
         if (index < 0 || index >= items.Count || items[index].Row < 0) return;
         Item it = items[index];
-        ResultColumns.ShowCard(this, it.Res, it.Row, live.Extra);
+        int pos = index;
+        // PgUp/PgDn в карточке - следующий найденный абонент итога
+        CardMove move = delegate(int delta, out SearchResult rr, out int row) {
+            rr = null;
+            row = -1;
+            int p = pos;
+            do {
+                p += delta;
+                if (p < 0 || p >= items.Count) return false;
+            } while (items[p].Row < 0 || items[p].Res == null);
+            pos = p;
+            rr = items[p].Res;
+            row = items[p].Row;
+            if (p < grid.RowCount) grid.CurrentCell = grid.Rows[p].Cells[0];
+            return true;
+        };
+        ResultColumns.ShowCard(this, it.Res, it.Row, live, move);
     }
 
     void Export() {
