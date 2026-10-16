@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
+using System.Drawing.Text;
 using System.Drawing;
 using System.Globalization;
 using System.IO.Compression;
@@ -1603,7 +1604,7 @@ public static class Mrz {
     public const int GW = 16, GH = 20;
     public const int TV = 9;        // видов образца у каждого знака: толщина штриха x размытие
 
-    class Comp { public int X0, Y0, X1, Y1, N; public double Cx { get { return (X0 + X1) / 2.0; } } public double Cy { get { return (Y0 + Y1) / 2.0; } } public int Wd { get { return X1 - X0 + 1; } } public int Ht { get { return Y1 - Y0 + 1; } } }
+    public class Comp { public int X0, Y0, X1, Y1, N; public double Cx { get { return (X0 + X1) / 2.0; } } public double Cy { get { return (Y0 + Y1) / 2.0; } } public int Wd { get { return X1 - X0 + 1; } } public int Ht { get { return Y1 - Y0 + 1; } } }
 
     // ---------- загрузка: поворот по EXIF, уменьшение ----------
 
@@ -1649,18 +1650,23 @@ public static class Mrz {
         return b;
     }
 
-    public static MrzResult Read(string path) {
-        // строки ищем на уменьшенном снимке, а читаем по полному - мелкие знаки так чётче
-        GrayImage g, full;
+    // снимок целиком (для чтения знаков) и уменьшенный (для поиска строк)
+    public static void LoadPair(string path, out GrayImage full, out GrayImage small) {
         lock (Gdi)
         using (Bitmap b = Load(path, 4200)) {
             full = GrayImage.FromBitmap(b);
             double k = Math.Min(1.0, 2400.0 / Math.Max(b.Width, b.Height));
             using (Bitmap sm = new Bitmap(Math.Max(1, (int)(b.Width * k)), Math.Max(1, (int)(b.Height * k)), PixelFormat.Format24bppRgb)) {
                 using (Graphics gr = Graphics.FromImage(sm)) { gr.InterpolationMode = InterpolationMode.HighQualityBilinear; gr.DrawImage(b, 0, 0, sm.Width, sm.Height); }
-                g = GrayImage.FromBitmap(sm);
+                small = GrayImage.FromBitmap(sm);
             }
         }
+    }
+
+    public static MrzResult Read(string path) {
+        // строки ищем на уменьшенном снимке, а читаем по полному - мелкие знаки так чётче
+        GrayImage g, full;
+        LoadPair(path, out full, out g);
         MrzResult best = null;
         StringBuilder info = new StringBuilder();
         for (int rot = 0; rot < 4; rot++) {
@@ -1709,7 +1715,7 @@ public static class Mrz {
         return Decode(s1, s2);
     }
 
-    static bool[] Binarize(GrayImage g) {
+    public static bool[] Binarize(GrayImage g) {
         int w = g.W, h = g.H, r = Math.Max(10, Math.Min(w, h) / 50);
         int[] sum = new int[(w + 1) * (h + 1)];
         for (int y = 0; y < h; y++) {
@@ -1736,7 +1742,7 @@ public static class Mrz {
     static int Root(int[] p, int a) { while (p[a] != a) { p[a] = p[p[a]]; a = p[a]; } return a; }
 
     // связные области (8 соседей)
-    static List<Comp> Components(bool[] dark, int w, int h) {
+    public static List<Comp> Components(bool[] dark, int w, int h) {
         int[] lab = new int[w * h];
         List<int> parent = new List<int>();
         parent.Add(0);
@@ -1807,7 +1813,7 @@ public static class Mrz {
         return lines;
     }
 
-    static List<Comp> Scale(List<Comp> line, double f) {
+    public static List<Comp> Scale(List<Comp> line, double f) {
         List<Comp> r = new List<Comp>();
         foreach (Comp c in line) {
             Comp d = new Comp();
@@ -3021,6 +3027,1337 @@ public static class MrzData {
         "0.971;0.000;0.627",
         "0.884;-0.043;0.787",
     };
+}
+
+// Имена и отчества (по-русски, заглавными) - для проверки распознанного с паспорта.
+// Имени нет в списке - не беда: тогда программа подставит распознанное, но попросит проверить.
+public static class NamesData {
+    public const string Female =
+        "АВГУСТА АГАТА АГНИЯ АДА АДЕЛИНА АДЕЛЬ АКСИНЬЯ АЛЕВТИНА АЛЕКСАНДРА АЛЕНА АЛЁНА АЛЕСЯ АЛИНА АЛИСА АЛЛА АЛЬБИНА " +
+        "АМЕЛИЯ АНАСТАСИЯ АНГЕЛИНА АНЖЕЛА АНЖЕЛИКА АННА АНТОНИНА АРИАДНА АРИНА АСЯ БЕАТА БОГДАНА БРОНИСЛАВА ВАЛЕНТИНА ВАЛЕРИЯ " +
+        "ВАНДА ВАРВАРА ВАСИЛИСА ВЕРА ВЕРОНИКА ВИКТОРИЯ ВИОЛЕТТА ВИТАЛИНА ВЛАДА ВЛАДИСЛАВА ГАЛИНА ГЕНОВЕФА ГЛАФИРА ДАНА " +
+        "ДАНУТА ДАРИНА ДАРЬЯ ДАРИЯ ДИАНА ДИНА ДОМИНИКА ЕВА ЕВГЕНИЯ ЕВДОКИЯ ЕКАТЕРИНА ЕЛЕНА ЕЛИЗАВЕТА ЕФРОСИНЬЯ ЖАННА ЗИНАИДА " +
+        "ЗЛАТА ЗОЯ ИВАННА ИЗАБЕЛЛА ИНГА ИНЕССА ИННА ИРИНА ИРМА ЯДВИГА ЯНА ЯНИНА ЯРОСЛАВА ЮЗЕФА ЮЛИАНА ЮЛИЯ ЭВЕЛИНА ЭЛЕОНОРА " +
+        "ЭЛИНА ЭЛЛА ЭЛЬВИРА ЭМИЛИЯ ЭММА ТАИСИЯ ТАМАРА ТАТЬЯНА ТАТИАНА ТЕРЕЗА УЛЬЯНА ФАИНА ФЕОДОРА СВЕТЛАНА СНЕЖАНА СОФИЯ " +
+        "СОФЬЯ СТАНИСЛАВА СТЕФАНИЯ СТЕФАНИДА РАИСА РЕГИНА РИММА РОЗА РУСЛАНА ОКСАНА ОЛЕСЯ ОЛЬГА ПАВЛИНА ПОЛИНА ПРАСКОВЬЯ " +
+        "НАДЕЖДА НАТАЛЬЯ НАТАЛИЯ НЕЛЛИ НИКА НИНА НОННА МАЙЯ МАРГАРИТА МАРИАННА МАРИНА МАРИЯ МАРЬЯ МАРЬЯНА МАРТА МИЛАНА " +
+        "МИЛЕНА МИРОСЛАВА ЛАРИСА ЛЕОКАДИЯ ЛЕСЯ ЛИДИЯ ЛИЛИЯ ЛИЯ ЛЮБОВЬ ЛЮДМИЛА КАРИНА КАРОЛИНА КИРА КЛАВДИЯ КРИСТИНА КСЕНИЯ " +
+        "ЧЕСЛАВА ЭЛЕНА ЕВГЕНИЯ АЛЬБЕРТИНА ВЕНЕРА ЯНИНА АУРИКА ВИОЛЕТА ВЕРОНИКА ВИТА ДАЯНА МИЯ ЕСЕНИЯ";
+
+    public const string Male =
+        "АЛЕКСАНДР АЛЕКСЕЙ АЛЕС АЛЬБЕРТ АНАТОЛИЙ АНДРЕЙ АНТОН АРКАДИЙ АРСЕНИЙ АРТЕМ АРТЁМ АРТУР АФАНАСИЙ БОГДАН БОРИС " +
+        "БРОНИСЛАВ ВАДИМ ВАЛЕНТИН ВАЛЕРИЙ ВАСИЛИЙ ВЕНИАМИН ВИКТОР ВИТАЛИЙ ВИТОЛЬД ВЛАДИМИР ВЛАДИСЛАВ ВЯЧЕСЛАВ ГЕННАДИЙ " +
+        "ГЕОРГИЙ ГЕРМАН ГЛЕБ ГРИГОРИЙ ДАВИД ДАНИИЛ ДАНИЛ ДАНИЛА ДЕНИС ДМИТРИЙ ЕВГЕНИЙ ЕГОР ЕМЕЛЬЯН ЕФИМ ЗАХАР ЗЕНОН ЗИНОВИЙ " +
+        "ИВАН ИГНАТ ИГОРЬ ИЛЬЯ ИННОКЕНТИЙ ИОСИФ КАЗИМИР КИРИЛЛ КОНСТАНТИН КУЗЬМА ЛАВРЕНТИЙ ЛЕВ ЛЕОНИД ЛЕОНТИЙ ЛУКА МАКАР " +
+        "МАКСИМ МАРК МАТВЕЙ МИРОН МИРОСЛАВ МИХАИЛ НАЗАР НИКИТА НИКОЛАЙ ОЛЕГ ОСИП ПАВЕЛ ПЕТР ПЁТР ПЛАТОН ПРОХОР РОДИОН РОМАН " +
+        "РОСТИСЛАВ РУДОЛЬФ РУСЛАН САВВА СВЯТОСЛАВ СЕМЕН СЕМЁН СЕРГЕЙ СТАНИСЛАВ СТЕПАН ТАРАС ТИМОФЕЙ ТИМУР ТИХОН ФЕДОР ФЁДОР " +
+        "ФЕЛИКС ФИЛИПП ФОМА ЭДУАРД ЭДУАРД ЭМИЛЬ ЭРИК ЮЛИАН ЮЗЕФ ЮРИЙ ЯКОВ ЯН ЯРОСЛАВ ЧЕСЛАВ ВЛАДИЛЕН ГЕНРИХ ДАНИЭЛЬ " +
+        "МИХАЙЛО ЕЛИСЕЙ АРСЕН ВИКЕНТИЙ ГАВРИИЛ ДАВЫД ИЗРАИЛЬ КЛИМ ЛЕОНАРД НЕСТОР ОСКАР РАФАЭЛЬ СЕВАСТЬЯН ТРОФИМ ФРАНЦ";
+
+    // отчества от необычных имён (остальные - по правилам)
+    static readonly string[] Special = {
+        "ИЛЬЯ=ИЛЬИЧ,ИЛЬИНИЧНА", "НИКИТА=НИКИТИЧ,НИКИТИЧНА", "КУЗЬМА=КУЗЬМИЧ,КУЗЬМИНИЧНА", "ФОМА=ФОМИЧ,ФОМИНИЧНА",
+        "ЛУКА=ЛУКИЧ,ЛУКИНИЧНА", "САВВА=САВВИЧ,САВВИЧНА", "ДАНИЛА=ДАНИЛОВИЧ,ДАНИЛОВНА", "ПАВЕЛ=ПАВЛОВИЧ,ПАВЛОВНА",
+        "ЛЕВ=ЛЬВОВИЧ,ЛЬВОВНА", "ПЁТР=ПЕТРОВИЧ,ПЕТРОВНА", "ЯКОВ=ЯКОВЛЕВИЧ,ЯКОВЛЕВНА", "МИХАИЛ=МИХАЙЛОВИЧ,МИХАЙЛОВНА",
+        "АРТЁМ=АРТЕМОВИЧ,АРТЕМОВНА", "СЕМЁН=СЕМЕНОВИЧ,СЕМЕНОВНА", "ФЁДОР=ФЕДОРОВИЧ,ФЕДОРОВНА", "МИХАЙЛО=МИХАЙЛОВИЧ,МИХАЙЛОВНА" };
+
+    static List<string> female, male, patronymic;
+    static readonly object sync = new object();
+
+    public static List<string> FemaleNames { get { Build(); return female; } }
+    public static List<string> MaleNames { get { Build(); return male; } }
+    public static List<string> Patronymics { get { Build(); return patronymic; } }
+
+    static void Build() {
+        lock (sync) {
+            if (patronymic != null) return;
+            female = Words(Female);
+            male = Words(Male);
+            List<string> p = new List<string>();
+            Dictionary<string, string[]> sp = new Dictionary<string, string[]>();
+            foreach (string s in Special) {
+                int eq = s.IndexOf('=');
+                sp[s.Substring(0, eq)] = s.Substring(eq + 1).Split(',');
+            }
+            foreach (string m in male) {
+                string[] f;
+                if (sp.TryGetValue(m, out f)) { Add(p, f[0]); Add(p, f[1]); continue; }
+                foreach (string stem in Stems(m)) { Add(p, stem + "ИЧ"); Add(p, stem + "НА"); }
+            }
+            patronymic = p;
+        }
+    }
+
+    // основа отчества с «-ВИЧ»: СЕРГЕЙ -> СЕРГЕЕВ, ИВАН -> ИВАНОВ, ДМИТРИЙ -> ДМИТРИЕВ (и ДМИТРЬЕВ), ИГОРЬ -> ИГОРЕВ
+    static List<string> Stems(string m) {
+        List<string> r = new List<string>();
+        if (m.EndsWith("ИЙ")) {
+            string b = m.Substring(0, m.Length - 2);
+            r.Add(b + "ЬЕВ");
+            r.Add(b + "ИЕВ");
+        } else if (m.EndsWith("ЕЙ") || m.EndsWith("АЙ")) r.Add(m.Substring(0, m.Length - 1) + "ЕВ");
+        else if (m.EndsWith("Ь")) r.Add(m.Substring(0, m.Length - 1) + "ЕВ");
+        else if (m.EndsWith("А") || m.EndsWith("Я") || m.EndsWith("О")) r.Add(m.Substring(0, m.Length - 1) + "ОВ");
+        else r.Add(m + "ОВ");
+        return r;
+    }
+
+    static void Add(List<string> l, string s) { if (!l.Contains(s)) l.Add(s); }
+
+    static List<string> Words(string s) {
+        List<string> l = new List<string>();
+        foreach (string w in s.Split(new char[] { ' ' }, StringSplitOptions.RemoveEmptyEntries)) Add(l, w);
+        return l;
+    }
+}
+
+// Предпоследняя страница паспорта РБ: Ф.И.О. (по-белорусски / по-русски) и идентификационный номер.
+// Своё распознавание, без сторонних программ: буквы - жирный рубленый шрифт (как Arial), образцы рисуются
+// шрифтами этого компьютера; номер и даты - OCR-B (образцы те же, что для строк «<<<»).
+
+// Образцы знаков: у каждого знака несколько видов (шрифт x размытие)
+public class GlyphSet {
+    public readonly string Chars;
+    readonly List<float[]> grids = new List<float[]>();     // нормированы: среднее 0, длина 1
+    readonly List<int> owner = new List<int>();
+    readonly List<double> relH = new List<double>(), relY = new List<double>(), asp = new List<double>();
+    public int Fonts;
+
+    GlyphSet(string chars) { Chars = chars; }
+
+    static float[] Norm(float[] g) {
+        double m = 0;
+        foreach (float v in g) m += v;
+        m /= g.Length;
+        double ss = 0;
+        foreach (float v in g) ss += (v - m) * (v - m);
+        double k = ss > 1e-9 ? 1 / Math.Sqrt(ss) : 0;
+        float[] r = new float[g.Length];
+        for (int i = 0; i < g.Length; i++) r[i] = (float)((g[i] - m) * k);
+        return r;
+    }
+
+    void Add(int ch, float[] grid, double h, double y, double a) {
+        grids.Add(Norm(grid));
+        owner.Add(ch);
+        relH.Add(h);
+        relY.Add(y);
+        asp.Add(a);
+    }
+
+    // оценка каждого знака (лучший из его видов): сходство рисунка минус штраф за размер, положение, пропорции
+    public double[] Score(float[] grid, double h, double y, double a) {
+        float[] g = Norm(grid);
+        double[] best = new double[Chars.Length];
+        for (int i = 0; i < best.Length; i++) best[i] = -9;
+        for (int t = 0; t < grids.Count; t++) {
+            float[] tg = grids[t];
+            double c = 0;
+            for (int i = 0; i < g.Length; i++) c += g[i] * tg[i];
+            double s = c - 1.0 * Math.Abs(h - relH[t]) - 0.6 * Math.Abs(y - relY[t]) - 0.3 * Math.Abs(Math.Log(a / asp[t]));
+            if (s > best[owner[t]]) best[owner[t]] = s;
+        }
+        return best;
+    }
+
+    // образцы рисуются жирными шрифтами этого компьютера (каких нет - пропускаются)
+    public static GlyphSet FromFonts(string chars, string[] families) {
+        GlyphSet s = new GlyphSet(chars);
+        const int W = 200, H = 200;
+        List<float[]> seen = new List<float[]>();
+        lock (Mrz.Gdi) {
+            foreach (string fam in families) {
+                Font f = null;
+                try { f = new Font(fam, 64f, FontStyle.Bold, GraphicsUnit.Pixel); } catch { f = null; }
+                if (f == null) continue;
+                using (f) {
+                    int x0, y0, x1, y1;
+                    if (!Box(Render(f, "Н", W, H), W, H, out x0, out y0, out x1, out y1)) continue;
+                    double cap = y1 - y0 + 1, capMid = (y0 + y1) / 2.0;
+                    // тот же шрифт под другим именем (Windows подставляет замену) - второй раз не берём
+                    float[] probe = Probe(f, W, H);
+                    bool dup = false;
+                    foreach (float[] p in seen) {
+                        double c = 0;
+                        for (int i = 0; i < p.Length; i++) c += p[i] * probe[i];
+                        if (c > 0.995) dup = true;
+                    }
+                    if (dup) continue;
+                    seen.Add(probe);
+                    s.Fonts++;
+                    for (int k = 0; k < chars.Length; k++) {
+                        float[] ink = Render(f, chars[k].ToString(), W, H);
+                        foreach (double sigma in new double[] { 0, 0.045, 0.09 }) {
+                            float[] b = sigma > 0 ? Blur(ink, W, H, sigma * cap) : ink;
+                            if (!Box(b, W, H, out x0, out y0, out x1, out y1)) continue;
+                            s.Add(k, Mrz.Grid(b, W, x0, y0, x1, y1), (y1 - y0 + 1) / cap, ((y0 + y1) / 2.0 - capMid) / cap, (x1 - x0 + 1.0) / (y1 - y0 + 1));
+                        }
+                    }
+                }
+            }
+        }
+        return s;
+    }
+
+    static float[] Probe(Font f, int W, int H) {
+        List<float> all = new List<float>();
+        foreach (string t in new string[] { "Ж", "Я", "Ю" }) {
+            float[] ink = Render(f, t, W, H);
+            int x0, y0, x1, y1;
+            if (Box(ink, W, H, out x0, out y0, out x1, out y1)) all.AddRange(Mrz.Grid(ink, W, x0, y0, x1, y1));
+            all.Add((float)(x1 - x0 + 1) / (y1 - y0 + 1));
+        }
+        return Norm(all.ToArray());
+    }
+
+    static float[] Render(Font f, string text, int W, int H) {
+        using (Bitmap b = new Bitmap(W, H, PixelFormat.Format24bppRgb)) {
+            using (Graphics g = Graphics.FromImage(b)) {
+                g.Clear(Color.White);
+                g.TextRenderingHint = TextRenderingHint.AntiAlias;
+                g.DrawString(text, f, Brushes.Black, 40, 30);
+            }
+            GrayImage gi = GrayImage.FromBitmap(b);
+            float[] ink = new float[W * H];
+            for (int i = 0; i < ink.Length; i++) ink[i] = 1 - gi.P[i] / 255f;
+            return ink;
+        }
+    }
+
+    public static bool Box(float[] ink, int w, int h, out int x0, out int y0, out int x1, out int y1) {
+        x0 = w; y0 = h; x1 = -1; y1 = -1;
+        for (int y = 0; y < h; y++)
+            for (int x = 0; x < w; x++)
+                if (ink[y * w + x] > 0.45f) {
+                    if (x < x0) x0 = x;
+                    if (x > x1) x1 = x;
+                    if (y < y0) y0 = y;
+                    if (y > y1) y1 = y;
+                }
+        return x1 >= 0;
+    }
+
+    // размытие по Гауссу (как у снимка телефоном) - только вокруг самого знака
+    static float[] Blur(float[] src, int w, int h, double sigma) {
+        int r = Math.Max(1, (int)Math.Ceiling(sigma * 3));
+        int bx0 = w, by0 = h, bx1 = -1, by1 = -1;
+        for (int y = 0; y < h; y++)
+            for (int x = 0; x < w; x++)
+                if (src[y * w + x] > 0.01f) { if (x < bx0) bx0 = x; if (x > bx1) bx1 = x; if (y < by0) by0 = y; if (y > by1) by1 = y; }
+        float[] dst = new float[w * h];
+        if (bx1 < 0) return dst;
+        bx0 = Math.Max(0, bx0 - r); by0 = Math.Max(0, by0 - r); bx1 = Math.Min(w - 1, bx1 + r); by1 = Math.Min(h - 1, by1 + r);
+        double[] k = new double[2 * r + 1];
+        double sum = 0;
+        for (int i = -r; i <= r; i++) { k[i + r] = Math.Exp(-i * i / (2 * sigma * sigma)); sum += k[i + r]; }
+        for (int i = 0; i < k.Length; i++) k[i] /= sum;
+        float[] tmp = new float[w * h];
+        for (int y = by0; y <= by1; y++)
+            for (int x = bx0; x <= bx1; x++) {
+                double s = 0;
+                for (int i = -r; i <= r; i++) { int xx = x + i; if (xx >= 0 && xx < w) s += src[y * w + xx] * k[i + r]; }
+                tmp[y * w + x] = (float)s;
+            }
+        for (int y = by0; y <= by1; y++)
+            for (int x = bx0; x <= bx1; x++) {
+                double s = 0;
+                for (int i = -r; i <= r; i++) { int yy = y + i; if (yy >= 0 && yy < h) s += tmp[yy * w + x] * k[i + r]; }
+                dst[y * w + x] = (float)s;
+            }
+        return dst;
+    }
+
+    // образцы OCR-B (из тех же данных, что для строк «<<<»)
+    public static GlyphSet Ocrb(string chars) {
+        GlyphSet s = new GlyphSet(chars);
+        int size = Mrz.GW * Mrz.GH;
+        for (int n = 0; n < chars.Length; n++) {
+            int k = Mrz.Chars.IndexOf(chars[n]);
+            string[] p = MrzData.Shapes[k].Split(';');
+            double rh = double.Parse(p[0], System.Globalization.CultureInfo.InvariantCulture);
+            double ry = double.Parse(p[1], System.Globalization.CultureInfo.InvariantCulture);
+            double a = double.Parse(p[2], System.Globalization.CultureInfo.InvariantCulture);
+            for (int v = 0; v < Mrz.TV; v++) {
+                float[] g = new float[size];
+                for (int i = 0; i < size; i++) g[i] = Convert.ToInt32(MrzData.Grids[(k * Mrz.TV + v) * size + i].ToString(), 16) / 15f;
+                s.Add(n, g, rh, ry, a);
+            }
+        }
+        s.Fonts = 1;
+        return s;
+    }
+}
+
+// Распознанный знак строки
+public class Glyph {
+    public char C;
+    public double S, S2;          // оценка лучшего и второго варианта
+    public char C2;
+    public double[] Sc;           // оценки всех знаков набора
+    public bool Space;            // перед знаком пробел
+    public int X0, X1;
+}
+
+public class PageResult {
+    public string Surname = "", Name = "", Patronymic = "";          // по-русски, заглавными
+    public string SurnameBy = "", NameBy = "", PatronymicBy = "";    // по-белорусски
+    public bool SurnameOk, NameOk, PatronymicOk;                      // уверены
+    public bool NameKnown;                                            // имя есть в списке имён
+    public string Id = "";                                            // идентификационный номер
+    public bool IdOk;
+    public string Birth = "";                                         // дата рождения ДД.ММ.ГГГГ
+    public bool Found;                                                // похоже на страницу с данными
+    public string Info = "";
+    public List<string> Lines = new List<string>();                   // для проверки программы
+
+    public bool FioOk { get { return SurnameOk && NameOk && PatronymicOk; } }
+
+    public string Fio {
+        get { return (Title(Surname) + " " + Title(Name) + " " + Title(Patronymic)).Trim(); }
+    }
+
+    // «АБАКУНЧИК-ПЕТРОВА» -> «Абакунчик-Петрова»
+    public static string Title(string s) {
+        StringBuilder sb = new StringBuilder();
+        bool start = true;
+        foreach (char c in s) {
+            sb.Append(start ? char.ToUpper(c) : char.ToLower(c));
+            start = c == '-' || c == ' ';
+        }
+        return sb.ToString();
+    }
+}
+
+public static class PassportPage {
+    // рубленые шрифты, которые есть в Windows 7; в паспорте - похожий на Arial
+    public static string[] Families = { "Arial", "Tahoma", "Verdana", "Segoe UI", "Calibri", "Trebuchet MS", "Franklin Gothic Medium", "Microsoft Sans Serif" };
+    public static string DebugDir;      // для проверки программы: картинки строк с разрезами
+    public const string SansChars = "АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯІЎ0123456789/-.,";
+    const string OcrbChars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    static GlyphSet sans, ocrb;
+    static readonly object sync = new object();
+
+    public static void Init() {
+        lock (sync) {
+            if (sans != null) return;
+            ocrb = GlyphSet.Ocrb(OcrbChars);
+            sans = GlyphSet.FromFonts(SansChars, Families);
+        }
+    }
+
+    public static int FontCount { get { Init(); return sans.Fonts; } }
+
+    class Line {
+        public List<Mrz.Comp> Comps;
+        public double Cap, Y;
+        public int X0;
+        public List<Glyph> G;
+        public string Text = "";
+    }
+
+    // ---------- строки текста на странице ----------
+
+    static List<Line> FindLines(GrayImage g) {
+        bool[] dark = Mrz.Binarize(g);
+        List<Mrz.Comp> cand = new List<Mrz.Comp>();
+        foreach (Mrz.Comp c in Mrz.Components(dark, g.W, g.H))
+            // слипшиеся буквы (размытый жирный шрифт) - широкая, но плотная область; линии узора - редкие
+            if (c.Ht >= 8 && c.Ht <= g.H / 12 && c.N >= 12 && (c.Wd <= 4 * c.Ht || c.Wd <= 40 * c.Ht && c.N >= 0.2 * c.Wd * c.Ht)) cand.Add(c);
+        cand.Sort(delegate(Mrz.Comp a, Mrz.Comp b) { return a.X0.CompareTo(b.X0); });
+        List<Line> lines = new List<Line>();
+        bool[] used = new bool[cand.Count];
+        for (int s = 0; s < cand.Count; s++) {
+            if (used[s]) continue;
+            List<int> chain = new List<int>();
+            chain.Add(s);
+            int cur = s;
+            double href = cand[s].Ht, yref = cand[s].Cy, slope = 0, xref = cand[s].Cx;
+            while (true) {
+                Mrz.Comp c = cand[cur];
+                int next = -1;
+                for (int j = cur + 1; j < cand.Count; j++) {
+                    Mrz.Comp d = cand[j];
+                    if (d.X0 > c.X1 + 1.4 * href) break;
+                    if (used[j] || d.X0 < c.X0 + 0.3 * c.Wd) continue;
+                    if (Math.Abs(d.Cy - (yref + slope * (d.Cx - xref))) > 0.45 * href) continue;
+                    if (d.Ht < 0.3 * href || d.Ht > 1.7 * href) continue;
+                    if (next < 0 || d.X0 < cand[next].X0) next = j;
+                }
+                if (next < 0) break;
+                chain.Add(next);
+                cur = next;
+                Mrz.Comp n = cand[next];
+                // строка может идти с наклоном: следующий знак ищем по продолжению линии
+                if (n.Ht >= 0.7 * href && n.Ht <= 1.3 * href) {
+                    double dxs = n.Cx - xref;
+                    if (dxs > 0.5 * href) slope = 0.6 * slope + 0.4 * Math.Max(-0.4, Math.Min(0.4, (n.Cy - yref) / dxs));
+                    yref = n.Cy;
+                    xref = n.Cx;
+                }
+                href = Math.Max(href, Math.Min(n.Ht, href * 1.4));
+            }
+            if (chain.Count < 4) continue;
+            Line l = new Line();
+            l.Comps = new List<Mrz.Comp>();
+            foreach (int i in chain) { used[i] = true; l.Comps.Add(cand[i]); }
+            List<int> hs = new List<int>();
+            foreach (Mrz.Comp c in l.Comps) hs.Add(c.Ht);
+            hs.Sort();
+            l.Cap = hs[(int)(hs.Count * 0.8)];
+            // строка заглавных: почти все знаки высотой с заглавную (у подписей полей - строчные)
+            int tall = 0;
+            double ys = 0;
+            foreach (Mrz.Comp c in l.Comps) if (c.Ht >= 0.75 * l.Cap && c.Ht <= 1.3 * l.Cap) { tall++; ys += c.Cy; }
+            if (tall < 0.7 * l.Comps.Count) continue;
+            l.Y = ys / tall;
+            l.X0 = l.Comps[0].X0;
+            lines.Add(l);
+        }
+        lines.Sort(delegate(Line a, Line b) { return a.Y.CompareTo(b.Y); });
+        return lines;
+    }
+
+    // ---------- строка -> знаки ----------
+
+    static int[] Label(bool[] bin, int w, int h, out int count) {
+        int[] lab = new int[w * h];
+        count = 0;
+        int[] stack = new int[w * h];
+        for (int i = 0; i < bin.Length; i++) {
+            if (!bin[i] || lab[i] != 0) continue;
+            count++;
+            int sp = 0;
+            stack[sp++] = i;
+            lab[i] = count;
+            while (sp > 0) {
+                int p = stack[--sp], x = p % w, y = p / w;
+                for (int dy = -1; dy <= 1; dy++)
+                    for (int dx = -1; dx <= 1; dx++) {
+                        int xx = x + dx, yy = y + dy;
+                        if (xx < 0 || yy < 0 || xx >= w || yy >= h) continue;
+                        int q = yy * w + xx;
+                        if (bin[q] && lab[q] == 0) { lab[q] = count; stack[sp++] = q; }
+                    }
+            }
+        }
+        return lab;
+    }
+
+
+    static Strip ReadLine(GrayImage g, Line line, GlyphSet set) {
+        double cap = line.Cap;
+        // наклон строки - по центрам знаков высотой с заглавную
+        double sx = 0, sy = 0, sxx = 0, sxy = 0;
+        int n = 0;
+        foreach (Mrz.Comp c in line.Comps)
+            if (c.Ht >= 0.75 * cap && c.Ht <= 1.3 * cap) { sx += c.Cx; sy += c.Cy; sxx += c.Cx * c.Cx; sxy += c.Cx * c.Cy; n++; }
+        if (n < 3) return null;
+        double den = n * sxx - sx * sx;
+        double b = Math.Abs(den) < 1e-9 ? 0 : (n * sxy - sx * sy) / den, a = (sy - b * sx) / n;
+        double norm = Math.Sqrt(1 + b * b), dx = 1 / norm, dy = b / norm;
+        double x0 = line.Comps[0].X0 - 0.8 * cap, x1 = line.Comps[line.Comps.Count - 1].X1 + 0.8 * cap;
+        int L = (int)((x1 - x0) * norm), SH = (int)(2.4 * cap);
+        if (L < 10 || SH < 10) return null;
+        double px = x0, py = a + b * x0;
+        float[] strip = new float[L * SH];
+        for (int v = 0; v < SH; v++)
+            for (int u = 0; u < L; u++) {
+                double off = v - SH / 2.0;
+                strip[v * L + u] = g.Sample(px + u * dx - off * dy, py + u * dy + off * dx);
+            }
+        float[] sorted = (float[])strip.Clone();
+        Array.Sort(sorted);
+        float bg = sorted[(int)(sorted.Length * 0.8)], fg = sorted[(int)(sorted.Length * 0.02)];
+        if (bg - fg < 25) return null;
+        float[] ink = new float[strip.Length];
+        bool[] bin = new bool[strip.Length];
+        // только полоса строки (с запасом на кратки и хвосты букв): соседние строки не слипаются с нашими буквами
+        int bandTop = Math.Max(0, (int)(SH / 2.0 - 0.8 * cap)), bandBot = Math.Min(SH - 1, (int)(SH / 2.0 + 0.8 * cap));
+        for (int i = 0; i < strip.Length; i++) {
+            float k = (bg - strip[i]) / (bg - fg);
+            ink[i] = k < 0 ? 0 : k > 1 ? 1 : k;
+            int row = i / L;
+            bin[i] = ink[i] > 0.45f && row >= bandTop && row <= bandBot;
+        }
+        int count;
+        int[] lab = Label(bin, L, SH, out count);
+        int[] cx0 = new int[count + 1], cx1 = new int[count + 1], cy0 = new int[count + 1], cy1 = new int[count + 1], cn = new int[count + 1];
+        for (int i = 1; i <= count; i++) { cx0[i] = L; cy0[i] = SH; cx1[i] = -1; cy1[i] = -1; }
+        for (int y = 0; y < SH; y++)
+            for (int x = 0; x < L; x++) {
+                int l = lab[y * L + x];
+                if (l == 0) continue;
+                if (x < cx0[l]) cx0[l] = x;
+                if (x > cx1[l]) cx1[l] = x;
+                if (y < cy0[l]) cy0[l] = y;
+                if (y > cy1[l]) cy1[l] = y;
+                cn[l]++;
+            }
+        // знаки строки: задевают середину полосы; чужие строки сверху и снизу - мимо
+        double mid = SH / 2.0;
+        bool[] keep = new bool[count + 1];
+        List<double> hts = new List<double>();
+        for (int i = 1; i <= count; i++) {
+            if (cn[i] < 4) continue;
+            if (cy1[i] < mid - 0.45 * cap || cy0[i] > mid + 0.45 * cap) continue;
+            // обрезок буквы соседней строки у края полосы; край страницы, тень
+            if (cy0[i] == bandTop && (cy0[i] + cy1[i]) / 2.0 < mid - 0.3 * cap) continue;
+            if (cy0[i] == bandTop && cy1[i] == bandBot) continue;
+            if (cx0[i] == 0 || cx1[i] == L - 1) continue;
+            if (cy1[i] == bandBot && (cy0[i] + cy1[i]) / 2.0 > mid + 0.3 * cap) continue;
+            if (cy1[i] - cy0[i] + 1 > 1.9 * cap) continue;
+            keep[i] = true;
+            double h = cy1[i] - cy0[i] + 1;
+            if (h > 0.7 * cap && h < 1.3 * cap) hts.Add(h);
+        }
+        // мелочь над и под строкой (кратка над Й, Ў, точки Ё) - тоже своя, если рядом с буквой
+        for (int i = 1; i <= count; i++) {
+            if (keep[i] || cn[i] < 3) continue;
+            double h = cy1[i] - cy0[i] + 1, w = cx1[i] - cx0[i] + 1;
+            if (h > 0.45 * cap || w > 0.9 * cap) continue;
+            if (cy1[i] < mid - 1.0 * cap || cy0[i] > mid + 1.0 * cap) continue;
+            if (cy0[i] == bandTop || cy1[i] == bandBot) continue;
+            keep[i] = true;
+        }
+        if (hts.Count < 2) return null;
+        hts.Sort();
+        double capS = hts[hts.Count / 2];
+        double ym = 0; int ymn = 0;
+        for (int i = 1; i <= count; i++) {
+            double h = cy1[i] - cy0[i] + 1;
+            if (keep[i] && h > 0.85 * capS && h < 1.15 * capS) { ym += (cy0[i] + cy1[i]) / 2.0; ymn++; }
+        }
+        if (ymn > 0) mid = ym / ymn;
+        // только свои знаки: области строки
+        bool[] own = keep;
+        float[] inkOwn = new float[ink.Length];
+        for (int i = 0; i < ink.Length; i++) inkOwn[i] = lab[i] != 0 ? (own[lab[i]] ? ink[i] : 0) : Math.Min(ink[i], 0.44f);
+        // разрезы: по столбцам с краской - промежутки между буквами и провалы внутри слипшихся букв
+        double[] col = new double[L];
+        int r0 = Math.Max(0, (int)(mid - 0.55 * capS)), r1 = Math.Min(SH - 1, (int)(mid + 0.55 * capS));
+        for (int x = 0; x < L; x++) {
+            double sum = 0;
+            for (int y = 0; y < SH; y++) {
+                float v = inkOwn[y * L + x];
+                if (v > 0.45f) sum += y >= r0 && y <= r1 ? v : 0.01;
+            }
+            col[x] = sum;
+        }
+        List<int> cuts = new List<int>();          // x разрезов по порядку
+        List<bool> gapAfter = new List<bool>();    // от этого разреза до следующего - пусто (промежуток)
+        List<int> gapW = new List<int>();
+        int xs = 0;
+        while (xs < L && col[xs] <= 0) xs++;
+        while (xs < L) {
+            int xe = xs;
+            while (xe < L && col[xe] > 0) xe++;             // краска: [xs, xe)
+            cuts.Add(xs); gapAfter.Add(false); gapW.Add(0);
+            int w = xe - xs;
+            if (w > 0.8 * capS) {
+                double mx = 0;
+                for (int x = xs; x < xe; x++) mx = Math.Max(mx, col[x]);
+                int minGap = Math.Max(2, (int)(0.18 * capS));
+                for (int x = xs + minGap; x < xe - minGap; x++) {
+                    if (col[x] > 0.35 * mx) continue;
+                    bool lm = true;
+                    for (int k = Math.Max(xs, x - minGap / 2); k <= Math.Min(xe - 1, x + minGap / 2); k++)
+                        if (col[k] < col[x] || (col[k] == col[x] && k < x)) lm = false;
+                    if (lm) { cuts.Add(x); gapAfter.Add(false); gapW.Add(0); }
+                }
+            }
+            int nx = xe;
+            while (nx < L && col[nx] <= 0) nx++;
+            cuts.Add(xe);                                     // дальше - промежуток до следующей краски
+            gapAfter.Add(true);
+            gapW.Add(nx < L ? nx - xe : 0);
+            xs = nx;
+        }
+        if (cuts.Count < 2) return null;
+        Strip st = new Strip();
+        st.Ink = inkOwn; st.L = L; st.SH = SH; st.Mid = mid; st.Cap = capS;
+        st.Cuts = cuts; st.Gap = gapAfter; st.GapW = gapW; st.Set = set;
+        st.G = Decode(st, null);
+        return st;
+    }
+
+    // строка, готовая к делению на знаки: полоса, разрезы, оценки уже проверенных кусков
+    class Strip {
+        public float[] Ink;
+        public int L, SH;
+        public double Mid, Cap;
+        public List<int> Cuts, GapW;
+        public List<bool> Gap;
+        public GlyphSet Set;
+        public Dictionary<long, Glyph> Cache = new Dictionary<long, Glyph>();
+        public List<Glyph> G;
+    }
+
+    // какие знаки могут стоять на этом месте строки (null - любые)
+    delegate string Alphabet(int x0, int x1);
+
+    const string ByLetters = "АБВГДЕЁЖЗІЙКЛМНОПРСТУЎФХЦЧШЫЬЭЮЯ-";      // в белорусском нет И, Щ, Ъ
+    const string RuLetters = "АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ-";     // в русском нет І, Ў
+
+    static Glyph Piece(Strip st, int i, int j) {
+        long key = (long)i * 100000 + j;
+        Glyph g;
+        if (!st.Cache.TryGetValue(key, out g)) {
+            g = Classify(st.Ink, st.L, st.SH, st.Cuts[i], st.Cuts[j], st.Mid, st.Cap, st.Set);
+            st.Cache[key] = g;
+        }
+        return g;
+    }
+
+    // знак с выбором только из разрешённых (копия - оценки общие)
+    static Glyph Restrict(Glyph g, string allowed, GlyphSet set) {
+        Glyph r = new Glyph();
+        r.Sc = g.Sc;
+        r.X0 = g.X0;
+        r.X1 = g.X1;
+        r.S = r.S2 = double.MinValue;
+        for (int k = 0; k < set.Chars.Length; k++) {
+            if (allowed != null && allowed.IndexOf(set.Chars[k]) < 0) continue;
+            double v = g.Sc[k];
+            if (v > r.S) { r.S2 = r.S; r.C2 = r.C; r.S = v; r.C = set.Chars[k]; }
+            else if (v > r.S2) { r.S2 = v; r.C2 = set.Chars[k]; }
+        }
+        return r.S == double.MinValue ? null : r;
+    }
+
+    // знак - от разреза до разреза внутри куска или через узкий промежуток (Ы, разорванные буквы);
+    // лучшее деление строки - где сумма (ширина x сходство) больше
+    static List<Glyph> Decode(Strip st, Alphabet abc) {
+        List<int> cuts = st.Cuts;
+        double capS = st.Cap;
+        int m = cuts.Count;
+        double[] best2 = new double[m];
+        int[] from = new int[m];
+        Glyph[] got = new Glyph[m];
+        for (int i = 0; i < m; i++) { best2[i] = double.MinValue; from[i] = -1; }
+        best2[0] = 0;
+        for (int j = 1; j < m; j++) {
+            // промежуток или соринка - без знака
+            if (best2[j - 1] > double.MinValue && best2[j - 1] > best2[j]) { best2[j] = best2[j - 1]; from[j] = j - 1; got[j] = null; }
+            if (st.Gap[j - 1]) continue;
+            for (int i = j - 1; i >= 0; i--) {
+                if (cuts[j] - cuts[i] > 1.7 * capS) break;
+                if (st.Gap[i]) {
+                    if (st.GapW[i] > 0.22 * capS) break;
+                    continue;
+                }
+                if (best2[i] == double.MinValue) continue;
+                Glyph raw = Piece(st, i, j);
+                if (raw == null) continue;
+                Glyph gl = Restrict(raw, abc == null ? null : abc(cuts[i], cuts[j]), st.Set);
+                if (gl == null) continue;
+                double v = best2[i] + (cuts[j] - cuts[i]) / capS * gl.S;
+                if (v > best2[j]) { best2[j] = v; from[j] = i; got[j] = gl; }
+            }
+        }
+        List<Glyph> res = new List<Glyph>();
+        int at = m - 1;
+        while (at > 0 && from[at] >= 0) {
+            if (got[at] != null) res.Add(got[at]);
+            at = from[at];
+        }
+        res.Reverse();
+        for (int i = 1; i < res.Count; i++) if (res[i].X0 - res[i - 1].X1 > 0.33 * capS) res[i].Space = true;
+        // « / » между белорусской и русской частью: отдельный знак между пробелами, похожий на косую черту
+        int sl = st.Set.Chars.IndexOf('/');
+        if (sl >= 0 && abc == null)
+            for (int i = 1; i + 1 < res.Count; i++)
+                if (res[i].Space && res[i + 1].Space && res[i].C != '/' && res[i].Sc[sl] > res[i].S - 0.2) {
+                    res[i].C2 = res[i].C; res[i].S2 = res[i].S; res[i].C = '/'; res[i].S = res[i].Sc[sl];
+                }
+        if (DebugDir != null) {
+            Dump(st.Ink, st.L, st.SH, cuts, res, st.Set);
+            StringBuilder sb = new StringBuilder("L" + dumpNo.ToString("000") + (abc != null ? " (2)" : "") + " cap=" + capS.ToString("0.0") + "\n");
+            foreach (Glyph gl in res) sb.Append("   " + gl.X0 + "-" + gl.X1 + " " + gl.C + " " + gl.S.ToString("0.00") + " / " + gl.C2 + " " + gl.S2.ToString("0.00") + "\n");
+            System.IO.File.AppendAllText(System.IO.Path.Combine(DebugDir, "log.txt"), sb.ToString());
+        }
+        return res;
+    }
+
+    static int dumpNo;
+    static void Dump(float[] ink, int L, int SH, List<int> cuts, List<Glyph> res, GlyphSet set) {
+        try {
+            using (Bitmap b = new Bitmap(L, SH + 4, PixelFormat.Format24bppRgb)) {
+                for (int y = 0; y < SH; y++)
+                    for (int x = 0; x < L; x++) { int v = 255 - (int)(255 * ink[y * L + x]); b.SetPixel(x, y, Color.FromArgb(v, v, v)); }
+                foreach (int c in cuts) if (c < L) for (int y = 0; y < 4; y++) b.SetPixel(c, SH + y, Color.Red);
+                foreach (Glyph g in res) for (int x = g.X0; x <= g.X1 && x < L; x++) b.SetPixel(x, SH + 2, Color.Blue);
+                dumpNo++;
+                b.Save(System.IO.Path.Combine(DebugDir, "L" + dumpNo.ToString("000") + (set == sans ? "s" : "o") + ".png"), ImageFormat.Png);
+            }
+        } catch { }
+    }
+
+    static Glyph Classify(float[] ink, int L, int SH, int xa, int xb, double mid, double cap, GlyphSet set) {
+        int bx0 = L, by0 = SH, bx1 = -1, by1 = -1;
+        double mass = 0;
+        for (int y = 0; y < SH; y++)
+            for (int x = xa; x < xb; x++) {
+                float v = ink[y * L + x];
+                if (v <= 0.45f) continue;
+                mass += v;
+                if (x < bx0) bx0 = x;
+                if (x > bx1) bx1 = x;
+                if (y < by0) by0 = y;
+                if (y > by1) by1 = y;
+            }
+        if (bx1 < 0 || mass < 0.02 * cap * cap) return null;
+        float[] grid = Mrz.Grid(ink, L, bx0, by0, bx1, by1);
+        double h = (by1 - by0 + 1) / cap, yy = ((by0 + by1) / 2.0 - mid) / cap, asp = (bx1 - bx0 + 1.0) / (by1 - by0 + 1);
+        double[] sc = set.Score(grid, h, yy, asp);
+        Glyph g = new Glyph();
+        g.Sc = sc;
+        g.S = g.S2 = double.MinValue;
+        for (int k = 0; k < sc.Length; k++) {
+            if (sc[k] > g.S) { g.S2 = g.S; g.C2 = g.C; g.S = sc[k]; g.C = set.Chars[k]; }
+            else if (sc[k] > g.S2) { g.S2 = sc[k]; g.C2 = set.Chars[k]; }
+        }
+        g.X0 = bx0;
+        g.X1 = bx1;
+        return g;
+    }
+
+    static string Text(List<Glyph> gs) {
+        StringBuilder sb = new StringBuilder();
+        foreach (Glyph g in gs) { if (g.Space) sb.Append(' '); sb.Append(g.C); }
+        return sb.ToString();
+    }
+
+    // ---------- страница ----------
+
+    public static PageResult Read(string path) {
+        Init();
+        GrayImage full, small;
+        Mrz.LoadPair(path, out full, out small);
+        // строки ищем на уменьшенном снимке, читаем по полному; текст поперёк снимка - повернуть,
+        // вверх ногами - решат оценки букв
+        List<Line> l0 = FindLines(small);
+        GrayImage sr = small.Rotate90();
+        List<Line> l1 = FindLines(sr);
+        if (Weight(l1) > Weight(l0)) { small = sr; l0 = l1; full = full.Rotate90(); }
+        double f = (double)full.W / small.W;
+        Parsed best = Parse(full, Scale(l0, f));
+        if (!best.FioOk) {
+            GrayImage ff = Rotate180(full), sf = Rotate180(small);
+            Parsed other = Parse(ff, Scale(FindLines(sf), f));
+            if (other.Score > best.Score) best = other;
+        }
+        return best.Result;
+    }
+
+    static List<Line> Scale(List<Line> lines, double f) {
+        foreach (Line l in lines) {
+            l.Comps = Mrz.Scale(l.Comps, f);
+            l.Cap *= f;
+            l.Y *= f;
+            l.X0 = (int)(l.X0 * f);
+        }
+        return lines;
+    }
+
+    static int Weight(List<Line> lines) {
+        int w = 0;
+        foreach (Line l in lines) w += l.Comps.Count;
+        return w;
+    }
+
+    static GrayImage Rotate180(GrayImage g) {
+        GrayImage r = new GrayImage(g.W, g.H);
+        int n = g.P.Length;
+        for (int i = 0; i < n; i++) r.P[n - 1 - i] = g.P[i];
+        return r;
+    }
+
+    class Parsed {
+        public PageResult Result = new PageResult();
+        public double Score;
+        public List<Field> Fields;
+        public bool FioOk { get { return Result.FioOk; } }
+    }
+
+    // строка «ПА-БЕЛАРУСКУ / ПО-РУССКИ»: слова до и после отдельно стоящей косой черты
+    class Field {
+        public List<Glyph> By = new List<Glyph>(), Ru = new List<Glyph>();
+        public Glyph Slash;
+        public Strip St;
+        public int RuFrom, RuTo, ByFrom, ByTo;
+        public string ByText = "", RuText = "";
+    }
+
+    static bool IsLetter(char c) { return c >= 'А' && c <= 'Я' || c == 'Ё' || c == 'І' || c == 'Ў' || c == '-'; }
+
+    // знак внутри слова, прочитанный как цифра или черта, - лучшая из букв
+    static void AsLetter(Glyph g) {
+        if (IsLetter(g.C)) return;
+        double best = double.MinValue;
+        char bc = g.C;
+        for (int k = 0; k < SansChars.Length; k++)
+            if (IsLetter(SansChars[k]) && g.Sc[k] > best) { best = g.Sc[k]; bc = SansChars[k]; }
+        g.C2 = g.C; g.S2 = g.S;
+        g.C = bc; g.S = best;
+    }
+
+    static Field Split(List<Glyph> gs) {
+        List<List<Glyph>> words = new List<List<Glyph>>();
+        foreach (Glyph g in gs) {
+            if (g.Space || words.Count == 0) words.Add(new List<Glyph>());
+            words[words.Count - 1].Add(g);
+        }
+        int sep = -1;
+        for (int i = 1; i < words.Count - 1; i++)
+            if (words[i].Count == 1 && words[i][0].C == '/') {
+                if (sep < 0 || Math.Abs(i - words.Count / 2.0) < Math.Abs(sep - words.Count / 2.0)) sep = i;
+            }
+        if (sep < 0) return null;
+        // строка значения: почти одни буквы, и читаются они хорошо (заголовок и подписи - другим шрифтом)
+        int n = 0, let = 0;
+        double mean = 0;
+        foreach (Glyph g in gs) { if (g.C == '/') continue; n++; mean += g.S; if (IsLetter(g.C)) let++; }
+        if (n == 0 || let < 0.7 * n || mean / n < 0.6) return null;
+        Field f = new Field();
+        f.Slash = words[sep][0];
+        for (int i = 0; i < words.Count; i++) {
+            if (i == sep) continue;
+            List<Glyph> to = i < sep ? f.By : f.Ru;
+            foreach (Glyph g in words[i]) {
+                AsLetter(g);
+                if (to.Count > 0 && g == words[i][0]) g.Space = true;
+                else g.Space = false;
+                to.Add(g);
+            }
+        }
+        f.ByText = Text(f.By);
+        f.RuText = Text(f.Ru);
+        return f;
+    }
+
+    static Parsed Parse(GrayImage g, List<Line> lines) {
+        Parsed p = new Parsed();
+        PageResult r = p.Result;
+        List<Field> named = new List<Field>();
+        double total = 0;
+        int cnt = 0;
+        foreach (Line l in lines) {
+            Strip st = ReadLine(g, l, sans);
+            if (st == null || st.G.Count == 0) continue;
+            l.G = st.G;
+            l.Text = Text(l.G);
+            foreach (Glyph gl in l.G) { total += gl.S; cnt++; }
+            r.Lines.Add(l.Text);
+            ReadNumber(g, l, r);
+            if (l.Text.IndexOf(',') >= 0) continue;                  // место рождения, орган
+            Field f = Split(l.G);
+            if (f == null || f.By.Count < 2 || f.Ru.Count < 2) continue;
+            // ещё раз, зная, где какой язык: слева - только белорусские буквы, справа - только русские
+            int sx0 = f.Slash.X0, sx1 = f.Slash.X1;
+            Field f2 = Split(Decode(st, delegate(int a, int b) {
+                if (b <= sx0 + 1) return ByLetters;
+                if (a >= sx1) return RuLetters;
+                if (a >= sx0 - 2 && b <= sx1 + 3) return "/";
+                return "";
+            }));
+            if (f2 != null && f2.By.Count >= 2 && f2.Ru.Count >= 2) f = f2;
+            f.St = st;
+            f.RuTo = st.Cuts.Count - 1;
+            f.RuFrom = f.RuTo;
+            for (int k = 0; k < st.Cuts.Count; k++) if (st.Cuts[k] > f.Slash.X1) { f.RuFrom = k; break; }
+            f.ByFrom = 0;
+            f.ByTo = 0;
+            for (int k = 0; k < st.Cuts.Count; k++) if (st.Cuts[k] <= f.Slash.X0) f.ByTo = k;
+            if (Similar(f.RuText, "РЕСПУБЛИКА БЕЛАРУСЬ") || Similar(f.ByText, "РЭСПУБЛІКА БЕЛАРУСЬ")) continue;
+            named.Add(f);
+        }
+        p.Score = cnt > 0 ? total / cnt : 0;
+        // в номере - дата рождения (ДДММГГ): с датой на странице не сходится - номер под сомнением
+        if (r.IdOk && r.Birth.Length == 10 && r.Id.Substring(1, 6) != r.Birth.Substring(0, 2) + r.Birth.Substring(3, 2) + r.Birth.Substring(8, 2)) {
+            r.IdOk = false;
+            r.Info += "номер не сходится с датой рождения; ";
+        }
+        if (named.Count >= 2) {
+            r.Found = true;
+            // какая строка - отчество: та, что лучше всех похожа на отчество из списка (обычно третья)
+            int pi = -1;
+            string pword = null;
+            for (int k = 1; k < named.Count && k <= 3; k++) {
+                double loss, margin;
+                Field fk = named[k];
+                string w = Match(fk.St, fk.RuFrom, fk.RuTo, fk.Ru.Count, RuLetters, NamesData.Patronymics, out loss, out margin);
+                r.Lines.Add("  отчество? " + w + " loss=" + loss.ToString("0.000") + " margin=" + margin.ToString("0.000"));
+                if (w != null && loss <= LossMax && margin >= MarginMin) { pi = k; pword = w; break; }
+            }
+            if (pi < 0 && named.Count >= 3) pi = 2;
+            Field pat = pi >= 0 ? named[pi] : null;
+            Field nm = pi >= 1 ? named[pi - 1] : named[1];
+            Field sur = pi >= 2 ? named[pi - 2] : (pi < 0 ? named[0] : null);
+            bool female = false, known = pat != null;
+            if (pat != null) {
+                r.PatronymicBy = pat.ByText;
+                r.Patronymic = pat.RuText;
+                if (pword != null) { r.Patronymic = pword; r.PatronymicOk = true; }
+                female = r.Patronymic.EndsWith("НА");
+            }
+            r.NameBy = nm.ByText;
+            r.Name = nm.RuText;
+            {
+                double loss, margin;
+                List<string> list = !known ? Both() : female ? NamesData.FemaleNames : NamesData.MaleNames;
+                string w = Match(nm.St, nm.RuFrom, nm.RuTo, nm.Ru.Count, RuLetters, list, out loss, out margin);
+                r.Lines.Add("  имя? " + w + " loss=" + loss.ToString("0.000") + " margin=" + margin.ToString("0.000"));
+                // имени нет в списке - остаётся прочитанное (но без уверенности)
+                if (w != null && loss <= LossMax) {
+                    r.Name = w;
+                    r.NameKnown = true;
+                    r.NameOk = margin >= MarginMin;
+                }
+            }
+            if (sur != null) {
+                r.SurnameBy = sur.ByText;
+                r.Surname = sur.RuText;
+                r.SurnameOk = Sure(sur.Ru) && Sure(sur.By) && Skeleton(sur.ByText) == Skeleton(sur.RuText);
+                if (Skeleton(sur.ByText) != Skeleton(sur.RuText)) {
+                    // написания расходятся по согласным: одна из частей прочитана с ошибкой. Пробуем прочесть
+                    // каждую часть по «скелету» другой - какая при этом теряет меньше, та и ошиблась
+                    double inkR, inkB;
+                    double fr = Free(sur.St, sur.RuFrom, sur.RuTo, RuLetters, out inkR), fb = Free(sur.St, sur.ByFrom, sur.ByTo, ByLetters, out inkB);
+                    string ru2, by2;
+                    double vr = Pattern(sur.St, sur.RuFrom, sur.RuTo, Units(Skeleton(sur.ByText), false), out ru2);
+                    double vb = Pattern(sur.St, sur.ByFrom, sur.ByTo, Units(Skeleton(sur.RuText), true), out by2);
+                    double lr = ru2 == null ? 9 : (fr - vr) / Math.Max(inkR, 0.5), lb = by2 == null ? 9 : (fb - vb) / Math.Max(inkB, 0.5);
+                    r.Lines.Add("  фамилия по скелету: " + ru2 + " " + lr.ToString("0.000") + " | " + by2 + " " + lb.ToString("0.000"));
+                    if (lr < lb && lr <= 0.06) r.Surname = ru2;
+                }
+                r.Lines.Add("  фамилия: " + Weakest(sur.Ru) + " | " + Weakest(sur.By) + " | " + Skeleton(sur.ByText) + " " + Skeleton(sur.RuText));
+            }
+            p.Fields = named;
+        }
+        return p;
+    }
+
+    public static double LossMax = 0.06, MarginMin = 0.03;
+
+    static List<string> Both() {
+        List<string> l = new List<string>(NamesData.FemaleNames);
+        l.AddRange(NamesData.MaleNames);
+        return l;
+    }
+
+    static string Weakest(List<Glyph> gs) {
+        double ms = 9, mm = 9;
+        foreach (Glyph g in gs) {
+            double second = double.MinValue;
+            for (int k = 0; k < SansChars.Length; k++)
+                if (SansChars[k] != g.C && IsLetter(SansChars[k]) && g.Sc[k] > second) second = g.Sc[k];
+            ms = Math.Min(ms, g.S);
+            mm = Math.Min(mm, g.S - second);
+        }
+        return "minS=" + ms.ToString("0.00") + " minM=" + mm.ToString("0.00");
+    }
+
+    // все буквы прочитаны уверенно
+    static bool Sure(List<Glyph> gs) {
+        foreach (Glyph g in gs) {
+            if (g.S < 0.55) return false;
+            double second = double.MinValue;
+            for (int k = 0; k < SansChars.Length; k++)
+                if (SansChars[k] != g.C && IsLetter(SansChars[k]) && g.Sc[k] > second) second = g.Sc[k];
+            if (g.S - second < 0.06) return false;
+        }
+        return true;
+    }
+
+    // «скелет» слова: белорусское и русское написание фамилии должны совпасть по согласным
+    // (гласные и мягкий знак в двух языках пишутся по-разному: ЛЯШЧЭНКА / ЛЕЩЕНКО, ІВАНОЎ / ИВАНОВ)
+    public static string Skeleton(string s) {
+        StringBuilder sb = new StringBuilder();
+        string t = s.Replace("ДЗ", "Д").Replace("ШЧ", "Щ");
+        foreach (char c in t) {
+            if ("АОЕЁЭЯИЫІЙ".IndexOf(c) >= 0) { if (sb.Length == 0 || sb[sb.Length - 1] != 'V') sb.Append('V'); }
+            else if (c == 'Ь' || c == 'Ъ' || c == '\'' || c == ' ') continue;
+            else if (c == 'Ў') sb.Append('В');
+            else if (c == 'Ц') sb.Append('Т');
+            else sb.Append(c);
+        }
+        return sb.ToString();
+    }
+
+    static void Part(Line l, out string by, out string ru) {
+        int slash = l.Text.IndexOf('/');
+        by = l.Text.Substring(0, slash).Trim();
+        ru = l.Text.Substring(slash + 1).Trim();
+    }
+
+    static double Letters(string s) {
+        int n = 0, a = 0;
+        foreach (char c in s) { if (c == ' ') continue; n++; if (char.IsLetter(c) || c == '-') a++; }
+        return n == 0 ? 0 : (double)a / n;
+    }
+
+    static bool Similar(string a, string b) { return Distance(a, b) <= Math.Max(3, b.Length / 4); }
+
+    public static int Distance(string a, string b) {
+        int[,] d = new int[a.Length + 1, b.Length + 1];
+        for (int i = 0; i <= a.Length; i++) d[i, 0] = i;
+        for (int j = 0; j <= b.Length; j++) d[0, j] = j;
+        for (int i = 1; i <= a.Length; i++)
+            for (int j = 1; j <= b.Length; j++)
+                d[i, j] = Math.Min(Math.Min(d[i - 1, j] + 1, d[i, j - 1] + 1), d[i - 1, j - 1] + (a[i - 1] == b[j - 1] ? 0 : 1));
+        return d[a.Length, b.Length];
+    }
+
+    // ---------- прочтение по образцу ----------
+
+    // лучшее прочтение участка строки (разрезы from..to) ровно по образцу: sets[t] - какие знаки могут стоять на месте t.
+    // Возвращает сумму (ширина x сходство); пропуск краски (соринка) - штраф.
+    static double Constrained(Strip st, int from, int to, string[] sets, out string text) {
+        int m = to - from + 1, n = sets.Length;
+        double[,] f = new double[m, n + 1];
+        int[,] bi = new int[m, n + 1];
+        char[,] bc = new char[m, n + 1];
+        for (int k = 0; k < m; k++) for (int t = 0; t <= n; t++) { f[k, t] = double.MinValue; bi[k, t] = -1; }
+        f[0, 0] = 0;
+        List<int> cuts = st.Cuts;
+        for (int k = 1; k < m; k++) {
+            int cj = from + k;
+            bool gap = st.Gap[cj - 1];
+            double skip = gap ? 0 : -0.3 * (cuts[cj] - cuts[cj - 1]) / st.Cap;
+            for (int t = 0; t <= n; t++)
+                if (f[k - 1, t] > double.MinValue && f[k - 1, t] + skip > f[k, t]) { f[k, t] = f[k - 1, t] + skip; bi[k, t] = k - 1; bc[k, t] = '\0'; }
+            if (gap) continue;
+            for (int i = k - 1; i >= 0; i--) {
+                int ci = from + i;
+                if (cuts[cj] - cuts[ci] > 1.7 * st.Cap) break;
+                if (st.Gap[ci]) {
+                    if (st.GapW[ci] > 0.22 * st.Cap) break;
+                    continue;
+                }
+                Glyph raw = Piece(st, ci, cj);
+                if (raw == null) continue;
+                double w = (cuts[cj] - cuts[ci]) / st.Cap;
+                for (int t = 1; t <= n; t++) {
+                    if (f[i, t - 1] == double.MinValue) continue;
+                    double bs = double.MinValue;
+                    char c = '\0';
+                    foreach (char ch in sets[t - 1]) {
+                        int q = st.Set.Chars.IndexOf(ch);
+                        if (q >= 0 && raw.Sc[q] > bs) { bs = raw.Sc[q]; c = ch; }
+                    }
+                    if (c == '\0') continue;
+                    double v = f[i, t - 1] + w * bs;
+                    if (v > f[k, t]) { f[k, t] = v; bi[k, t] = i; bc[k, t] = c; }
+                }
+            }
+        }
+        text = null;
+        if (f[m - 1, n] == double.MinValue) return double.MinValue;
+        char[] res = new char[n];
+        int kk = m - 1, tt = n;
+        while (kk > 0) {
+            char c = bc[kk, tt];
+            int pk = bi[kk, tt];
+            if (c != '\0') { res[tt - 1] = c; tt--; }
+            kk = pk;
+        }
+        text = new string(res);
+        return f[m - 1, n];
+    }
+
+    // лучшее прочтение участка без образца (любое число знаков из алфавита) и общая ширина краски
+    static double Free(Strip st, int from, int to, string alphabet, out double inkWidth) {
+        int m = to - from + 1;
+        double[] f = new double[m];
+        for (int k = 0; k < m; k++) f[k] = double.MinValue;
+        f[0] = 0;
+        inkWidth = 0;
+        List<int> cuts = st.Cuts;
+        for (int k = 1; k < m; k++) {
+            int cj = from + k;
+            bool gap = st.Gap[cj - 1];
+            if (!gap) inkWidth += (cuts[cj] - cuts[cj - 1]) / st.Cap;
+            double skip = gap ? 0 : -0.3 * (cuts[cj] - cuts[cj - 1]) / st.Cap;
+            if (f[k - 1] > double.MinValue) f[k] = f[k - 1] + skip;
+            if (gap) continue;
+            for (int i = k - 1; i >= 0; i--) {
+                int ci = from + i;
+                if (cuts[cj] - cuts[ci] > 1.7 * st.Cap) break;
+                if (st.Gap[ci]) {
+                    if (st.GapW[ci] > 0.22 * st.Cap) break;
+                    continue;
+                }
+                if (f[i] == double.MinValue) continue;
+                Glyph raw = Piece(st, ci, cj);
+                if (raw == null) continue;
+                Glyph gl = Restrict(raw, alphabet, st.Set);
+                if (gl == null) continue;
+                double v = f[i] + (cuts[cj] - cuts[ci]) / st.Cap * gl.S;
+                if (v > f[k]) f[k] = v;
+            }
+        }
+        return f[m - 1];
+    }
+
+    // слово из списка, лучше всего подходящее к участку строки: loss - насколько (на ширину буквы) хуже свободного
+    // прочтения, margin - насколько лучше следующего слова из списка
+    static string Match(Strip st, int from, int to, int glyphs, string alphabet, List<string> words, out double loss, out double margin) {
+        double ink;
+        double free = Free(st, from, to, alphabet, out ink);
+        string best = null;
+        double b1 = double.MinValue, b2 = double.MinValue;
+        foreach (string w in words) {
+            if (Math.Abs(w.Length - glyphs) > 2) continue;
+            string[] sets = new string[w.Length];
+            for (int i = 0; i < w.Length; i++) sets[i] = w[i].ToString();
+            string text;
+            double v = Constrained(st, from, to, sets, out text);
+            if (v > b1) { b2 = b1; b1 = v; best = w; }
+            else if (v > b2) b2 = v;
+        }
+        ink = Math.Max(ink, 0.5);
+        loss = best == null ? 9 : (free - b1) / ink;
+        margin = b2 == double.MinValue ? 9 : (b1 - b2) / ink;
+        return best;
+    }
+
+    // ---------- сверка с латиницей строк «<<<» (последняя страница того же паспорта) ----------
+
+    // как белорусские буквы пишутся латиницей в паспорте (бывает по-разному - все варианты)
+    static string[] Lat(char c) {
+        switch (c) {
+            case 'А': return new string[] { "A" };
+            case 'Б': return new string[] { "B" };
+            case 'В': return new string[] { "V" };
+            case 'Г': return new string[] { "H", "G" };
+            case 'Д': return new string[] { "D" };
+            case 'Е': return new string[] { "E", "IE", "YE" };
+            case 'Ё': return new string[] { "IO", "YO", "E", "O" };
+            case 'Ж': return new string[] { "ZH" };
+            case 'З': return new string[] { "Z" };
+            case 'І': return new string[] { "I", "Y" };
+            case 'И': return new string[] { "I" };
+            case 'Й': return new string[] { "I", "Y", "J", "" };
+            case 'К': return new string[] { "K" };
+            case 'Л': return new string[] { "L" };
+            case 'М': return new string[] { "M" };
+            case 'Н': return new string[] { "N" };
+            case 'О': return new string[] { "O" };
+            case 'П': return new string[] { "P" };
+            case 'Р': return new string[] { "R" };
+            case 'С': return new string[] { "S" };
+            case 'Т': return new string[] { "T" };
+            case 'У': return new string[] { "U" };
+            case 'Ў': return new string[] { "U", "W" };
+            case 'Ф': return new string[] { "F" };
+            case 'Х': return new string[] { "KH", "H", "X" };
+            case 'Ц': return new string[] { "TS", "C" };
+            case 'Ч': return new string[] { "CH" };
+            case 'Ш': return new string[] { "SH" };
+            case 'Ы': return new string[] { "Y", "I" };
+            case 'Ь': return new string[] { "" };
+            case 'Ъ': return new string[] { "" };
+            case 'Э': return new string[] { "E" };
+            case 'Ю': return new string[] { "IU", "YU", "U" };
+            case 'Я': return new string[] { "IA", "YA", "A" };
+            case '-': return new string[] { " ", "" };
+            case ' ': return new string[] { " ", "" };
+        }
+        return new string[] { "" };
+    }
+
+    // может ли кириллица дать эту латиницу (пробелы в латинице - на месте «<»)
+    public static bool LatinMatch(string cyr, string lat) {
+        lat = lat.Replace('<', ' ').Trim();
+        int n = cyr.Length, m = lat.Length;
+        if (n == 0 || m == 0) return false;
+        bool[,] ok = new bool[n + 1, m + 1];
+        ok[0, 0] = true;
+        for (int i = 0; i < n; i++)
+            for (int j = 0; j <= m; j++) {
+                if (!ok[i, j]) continue;
+                foreach (string t in Lat(cyr[i]))
+                    if (j + t.Length <= m && string.CompareOrdinal(lat, j, t, 0, t.Length) == 0) ok[i + 1, j + t.Length] = true;
+            }
+        return ok[n, m];
+    }
+
+    // строки «<<<» того же паспорта подтверждают прочитанное (фамилия и имя там - белорусские, латиницей)
+    public static void Confirm(PageResult r, MrzResult m) {
+        if (r == null || m == null || !r.Found || m.Line2.Length != 44 || m.Line2.Substring(10, 3) != "BLR") return;
+        // тот же паспорт: номер на странице и в строках совпал (если оба прочитаны)
+        if (r.IdOk && m.PersonalOk && r.Id != m.Personal) return;
+        if (!r.SurnameOk && r.SurnameBy.Length > 0 && LatinMatch(r.SurnameBy, m.Surname) && Skeleton(r.SurnameBy) == Skeleton(r.Surname)) {
+            r.SurnameOk = true;
+            r.Info += "фамилия сошлась с латиницей паспорта; ";
+        }
+        string first = m.Names.Split(' ')[0];
+        if (!r.NameOk && r.NameBy.Length > 0 && first.Length > 0 && LatinMatch(r.NameBy, first) && r.NameKnown) {
+            r.NameOk = true;
+            r.Info += "имя сошлось с латиницей паспорта; ";
+        }
+    }
+
+    // ---------- чтение по «скелету» (согласные белорусского и русского написания совпадают) ----------
+
+    const string RuVowels = "АОЕЁЭЯИЫЙ", ByVowels = "АОЕЁЭЯЫІЙ";
+
+    // скелет -> образец: на месте гласных - 1..3 гласные, после согласной может стоять мягкий знак
+    static List<List<string[]>> Units(string skel, bool by) {
+        List<List<string[]>> units = new List<List<string[]>>();
+        string v = by ? ByVowels : RuVowels;
+        foreach (char c in skel) {
+            List<string[]> alts = new List<string[]>();
+            if (c == 'V') {
+                alts.Add(new string[] { v });
+                alts.Add(new string[] { v, v });
+                alts.Add(new string[] { v, v, v });
+            } else {
+                List<string[]> core = new List<string[]>();
+                if (c == 'В') core.Add(new string[] { by ? "ВЎ" : "В" });
+                else if (c == 'Т') core.Add(new string[] { "ТЦ" });
+                else if (c == 'Щ') core.Add(by ? new string[] { "Ш", "Ч" } : new string[] { "Щ" });
+                else if (c == 'Д') { core.Add(new string[] { "Д" }); core.Add(new string[] { "Д", "З" }); }
+                else core.Add(new string[] { c.ToString() });
+                foreach (string[] a in core) {
+                    alts.Add(a);
+                    string[] soft = new string[a.Length + 1];
+                    a.CopyTo(soft, 0);
+                    soft[a.Length] = "Ь";
+                    alts.Add(soft);
+                }
+            }
+            units.Add(alts);
+        }
+        return units;
+    }
+
+    // лучшее прочтение участка строки по образцу из блоков (у блока - варианты, вариант - 1..3 знака)
+    static double Pattern(Strip st, int from, int to, List<List<string[]>> units, out string text) {
+        int m = to - from + 1, n = units.Count;
+        double[,] f = new double[m, n + 1];
+        int[,] pk = new int[m, n + 1], pu = new int[m, n + 1];
+        string[,] pc = new string[m, n + 1];
+        for (int k = 0; k < m; k++) for (int u = 0; u <= n; u++) { f[k, u] = double.MinValue; pk[k, u] = -1; }
+        f[0, 0] = 0;
+        List<int> cuts = st.Cuts;
+        for (int k = 0; k < m; k++) {
+            if (k > 0)
+                for (int u = 0; u <= n; u++) {
+                    // пропуск промежутка (или соринки - со штрафом)
+                    if (f[k - 1, u] == double.MinValue) continue;
+                    int cj = from + k;
+                    double skip = st.Gap[cj - 1] ? 0 : -0.3 * (cuts[cj] - cuts[cj - 1]) / st.Cap;
+                    if (f[k - 1, u] + skip > f[k, u]) { f[k, u] = f[k - 1, u] + skip; pk[k, u] = k - 1; pu[k, u] = u; pc[k, u] = ""; }
+                }
+            for (int u = 0; u < n; u++) {
+                if (f[k, u] == double.MinValue) continue;
+                foreach (string[] alt in units[u]) Chains(st, from, k, m, alt, 0, f[k, u], "", u, k, f, pk, pu, pc);
+            }
+        }
+        text = null;
+        if (f[m - 1, n] == double.MinValue) return double.MinValue;
+        StringBuilder sb = new StringBuilder();
+        int kk = m - 1, uu = n;
+        while (kk > 0 || uu > 0) {
+            if (pk[kk, uu] < 0) break;
+            sb.Insert(0, pc[kk, uu]);
+            int nk = pk[kk, uu], nu = pu[kk, uu];
+            kk = nk;
+            uu = nu;
+        }
+        text = sb.ToString();
+        return f[m - 1, n];
+    }
+
+    // все цепочки знаков варианта alt от разреза k; концы - в f[.., u+1]
+    static void Chains(Strip st, int from, int k, int m, string[] alt, int pos, double acc, string chars, int u, int k0,
+            double[,] f, int[,] pk, int[,] pu, string[,] pc) {
+        if (pos == alt.Length) {
+            if (acc > f[k, u + 1]) { f[k, u + 1] = acc; pk[k, u + 1] = k0; pu[k, u + 1] = u; pc[k, u + 1] = chars; }
+            return;
+        }
+        List<int> cuts = st.Cuts;
+        int ci = from + k;
+        if (ci >= cuts.Count - 1 || st.Gap[ci]) return;
+        for (int j = k + 1; j < m; j++) {
+            int cj = from + j;
+            if (cuts[cj] - cuts[ci] > 1.7 * st.Cap) break;
+            if (st.Gap[cj - 1]) {
+                if (st.GapW[cj - 1] > 0.22 * st.Cap) break;
+                continue;
+            }
+            Glyph raw = Piece(st, ci, cj);
+            if (raw == null) continue;
+            double bs = double.MinValue;
+            char bc = '\0';
+            foreach (char c in alt[pos]) {
+                int q = st.Set.Chars.IndexOf(c);
+                if (q >= 0 && raw.Sc[q] > bs) { bs = raw.Sc[q]; bc = c; }
+            }
+            if (bc == '\0') continue;
+            Chains(st, from, j, m, alt, pos + 1, acc + (cuts[cj] - cuts[ci]) / st.Cap * bs, chars + bc, u, k0, f, pk, pu, pc);
+        }
+    }
+
+    // идентификационный номер (OCR-B, 14 знаков, последний - контрольная цифра) и дата рождения «ДД ММ ГГГГ»
+    static void ReadNumber(GrayImage g, Line l, PageResult r) {
+        if (l.Comps.Count < 7 || l.Comps.Count > 20) return;
+        int digits = 0;
+        foreach (char c in l.Text) if (char.IsDigit(c) || c == 'З' || c == 'О') digits++;
+        if (digits < 4) return;
+        Strip st = ReadLine(g, l, ocrb);
+        if (st == null) return;
+        int m = st.Cuts.Count - 1;
+        double ink;
+        double free = Free(st, 0, m, null, out ink);
+        ink = Math.Max(ink, 0.5);
+        if (!r.IdOk && st.G.Count >= 12 && st.G.Count <= 17) {
+            string[] sets = new string[14];
+            for (int i = 0; i < 14; i++) sets[i] = Allowed(i);
+            string id;
+            double v = Constrained(st, 0, m, sets, out id);
+            // у граждан РБ в конце - «PB»: если так тоже читается почти без потерь - так и есть
+            if (id != null && id.Substring(11, 2) != "PB") {
+                sets[11] = "P"; sets[12] = "B";
+                string pb;
+                double v2 = Constrained(st, 0, m, sets, out pb);
+                if (pb != null && (v - v2) / ink < 0.05 && Mrz.Check(pb.Substring(0, 13)) == pb[13]) { id = pb; v = v2; }
+            }
+            if (id != null && (free - v) / ink <= 0.08 && Mrz.Check(id.Substring(0, 13)) == id[13] && "123456".IndexOf(id[0]) >= 0) {
+                r.Id = id;
+                r.IdOk = true;
+            }
+        }
+        if (r.Birth.Length == 0 && st.G.Count >= 7 && st.G.Count <= 10) {
+            string[] sets = new string[8];
+            for (int i = 0; i < 8; i++) sets[i] = "0123456789";
+            string d;
+            double v = Constrained(st, 0, m, sets, out d);
+            DateTime dt;
+            if (d != null && (free - v) / ink <= 0.08 &&
+                DateTime.TryParseExact(d, "ddMMyyyy", System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out dt))
+                r.Birth = dt.ToString("dd.MM.yyyy");
+        }
+    }
+
+    static string Allowed(int i) {
+        if (i <= 6) return "0123456789";
+        if (i == 7) return "ABCEHKM";
+        if (i <= 10) return "0123456789";
+        if (i <= 12) return "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+        return "0123456789";
+    }
+
+    static char Best(Glyph g, string allowed) {
+        char best = allowed[0];
+        double bs = double.MinValue;
+        foreach (char c in allowed) {
+            int k = OcrbChars.IndexOf(c);
+            if (g.Sc[k] > bs) { bs = g.Sc[k]; best = c; }
+        }
+        return best;
+    }
 }
 
 // Фото документов абонента (паспорт, свидетельство): у каждого договора своя папка с фото,
@@ -8804,12 +10141,17 @@ public class DogovorForm : Form {
     readonly string photoRoot;
     string photoDir;                                 // папка фото этого договора; null - фото ещё нет
     readonly PhotoStrip strip = new PhotoStrip();
-    readonly Label photoNote = Ui.Note(""), lichnyNote = Ui.Note("");
+    readonly Label photoNote = Ui.Note(""), lichnyNote = Ui.Note(""), fioNote = Ui.Note("");
     Button phoneButton, photoAdd, photoFolder;
     PhotoViewer viewer;
     bool phoneBusy;
     int photoGen;                                    // меняется с договором: ответы по фото прошлого договора не нужны
-    string mrzPersonal = "";                         // личный номер, прочитанный с фото паспорта
+    // прочитанное с фото паспорта этого договора
+    MrzResult lastMrz;
+    PageResult lastPage;
+    string mrzWhere = "", pageWhere = "", importNote = "";
+    string photoPersonal = "", photoFio = "";
+    bool photoFioOk, mrzWeak;
     static readonly object mrzLock = new object();
 
     public DogovorForm(string here) {
@@ -8994,7 +10336,7 @@ public class DogovorForm : Form {
         c = NewCard("Потребитель", "гражданин(ка), с которым заключается договор", 4);
         Row(c, F("Фамилия, собственное имя, отчество", T("fio", 1, "Иванов Иван Иванович"), 2), F("Подпись (инициалы)", T("potr_inic", 1, "заполнится сама"), 1),
             F("Идентификационный номер", T("lichny", 1, "14 знаков"), 1));
-        Row(c, Cell.Empty(3), F(null, lichnyNote, 1));
+        Row(c, F(null, fioNote, 2), Cell.Empty(1), F(null, lichnyNote, 1));
         Button same = Ui.Button("= адрес объекта", false);
         same.Font = St.Small;
         same.Click += delegate { SetV("adres_prozh", V("adres")); };
@@ -9376,6 +10718,7 @@ public class DogovorForm : Form {
         loading = true;
         try {
             if (key == "fio") {
+                FioNote();
                 string auto = Initials(V("fio"));
                 if (V("potr_inic") == autoInic || V("potr_inic").Length == 0) SetV("potr_inic", auto);
                 autoInic = auto;
@@ -9978,7 +11321,8 @@ public class DogovorForm : Form {
         strip.OpenPhoto += delegate(string f) { ShowPhoto(f); };
         strip.RemovePhoto += delegate(string f) { RemovePhoto(f); };
         strip.Resized += delegate { LayoutCards(); };
-        lichnyNote.Click += delegate { if (mrzPersonal.Length > 0 && V("lichny") != mrzPersonal) SetV("lichny", mrzPersonal); };
+        lichnyNote.Click += delegate { if (photoPersonal.Length > 0 && V("lichny") != photoPersonal) SetV("lichny", photoPersonal); };
+        fioNote.Click += delegate { if (photoFio.Length > 0 && Same(V("fio")) != Same(photoFio)) SetV("fio", photoFio); };
         Row(c, F(null, photoNote, 4));
         Row(c, F(null, strip, 4));
     }
@@ -10108,6 +11452,7 @@ public class DogovorForm : Form {
 
     void Added(List<string> added, string note, Color color) {
         if (added.Count > 0) { dirty = true; unsavedAuto = true; }
+        importNote = note;
         RefreshPhotos();
         PhotoNote(note, color);
         if (added.Count > 0) ReadPassport(added);
@@ -10145,7 +11490,7 @@ public class DogovorForm : Form {
 
     // для проверки: открыть фото по номеру, что написано про фото
     public void ShowPhotoAt(int i) { List<string> f = strip.Files; if (i < f.Count) ShowPhoto(f[i]); }
-    public string PhotoStatus { get { return photoNote.Text + " | " + lichnyNote.Text + " | папка: " + PhotoRef(); } }
+    public string PhotoStatus { get { return photoNote.Text + " | " + lichnyNote.Text + " | " + fioNote.Text + " | папка: " + PhotoRef(); } }
 
     void PhoneDone(PhoneResult r, string dir, DateTime since, int gen) {
         phoneBusy = false;
@@ -10171,34 +11516,29 @@ public class DogovorForm : Form {
         Added(r.Copied, note, r.Failed.Count > 0 ? St.Bad : St.Good);
     }
 
-    // личный номер - со строк «<<<» последней страницы паспорта (контрольные цифры должны сойтись)
+    // с фото паспорта: личный номер - со строк «<<<» последней страницы, Ф.И.О. (и номер) - с предпоследней
     void ReadPassport(List<string> files) {
         int gen = photoGen;
         List<string> list = new List<string>(files);
-        foreach (string f in list) strip.Mark(f, "ищу личный номер...", St.Hint);
+        foreach (string f in list) strip.Mark(f, "читаю...", St.Hint);
         mrzRunning++;
         System.Threading.Thread th = new System.Threading.Thread(delegate() {
-            int found = 0, weak = 0, foreign = 0;
-            string where = "";
             lock (mrzLock) {
                 foreach (string f in list) {
                     MrzResult r = null;
-                    bool skip = found > 0;
-                    if (!skip) {
-                        try { r = Mrz.Read(f); }
-                        catch (Exception ex) { r = new MrzResult(); r.Info = "не открывается: " + ex.Message; }
-                    }
-                    if (r != null && r.Line2.Length > 0) {
-                        if (r.Valid && Blr(r)) { found++; where = Path.GetFileName(f); }
-                        else if (r.Valid) foreign++;
-                        else weak++;
-                    }
+                    PageResult pg = null;
+                    try {
+                        r = Mrz.Read(f);
+                        // строк «<<<» нет (или нашлось что-то похожее, но не они) - может, это страница с Ф.И.О.
+                        if (!r.Valid) pg = PassportPage.Read(f);
+                    } catch (Exception ex) { r = new MrzResult(); r.Info = "не открывается: " + ex.Message; pg = null; }
                     string file = f;
                     MrzResult res = r;
-                    Post(delegate { if (gen == photoGen) MrzDone(file, res); });
+                    PageResult page = pg;
+                    Post(delegate { if (gen == photoGen) PhotoRead(file, res, page); });
                 }
             }
-            Post(delegate { mrzRunning--; if (gen == photoGen) MrzFinished(found, weak, foreign, where); });
+            Post(delegate { mrzRunning--; if (gen == photoGen) PhotosRead(); });
         });
         th.IsBackground = true;
         th.Priority = System.Threading.ThreadPriority.BelowNormal;
@@ -10207,38 +11547,85 @@ public class DogovorForm : Form {
 
     static bool Blr(MrzResult r) { return r.Line2.Length == 44 && r.Line2.Substring(10, 3) == "BLR"; }
 
-    void MrzDone(string f, MrzResult r) {
+    void PhotoRead(string f, MrzResult r, PageResult page) {
+        string name = Path.GetFileName(f);
         if (r != null && r.Info.StartsWith("не открывается")) { strip.Mark(f, "фото не открывается", St.Bad); return; }
-        if (r == null || r.Line2.Length == 0) { strip.Mark(f, null, Color.Empty); return; }
-        if (!r.Valid) { strip.Mark(f, "строки паспорта нечётко", Warn); return; }
-        if (!Blr(r)) { strip.Mark(f, "паспорт не РБ", St.Hint); return; }
-        strip.Mark(f, "личный номер прочитан", St.Good);
-        mrzPersonal = r.Personal;
-        if (V("lichny").Length == 0) SetV("lichny", r.Personal);
-        LichnyNote();
+        if (page != null && page.Found) {
+            lastPage = page;
+            pageWhere = name;
+        } else if (r != null && r.Line2.Length > 0) {
+            if (!r.Valid) { strip.Mark(f, "строки паспорта нечётко", Warn); mrzWeak = true; }
+            else if (!Blr(r)) strip.Mark(f, "паспорт не РБ", St.Hint);
+            else { strip.Mark(f, "личный номер прочитан", St.Good); lastMrz = r; mrzWhere = name; }
+        } else strip.Mark(f, null, Color.Empty);
+        ApplyPassport();
     }
 
-    void MrzFinished(int found, int weak, int foreign, string where) {
-        string add = null;
-        Color color = photoNote.ForeColor;
-        if (found > 0) {
-            add = V("lichny") == mrzPersonal ? "Личный номер прочитан с фото «" + where + "» и подставлен - сверьте с паспортом" :
-                "Личный номер на фото «" + where + "» не такой, как в поле - проверьте";
-            color = V("lichny") == mrzPersonal ? St.Good : Warn;
-        } else if (weak > 0) {
-            add = "Строки паспорта «<<<» на фото видны, но прочитаны неуверенно - личный номер не подставлен. " +
-                "Переснимите последнюю страницу ближе, ровно и без бликов или введите номер вручную";
-            color = Warn;
-        } else if (foreign > 0) add = "Паспорт не РБ - личный номер не подставлен";
-        if (add != null) PhotoNote((photoNote.Text.Length > 0 ? photoNote.Text.TrimEnd('.') + ". " : "") + add + ".", color);
+    // прочитанное с фото - в поля (только в пустые; в заполненные - подсказка рядом)
+    void ApplyPassport() {
+        if (lastPage != null && lastMrz != null) PassportPage.Confirm(lastPage, lastMrz);
+        if (lastPage != null) {
+            foreach (string f in strip.Files)
+                if (Path.GetFileName(f) == pageWhere) strip.Mark(f, lastPage.FioOk ? "ФИО прочитано" : "ФИО - проверьте", lastPage.FioOk ? St.Good : Warn);
+            photoFio = lastPage.Surname.Length > 0 && lastPage.Name.Length > 0 ? lastPage.Fio : "";
+            photoFioOk = lastPage.FioOk;
+            if (photoFio.Length > 0 && photoFioOk && V("fio").Length == 0) SetV("fio", photoFio);
+        }
+        string pn = lastMrz != null ? lastMrz.Personal : lastPage != null && lastPage.IdOk ? lastPage.Id : "";
+        if (pn.Length > 0) {
+            photoPersonal = pn;
+            if (V("lichny").Length == 0) SetV("lichny", pn);
+        }
+        LichnyNote();
+        FioNote();
+    }
+
+    void PhotosRead() {
+        List<string> parts = new List<string>();
+        bool good = true;
+        if (lastMrz != null) parts.Add("личный номер прочитан с фото «" + mrzWhere + "»");
+        else if (lastPage != null && lastPage.IdOk) parts.Add("личный номер прочитан с фото «" + pageWhere + "»");
+        else if (mrzWeak) {
+            parts.Add("строки «<<<» прочитаны неуверенно - личный номер не подставлен: переснимите последнюю страницу ближе, ровно, без бликов");
+            good = false;
+        }
+        if (lastPage != null) {
+            if (photoFio.Length == 0) { parts.Add("Ф.И.О. на фото «" + pageWhere + "» прочитать не удалось"); good = false; }
+            else if (photoFioOk) parts.Add("Ф.И.О. прочитано с фото «" + pageWhere + "»");
+            else { parts.Add("Ф.И.О. с фото «" + pageWhere + "» прочитано неуверенно - проверьте подсказку под полем"); good = false; }
+        }
+        if (parts.Count == 0) { PhotoNote(importNote, photoNote.ForeColor); return; }
+        string s = string.Join("; ", parts.ToArray());
+        PhotoNote((importNote.Length > 0 ? importNote.TrimEnd('.') + ". " : "") + char.ToUpper(s[0]) + s.Substring(1) + ". Сверьте с паспортом.", good ? St.Good : Warn);
+    }
+
+    static string Same(string s) { return s.Trim().ToUpper().Replace('Ё', 'Е').Replace("  ", " "); }
+
+    void FioNote() {
+        string v = V("fio");
+        if (photoFio.Length == 0) Note(fioNote, "", St.Hint, false);
+        else if (Same(v) == Same(photoFio)) Note(fioNote, "как на фото паспорта - сверьте с паспортом", St.Good, false);
+        else if (!photoFioOk) Note(fioNote, "с фото паспорта: " + photoFio + " - проверьте " + Doubtful() + "; щёлкните, чтобы подставить", Warn, true);
+        else Note(fioNote, "на фото паспорта: " + photoFio + " (щёлкните, чтобы подставить)", Warn, true);
+        fioNote.Cursor = photoFio.Length > 0 && Same(v) != Same(photoFio) ? Cursors.Hand : Cursors.Default;
+    }
+
+    // что в Ф.И.О. с фото прочитано неуверенно
+    string Doubtful() {
+        List<string> d = new List<string>();
+        if (lastPage == null) return "";
+        if (!lastPage.SurnameOk) d.Add("фамилию");
+        if (!lastPage.NameOk) d.Add("имя");
+        if (!lastPage.PatronymicOk) d.Add("отчество");
+        return string.Join(", ", d.ToArray());
     }
 
     void LichnyNote() {
         string v = V("lichny");
-        if (mrzPersonal.Length == 0) Note(lichnyNote, "", St.Hint, false);
-        else if (v == mrzPersonal) Note(lichnyNote, "как на фото паспорта - сверьте с паспортом", St.Good, false);
-        else Note(lichnyNote, "на фото паспорта: " + mrzPersonal + " (щёлкните, чтобы подставить)", Warn, true);
-        lichnyNote.Cursor = mrzPersonal.Length > 0 && v != mrzPersonal ? Cursors.Hand : Cursors.Default;
+        if (photoPersonal.Length == 0) Note(lichnyNote, "", St.Hint, false);
+        else if (v == photoPersonal) Note(lichnyNote, "как на фото паспорта - сверьте с паспортом", St.Good, false);
+        else Note(lichnyNote, "на фото паспорта: " + photoPersonal + " (щёлкните, чтобы подставить)", Warn, true);
+        lichnyNote.Cursor = photoPersonal.Length > 0 && v != photoPersonal ? Cursors.Hand : Cursors.Default;
     }
 
     // ---------- создать, открыть, новый ----------
@@ -10468,12 +11855,16 @@ public class DogovorForm : Form {
         openedFile = null;
         photoGen++;
         photoDir = null;
-        mrzPersonal = "";
+        lastMrz = null;
+        lastPage = null;
+        mrzWhere = pageWhere = importNote = photoPersonal = photoFio = "";
+        photoFioOk = mrzWeak = false;
         if (viewer != null && !viewer.IsDisposed) viewer.Close();
         strip.ClearMarks();
         RefreshPhotos();
         Note(photoNote, "", St.Hint, false);
         LichnyNote();
+        FioNote();
         head.Text = "Новый договор";
         headSub.Text = "Заполните поля - программа подставит их в шаблон Word и сохранит договор в папку «Договоры»";
         headSub.ForeColor = St.Hint;
