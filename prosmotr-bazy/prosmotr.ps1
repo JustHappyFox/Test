@@ -1752,7 +1752,9 @@ public class LiveBase {
     // Индекс по ФИО программы базы может лежать не в папке базы: программа базы запускается с диска D:
     // (d:\Energ, временные файлы - d:\temp), бывают и вложенные папки рядом с базой. Ищем там .IDX/.CDX
     // с ФИО в выражении; подходящий к этой таблице (проверяется на её записях) - подключаем для поиска по ФИО.
-    public IndexTag FindNameIndexElsewhere(string baseFolder, List<string> notes) {
+    // где может лежать что-то от программы базы: папка базы (с вложенными), папка над ней,
+    // на локальных дисках - корень, Energ, temp, fpd26 (с вложенными)
+    public static List<string> ProgramDirs(string baseFolder) {
         List<string> dirs = new List<string>();
         AddDir(dirs, baseFolder, 50);
         try { DirectoryInfo up = Directory.GetParent(baseFolder.TrimEnd('\\', '/')); if (up != null) AddDir(dirs, up.FullName, 0); } catch (Exception) { }
@@ -1765,6 +1767,45 @@ public class LiveBase {
                 foreach (string name in new string[] { "Energ", "temp", "fpd26", "BASAFOX" }) AddDir(dirs, Path.Combine(root, name), 30);
             } catch (Exception) { }
         }
+        return dirs;
+    }
+
+    // Исходники программы базы (.PRG, .SPR, .MPR - обычный текст): строки, где поиск или индекс связан с ФИО.
+    // В отчёт - только эти строки кода (данных абонентов в них нет), чтобы искать по ФИО так же, как она.
+    public static void ReportSources(List<string> dirs, List<string> notes) {
+        int files = 0, shown = 0;
+        string[] verbs = { "INDE", "SEEK", "ORDER", "LOCATE", "SELECT", "FILTER", "FIND", ".IDX", ".CDX", "TAG", "LIKE", "SCAN" };
+        Encoding enc = Encoding.GetEncoding(866);
+        foreach (string dir in dirs) {
+            string[] list;
+            try { list = Directory.GetFiles(dir); } catch (Exception) { continue; }
+            foreach (string f in list) {
+                string ext = Path.GetExtension(f).ToLowerInvariant();
+                if (ext != ".prg" && ext != ".spr" && ext != ".mpr") continue;
+                files++;
+                string[] lines;
+                try {
+                    if (new FileInfo(f).Length > 4 << 20) continue;
+                    lines = File.ReadAllLines(f, enc);
+                } catch (Exception) { continue; }
+                for (int i = 0; i < lines.Length && shown < 80; i++) {
+                    string u = lines[i].ToUpperInvariant();
+                    if (u.IndexOf("FIO") < 0 && u.IndexOf("FAM") < 0) continue;
+                    bool verb = false;
+                    foreach (string v in verbs) if (u.IndexOf(v) >= 0) { verb = true; break; }
+                    if (!verb) continue;
+                    string line = lines[i].Trim();
+                    if (line.Length > 200) line = line.Substring(0, 200) + "...";
+                    notes.Add(Path.GetFileName(f) + ":" + (i + 1) + ": " + line);
+                    shown++;
+                }
+            }
+        }
+        notes.Insert(0, "исходников программы базы (.PRG/.SPR/.MPR) найдено: " + files + (shown > 0 ? ", строки про поиск по ФИО:" : ", строк про поиск по ФИО нет"));
+    }
+
+    public IndexTag FindNameIndexElsewhere(string baseFolder, List<string> notes) {
+        List<string> dirs = ProgramDirs(baseFolder);
         int files = 0;
         IndexTag found = null;
         Dictionary<string, bool> known = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
@@ -6217,6 +6258,10 @@ public class AbonentSearch : Form {
                     Report.Line("Индекс по ФИО вне таблицы абонентов: " + (fio == null ? "не найден" : "найден " + fio.FilePath));
                     foreach (string n in notes) Report.Line("    " + n);
                     ReportNameIndexes(dirFolder, b.Header.Enc);
+                    List<string> code = new List<string>();
+                    try { LiveBase.ReportSources(LiveBase.ProgramDirs(dirFolder), code); }
+                    catch (Exception ex) { code.Add("просмотр исходников прервался: " + ex.Message); }
+                    foreach (string n in code) Report.Line((n.StartsWith("исходников") ? "" : "    ") + n);
                     if (fio != null) {
                         string where = fio.FilePath;
                         Post(delegate { if (b == live) { status.Text = "Найден индекс по ФИО программы базы (" + where + ") - теперь по ФИО ищется сразу."; } });
