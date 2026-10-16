@@ -1672,6 +1672,144 @@ public class ExtraRecord {
     public string Problem;     // не прочиталось, записи нет...
 }
 
+// ФИО всех абонентов - в памяти, пока программа открыта (на диск не пишется). Индекса по ФИО в базе нет,
+// поэтому первый поиск по ФИО один раз читает всю таблицу (в памяти остаётся только поле ФИО), а следующие
+// ищут здесь сразу и читают из базы только найденные записи. Новые абоненты (дописанные в конец таблицы)
+// дочитываются перед каждым поиском.
+public class NameIndex {
+    const int BlockShift = 22, BlockSize = 1 << BlockShift;   // ФИО лежат подряд в блоках по 4 МБ
+    readonly List<byte[]> blocks = new List<byte[]>();
+    int blockUsed = BlockSize;
+    int[] start = new int[1 << 16];     // где ФИО записи: номер блока и место в нём
+    byte[] length = new byte[1 << 16];
+    int[] recNo = new int[1 << 16];
+    public int Count;                   // сколько ФИО в памяти
+    public int Scanned;                 // сколько записей таблицы просмотрено
+    public double Seconds;
+    public long Bytes;
+    readonly int field, fieldLength, headerLength, recordLength;
+    readonly Encoding enc;
+    readonly byte[] fold = new byte[256];   // маленькие буквы, ё -> е
+
+    NameIndex(DbfTable h) {
+        int f = h.FieldIndex("FIO");
+        field = h.Fields[f].Offset;
+        fieldLength = h.Fields[f].Length;
+        headerLength = h.HeaderLength;
+        recordLength = h.RecordLength;
+        enc = h.Enc;
+        byte[] one = new byte[1];
+        for (int b = 0; b < 256; b++) {
+            fold[b] = (byte)b;
+            one[0] = (byte)b;
+            string s = enc.GetString(one);
+            string l = s.ToLowerInvariant().Replace('ё', 'е');
+            if (l == s) continue;
+            byte[] lb = enc.GetBytes(l);
+            if (lb.Length == 1 && enc.GetString(lb) == l) fold[b] = lb[0];
+        }
+    }
+
+    // progress может прервать чтение (исключением)
+    public static NameIndex Build(LiveBase b, LoadProgress progress) {
+        DateTime started = DateTime.Now;
+        NameIndex n = new NameIndex(b.Header);
+        using (FileStream fs = new FileStream(b.FilePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 1 << 16, FileOptions.SequentialScan))
+            n.Read(fs, 0, b.CurrentCount(fs), progress);
+        n.Seconds = (DateTime.Now - started).TotalSeconds;
+        return n;
+    }
+
+    // дочитать новые записи; false - таблица стала короче (её пересобрали) - память устарела
+    public bool Update(FileStream fs, LiveBase b, out int added) {
+        int count = b.CurrentCount(fs);
+        added = 0;
+        if (count < Scanned) return false;
+        if (count > Scanned) { int was = Count; Read(fs, Scanned, count, null); added = Count - was; }
+        return true;
+    }
+
+    void Read(FileStream fs, int from, int count, LoadProgress progress) {
+        const int chunkRecords = 4096;
+        byte[] buf = new byte[chunkRecords * recordLength];
+        fs.Seek(headerLength + (long)from * recordLength, SeekOrigin.Begin);
+        int index = from;
+        while (index < count) {
+            int want = Math.Min(chunkRecords, count - index);
+            int got = DbfTable.ReadUpTo(fs, buf, want * recordLength) / recordLength;
+            Bytes += (long)got * recordLength;
+            bool end = false;
+            for (int r = 0; r < got; r++) {
+                int p = r * recordLength;
+                if (buf[p] == 0x1A) { got = r; end = true; break; }   // конец файла
+                if (buf[p] != (byte)'*') Add(buf, p + field, index + r + 1);
+            }
+            index += got;
+            if (end || got < want) break;
+            if (progress != null) progress(index, count);
+        }
+        Scanned = index;
+    }
+
+    void Add(byte[] src, int from, int rec) {
+        int n = fieldLength;
+        while (n > 0 && (src[from + n - 1] == (byte)' ' || src[from + n - 1] == 0)) n--;
+        if (n > 255) n = 255;
+        if (blockUsed + n > BlockSize) { blocks.Add(new byte[BlockSize]); blockUsed = 0; }
+        byte[] block = blocks[blocks.Count - 1];
+        for (int k = 0; k < n; k++) block[blockUsed + k] = fold[src[from + k]];
+        if (Count == start.Length) {
+            Array.Resize(ref start, Count * 2);
+            Array.Resize(ref length, Count * 2);
+            Array.Resize(ref recNo, Count * 2);
+        }
+        start[Count] = ((blocks.Count - 1) << BlockShift) | blockUsed;
+        length[Count] = (byte)n;
+        recNo[Count] = rec;
+        Count++;
+        blockUsed += n;
+    }
+
+    // номера записей, где ФИО подходит: точно (с фамилии, словами целиком) или частично (все слова - части ФИО)
+    public List<int> Find(List<string> words, bool partial) {
+        List<int> found = new List<int>();
+        if (words.Count == 0) return found;
+        byte[] first = Encode(words[0]);
+        for (int i = 0; i < Count; i++) {
+            byte[] block = blocks[start[i] >> BlockShift];
+            int s = start[i] & (BlockSize - 1), n = length[i];
+            if (!Contains(block, s, n, first)) continue;
+            string fio = enc.GetString(block, s, n);
+            if (partial ? AbonentQuery.ContainsAll(fio, words) : AbonentQuery.NameMatches(fio, words)) found.Add(recNo[i]);
+        }
+        return found;
+    }
+
+    byte[] Encode(string word) {
+        byte[] b = enc.GetBytes(word);
+        for (int k = 0; k < b.Length; k++) b[k] = fold[b[k]];
+        return b;
+    }
+
+    static bool Contains(byte[] data, int from, int n, byte[] what) {
+        int last = from + n - what.Length;
+        for (int p = from; p <= last; p++) {
+            if (data[p] != what[0]) continue;
+            int k = 1;
+            while (k < what.Length && data[p + k] == what[k]) k++;
+            if (k == what.Length) return true;
+        }
+        return false;
+    }
+
+    public string Describe() {
+        long mb = 0;
+        foreach (byte[] b in blocks) mb += b.Length;
+        return "ФИО в памяти: " + Count + " из " + Scanned + " записей, " + (mb >> 20) + " МБ памяти, прочитано "
+            + (Bytes >> 20) + " МБ за " + Seconds.ToString("0") + " с";
+    }
+}
+
 // База абонентов "вживую": при запуске читаются только заголовок, начало таблицы и список индексов.
 // Каждый поиск идёт по индексу FoxPro прямо в файлах базы - данные всегда свежие.
 public class LiveBase {
@@ -2182,6 +2320,46 @@ public class LiveBase {
         return Search(text, mode, selsovety, FetchLimit, partial);
     }
 
+    // ---- ФИО без индекса: все ФИО в памяти (см. NameIndex) ----
+    NameIndex names;
+    readonly object namesLock = new object();
+
+    // индекса по ФИО в базе нет - для поиска по ФИО нужно сначала прочитать ФИО всех абонентов
+    public bool NamesNeeded { get { return Header.FieldIndex("FIO") >= 0 && TagFor("FIO") == null; } }
+    public bool NamesReady { get { return names != null; } }
+
+    public void LoadNames(LoadProgress progress) {
+        lock (namesLock) {
+            if (names != null) return;
+            names = NameIndex.Build(this, progress);
+            Report.Line(DateTime.Now.ToString("HH:mm:ss") + "  " + names.Describe());
+        }
+    }
+
+    SearchResult SearchNames(SearchResult res, Dictionary<string, bool> selsovety, int limit, DateTime started) {
+        List<string> words = res.Partial ? new List<string>(DbfTable.SplitWords(res.Text.Replace('ё', 'е').Replace('Ё', 'Е'))) : AbonentQuery.PersonWords(res.Text);
+        if (words.Count == 0) { res.Note = "Впишите фамилию."; return Finish(res, null, selsovety, started); }
+        using (FileStream fs = OpenTable()) {
+            List<int> recNos;
+            int added;
+            lock (namesLock) {
+                if (!names.Update(fs, this, out added)) {
+                    // таблицу пересобрали (стала короче) - ФИО нужно прочитать заново
+                    names = null;
+                    res.NoIndex = true;
+                    return Finish(res, null, selsovety, started);
+                }
+                recNos = names.Find(words, res.Partial);
+            }
+            if (recNos.Count > limit) res.TooMany = true;
+            int deleted;
+            DbfTable part = Fetch(fs, recNos, limit, out deleted);
+            res.How = names.Describe() + (added > 0 ? ", дочитано новых: " + added : "") + "; совпало " + recNos.Count
+                + ", прочитано записей " + part.Count + (deleted > 0 ? ", удалённых пропущено " + deleted : "");
+            return Finish(res, part, selsovety, started);
+        }
+    }
+
     // Ошибка чтения бывает, если программа базы как раз дописывает индекс - тогда пробуем ещё раз.
     // partial - частичное совпадение (начало номера, похожие слова); иначе - только точное
     public SearchResult Search(string text, SearchMode mode, Dictionary<string, bool> selsovety, int limit, bool partial) {
@@ -2201,6 +2379,14 @@ public class LiveBase {
         res.Text = text;
         res.Mode = mode;
         res.Partial = partial;
+        if (mode == SearchMode.Name && names != null) {
+            try { return SearchNames(res, selsovety, limit, started); }
+            catch (Exception ex) {
+                res.Error = ex.Message;
+                res.How += " ОШИБКА: " + ex.GetType().Name + ": " + ex.Message;
+                return Finish(res, null, selsovety, started);
+            }
+        }
         Seeker s = new Seeker();
         try {
             bool ok;
@@ -5318,10 +5504,46 @@ public class AbonentQuery {
         return found;
     }
 
-    static List<string> PersonWords(string s) {
+    public static List<string> PersonWords(string s) {
         List<string> list = new List<string>();
         foreach (string w in s.ToLowerInvariant().Replace('ё', 'е').Split(new char[] { ' ', '.', ',', '\t' }, StringSplitOptions.RemoveEmptyEntries)) list.Add(w);
         return list;
+    }
+
+    // в одном поле ФИО бывает несколько человек: "ИВАНОВ И.И./ПЕТРОВА П.П."
+    static readonly char[] PersonSeparators = { '/', '\\', ';', '+' };
+
+    // ФИО подходит, если у кого-то из записанных людей слова идут так же: фамилия, имя, отчество - целиком;
+    // инициал подходит к имени ("иванов и" - "Иванов Иван", "иванов иван" - "Иванов И.И.").
+    // Двойная фамилия: "Свидлер Лишик Л.А." находится и по "лишик", и по "свидлер-лишик" - по "лишик".
+    public static bool NameMatches(string fio, List<string> q) {
+        if (q.Count == 0) return false;
+        foreach (string person in fio.Split(PersonSeparators, StringSplitOptions.RemoveEmptyEntries)) {
+            List<string> w = PersonWords(person);
+            // с какого слова может начинаться фамилия: с первого; со второго - если слов много (двойная фамилия)
+            for (int from = 0; from <= (w.Count >= 4 ? 1 : 0); from++) {
+                if (w.Count - from < q.Count) break;
+                bool ok = true;
+                for (int k = 0; k < q.Count && ok; k++) {
+                    string a = q[k], b = w[from + k];
+                    ok = a == b || (Initial(a) && b.StartsWith(a)) || (Initial(b) && k > 0 && a.StartsWith(b))
+                        || (k == 0 && Array.IndexOf(b.Split('-'), a) >= 0);
+                }
+                if (ok) return true;
+            }
+        }
+        return false;
+    }
+
+    static bool Initial(string w) {
+        return w.Length == 1 && char.IsLetter(w[0]);
+    }
+
+    // частичное совпадение: каждое слово - часть ФИО
+    public static bool ContainsAll(string fio, List<string> words) {
+        string f = fio.ToLowerInvariant().Replace('ё', 'е');
+        foreach (string w in words) if (f.IndexOf(w, StringComparison.Ordinal) < 0) return false;
+        return true;
     }
 
     // ФИО: вписанные слова - это фамилия, имя, отчество по порядку, каждое целиком.
@@ -5333,14 +5555,8 @@ public class AbonentQuery {
         if (q.Count == 0 || nameFields.Length == 0) return found;
         for (int i = 0; i < RowCount; i++) {
             int row = RowAt(i);
-            foreach (int f in nameFields) {
-                List<string> w = PersonWords(Text(row, f));
-                if (w.Count < q.Count) continue;
-                bool ok = true;
-                for (int k = 0; k < q.Count && ok; k++)
-                    ok = q[k] == w[k] || (q[k].Length == 1 && w[k].StartsWith(q[k])) || (w[k].Length == 1 && k > 0 && q[k].StartsWith(w[k]));
-                if (ok) { found.Add(row); break; }
-            }
+            foreach (int f in nameFields)
+                if (NameMatches(Text(row, f), q)) { found.Add(row); break; }
         }
         return found;
     }
@@ -5628,6 +5844,8 @@ public class AbonentSearch : Form {
     SearchResult current;
     bool searching, again;               // идёт поиск; пока он шёл, запрос поменялся
     bool scanning;
+    bool loadingNames;          // идёт первое чтение ФИО всех абонентов (для поиска по ФИО)
+    bool namesStopped;          // чтение ФИО остановили кнопкой - само больше не начинаем
     volatile bool cancelScan;
     bool cardWhenDone;                   // Enter: нашёлся один - сразу карточка
     Dictionary<string, bool> selected;   // выбранные сельсоветы (null - все)
@@ -5747,6 +5965,7 @@ public class AbonentSearch : Form {
         status.Dock = DockStyle.Fill;
         status.TextAlign = ContentAlignment.MiddleLeft;
         bottom.Controls.Add(status);
+        bottom.Controls.Add(BottomButton("В Excel", delegate { ExportResult(); }));
         bottom.Controls.Add(BottomButton("Отчёт", delegate { OpenReport(); }));
         bottom.Controls.Add(BottomButton("Все таблицы...", delegate { new DbfViewer(this.viewerSettings).Show(); }));
         bottom.Controls.Add(BottomButton("Где искать...", delegate { ChooseBase(); }));
@@ -5754,7 +5973,10 @@ public class AbonentSearch : Form {
         scanButton.Dock = DockStyle.Right;
         scanButton.Width = 150;
         scanButton.Visible = false;
-        scanButton.Click += delegate { if (scanning) cancelScan = true; else StartScan(); };
+        scanButton.Click += delegate {
+            if (scanning) { cancelScan = true; if (loadingNames) namesStopped = true; }
+            else { namesStopped = false; StartScan(); }
+        };
         bottom.Controls.Add(scanButton);
 
         timer.Interval = 400;
@@ -5796,6 +6018,31 @@ public class AbonentSearch : Form {
         b.Width = 120;
         b.Click += click;
         return b;
+    }
+
+    internal static string ExportFolder;   // для проверки: выгрузить в папку, не открывая Excel
+
+    // найденное - в Excel: те же столбцы, что в списке, цвета строк и примечание, почему строка добавлена
+    internal void ExportResult() {
+        SearchResult r = current;
+        if (r == null || r.Rows.Count == 0) { MessageBox.Show(this, "Сначала найдите что-нибудь.", Text); return; }
+        string[] headers = new string[kinds.Count + 1];
+        for (int c = 0; c < kinds.Count; c++) headers[c] = grid.Columns[c].HeaderText;
+        headers[kinds.Count] = "Примечание";
+        List<string[]> rows = new List<string[]>();
+        List<string> styles = new List<string>();
+        foreach (int row in r.Rows) {
+            string[] v = new string[headers.Length];
+            for (int c = 0; c < kinds.Count; c++) v[c] = ResultColumns.Text(r, row, kinds[c]);
+            v[kinds.Count] = ResultColumns.NoteText(r, row);
+            rows.Add(v);
+            styles.Add(ResultColumns.ExcelStyle(r, row));
+        }
+        try {
+            if (ExportFolder != null) Spreadsheet.Write(ExportFolder, "Поиск_абонента", headers, rows, styles);
+            else Spreadsheet.Open("Поиск_абонента", headers, rows, styles);
+        }
+        catch (Exception ex) { MessageBox.Show(this, "Не удалось выгрузить в Excel:\n" + ex.Message, Text); }
     }
 
     // из фонового потока - в окно
@@ -6096,7 +6343,7 @@ public class AbonentSearch : Form {
     internal void StartSearch() {
         timer.Stop();
         if (live == null) return;
-        if (scanning) { cancelScan = true; again = true; return; }
+        if (scanning) { if (!loadingNames) cancelScan = true; again = true; return; }
         if (searching) { again = true; return; }
         string text = queryBox.Text;
         if (DbfTable.SplitWords(text).Length == 0) { Show(null); return; }
@@ -6134,6 +6381,8 @@ public class AbonentSearch : Form {
         if (b != live) return;
         if (again || r.Text != queryBox.Text || r.Mode != mode || r.Partial != partialBox.Checked) { again = false; StartSearch(); return; }
         Show(r);
+        // индекса по ФИО нет - сразу читаем ФИО всех абонентов (один раз за запуск), потом ищем в памяти
+        if (r.NoIndex && r.Mode == SearchMode.Name && !scanning && !namesStopped && b.NamesNeeded) { StartScan(); return; }
         if (cardWhenDone) {
             cardWhenDone = false;
             LogSearch();
@@ -6149,16 +6398,33 @@ public class AbonentSearch : Form {
         if (DbfTable.SplitWords(text).Length == 0) return;
         scanning = true;
         cancelScan = false;
-        scanButton.Text = "Остановить перебор";
         SearchMode m = mode;
         Dictionary<string, bool> ss = selected;
         LiveBase b = live;
         bool partial = partialBox.Checked;
+        bool names = m == SearchMode.Name && b.NamesNeeded;
+        loadingNames = names;
+        scanButton.Text = names ? "Остановить чтение ФИО" : "Остановить перебор";
+        scanButton.Visible = true;
+        if (names) status.Text = "Первый поиск по ФИО: читаю ФИО всех абонентов из базы...";
         System.Threading.Thread th = new System.Threading.Thread(delegate() {
             SearchResult r = null;
             DateTime started = DateTime.Now;
             int shown = -1;
             try {
+                if (names) {
+                    b.LoadNames(delegate(int done, int expected) {
+                        if (cancelScan) throw new OperationCanceledException();
+                        int pct = (int)(done * 100L / Math.Max(expected, 1));
+                        if (pct == shown) return;
+                        shown = pct;
+                        double spent = (DateTime.Now - started).TotalSeconds;
+                        string left = pct > 2 ? ", осталось примерно " + TimeLeft(spent * (100 - pct) / pct) : "";
+                        PostStatus("Первый поиск по ФИО: читаю ФИО всех абонентов из базы - " + pct + "%" + left
+                            + ". Это один раз за запуск программы, дальше по ФИО ищется сразу.");
+                    });
+                    r = b.Search(text, m, ss, partial);
+                } else
                 r = b.Scan(text, m, ss, delegate(int done, int expected) {
                     if (cancelScan) throw new OperationCanceledException();
                     int pct = (int)(done * 100L / Math.Max(expected, 1));
@@ -6183,12 +6449,22 @@ public class AbonentSearch : Form {
     }
 
     void ScanDone(SearchResult r, LiveBase b) {
+        bool names = loadingNames;
         scanning = false;
+        loadingNames = false;
         scanButton.Text = "Искать перебором";
         if (b != live) return;
-        if (again) { again = false; StartSearch(); return; }
+        if (again || (names && r != null && (r.Text != queryBox.Text || r.Mode != mode || r.Partial != partialBox.Checked))) {
+            again = false;
+            StartSearch();
+            return;
+        }
         if (r == null) { UpdateStatus(); return; }
         Show(r);
+    }
+
+    static string TimeLeft(double seconds) {
+        return seconds < 60 ? Math.Max(5, (int)(seconds / 5) * 5) + " с" : Math.Max(1, (int)Math.Round(seconds / 60)) + " мин";
     }
 
     void Show(SearchResult r) {
@@ -6197,6 +6473,7 @@ public class AbonentSearch : Form {
         grid.RowCount = r == null ? 0 : r.Rows.Count;
         grid.Invalidate();
         scanButton.Visible = scanning || (r != null && r.NoIndex);
+        if (!scanning) scanButton.Text = r != null && r.Mode == SearchMode.Name && live.NamesNeeded ? "Прочитать ФИО из базы" : "Искать перебором";
         logTimer.Stop();
         if (r != null) logTimer.Start();
         UpdateStatus();
@@ -6215,6 +6492,8 @@ public class AbonentSearch : Form {
             status.Text = "Впишите " + Prompts[(int)mode] + ".   " + where;
         else if (r.Error != null)
             status.Text = "Ошибка при поиске: " + r.Error + "   Нажмите \"Отчёт\" и пришлите его.";
+        else if (r.NoIndex && r.Mode == SearchMode.Name && live.NamesNeeded)
+            status.Text = "Индекса по ФИО в базе нет. Чтобы искать по ФИО, программа один раз читает ФИО всех абонентов из базы (это может занять минуту-другую) - кнопка справа.";
         else if (r.NoIndex)
             status.Text = "Для поиска по полю \"" + Prompts[(int)r.Mode] + "\" в базе нет подходящего индекса. Можно искать перебором всей базы - это долго (минуты). Кнопка справа.";
         else if (r.Note.Length > 0 && r.Rows.Count == 0)
@@ -6560,6 +6839,22 @@ public static class ResultColumns {
         e.Handled = true;
     }
 
+    // примечание для выгрузки в Excel (цвета там есть, но почему строка в списке - видно только так)
+    public static string NoteText(SearchResult r, int row) {
+        string why;
+        if (r.Related.TryGetValue(row, out why)) return "добавлен: " + why;
+        if (r.Added.ContainsKey(row)) return "добавлен: другой тариф того же счётчика";
+        if (r.Orange.ContainsKey(row)) return "на адресе больше одного счётчика";
+        return "";
+    }
+
+    // цвет строки в Excel: t - тариф (зелёный), o - несколько счётчиков на адресе (оранжевый)
+    public static string ExcelStyle(SearchResult r, int row) {
+        if (r.Tariff.ContainsKey(row)) return "t";
+        if (r.Orange.ContainsKey(row)) return "o";
+        return null;
+    }
+
     // Ctrl+A в поле ввода - выделить всё
     public static void SelectAllKey(TextBox box) {
         box.KeyDown += delegate(object s, KeyEventArgs e) {
@@ -6611,26 +6906,42 @@ public static class ResultColumns {
 // Выгрузка таблицы строк в Excel ("Таблица XML 2003": все значения - текст, нули в начале не теряются)
 public static class Spreadsheet {
     public static void Open(string name, string[] headers, List<string[]> rows) {
-        string file = Path.Combine(Path.GetTempPath(), name + "_" + DateTime.Now.ToString("yyyyMMdd_HHmmss") + ".xml");
+        Open(name, headers, rows, null);
+    }
+
+    // styles - цвет каждой строки (null - без цвета): t - зелёный, o - оранжевый, y - жёлтый, n - красный
+    public static void Open(string name, string[] headers, List<string[]> rows, List<string> styles) {
+        string file = Write(Path.GetTempPath(), name, headers, rows, styles);
+        try { Process.Start("excel.exe", "\"" + file + "\""); }
+        catch { Process.Start(file); }
+    }
+
+    public static string Write(string folder, string name, string[] headers, List<string[]> rows, List<string> styles) {
+        string file = Path.Combine(folder, name + "_" + DateTime.Now.ToString("yyyyMMdd_HHmmss") + ".xml");
         using (StreamWriter w = new StreamWriter(file, false, new UTF8Encoding(false))) {
             w.WriteLine("<?xml version=\"1.0\" encoding=\"utf-8\"?>");
             w.WriteLine("<?mso-application progid=\"Excel.Sheet\"?>");
             w.WriteLine("<Workbook xmlns=\"urn:schemas-microsoft-com:office:spreadsheet\" xmlns:ss=\"urn:schemas-microsoft-com:office:spreadsheet\">");
-            w.WriteLine("<Styles><Style ss:ID=\"h\"><Font ss:Bold=\"1\"/></Style></Styles>");
+            w.WriteLine("<Styles><Style ss:ID=\"h\"><Font ss:Bold=\"1\"/></Style>" + Fill("t", "#D6F5D6") + Fill("o", "#FFCD96")
+                + Fill("y", "#FFF5C8") + Fill("n", "#FFDCDC") + "</Styles>");
             w.WriteLine("<Worksheet ss:Name=\"" + DbfTable.Xml(name) + "\"><Table>");
             w.Write("<Row>");
             foreach (string h in headers) w.Write("<Cell ss:StyleID=\"h\"><Data ss:Type=\"String\">" + DbfTable.Xml(h) + "</Data></Cell>");
             w.WriteLine("</Row>");
-            foreach (string[] row in rows) {
+            for (int i = 0; i < rows.Count; i++) {
+                string st = styles != null && i < styles.Count && styles[i] != null ? " ss:StyleID=\"" + styles[i] + "\"" : "";
                 w.Write("<Row>");
-                foreach (string v in row)
-                    w.Write(v == null || v.Length == 0 ? "<Cell/>" : "<Cell><Data ss:Type=\"String\">" + DbfTable.Xml(v) + "</Data></Cell>");
+                foreach (string v in rows[i])
+                    w.Write(v == null || v.Length == 0 ? "<Cell" + st + "/>" : "<Cell" + st + "><Data ss:Type=\"String\">" + DbfTable.Xml(v) + "</Data></Cell>");
                 w.WriteLine("</Row>");
             }
             w.WriteLine("</Table></Worksheet></Workbook>");
         }
-        try { Process.Start("excel.exe", "\"" + file + "\""); }
-        catch { Process.Start(file); }
+        return file;
+    }
+
+    static string Fill(string id, string color) {
+        return "<Style ss:ID=\"" + id + "\"><Interior ss:Color=\"" + color + "\" ss:Pattern=\"Solid\"/></Style>";
     }
 }
 
@@ -6648,8 +6959,6 @@ public class BatchSearch : Form {
     readonly List<Item> items = new List<Item>();
     bool running;
     volatile bool stop;
-
-    const int MaxPerLine = 20;   // если по строке нашлось много - показываем первые
 
     class Item {
         public int Line;
@@ -6805,8 +7114,21 @@ public class BatchSearch : Form {
         System.Threading.Thread th = new System.Threading.Thread(delegate() {
             DateTime started = DateTime.Now;
             int single = 0, several = 0, none = 0, done = 0;
+            // индекса по ФИО нет - сначала один раз читаем ФИО всех абонентов
+            if (m == SearchMode.Name && live.NamesNeeded && !live.NamesReady) {
+                int shown = -1;
+                try {
+                    live.LoadNames(delegate(int read, int expected) {
+                        if (stop) throw new OperationCanceledException();
+                        int pct = (int)(read * 100L / Math.Max(expected, 1));
+                        if (pct == shown) return;
+                        shown = pct;
+                        Post(delegate { status.Text = "Читаю ФИО всех абонентов из базы (один раз за запуск программы): " + pct + "%...   (кнопка \"Стоп\" - прервать)"; });
+                    });
+                } catch (OperationCanceledException) { }
+            }
             for (int i = 0; i < lines.Count && !stop; i++) {
-                SearchResult r = live.Search(lines[i], m, selected, 100, partial);
+                SearchResult r = live.Search(lines[i], m, selected, partial);
                 List<Item> add = new List<Item>();
                 if (r.Rows.Count == 0) {
                     string why = r.Error != null ? "ошибка: " + r.Error : r.NoIndex ? "нет индекса для поиска"
@@ -6817,12 +7139,12 @@ public class BatchSearch : Form {
                     none++;
                 } else {
                     int n = r.Searched;
-                    string result = n == 1 ? "найден" : "найдено " + n + (r.Rows.Count > MaxPerLine ? " (показаны " + MaxPerLine + ")" : "");
+                    string result = n == 1 ? "найден" : "найдено " + n + (r.TooMany ? " (очень много - показана часть)" : "");
                     if (r.Added.Count > r.Related.Count) result += " (+" + (r.Added.Count - r.Related.Count) + " др. тариф)";
                     if (r.Related.Count > 0) result += " (+" + r.Related.Count + " адрес/ФИО)";
                     if (r.Hidden > 0) result += " (+" + r.Hidden + " в других с/с)";
                     if (n == 1) single++; else several++;
-                    for (int k = 0; k < r.Rows.Count && k < MaxPerLine; k++)
+                    for (int k = 0; k < r.Rows.Count; k++)
                         add.Add(NewItem(i + 1, lines[i], result, r, r.Rows[k], n == 1 ? 0 : 1));
                 }
                 done = i + 1;
@@ -6944,7 +7266,12 @@ public class BatchSearch : Form {
             for (int c = 0; c < r.Length; c++) r[c] = Cell(it, c);
             rows.Add(r);
         }
-        try { Spreadsheet.Open("Поиск_по_списку", headers, rows); }
+        List<string> styles = new List<string>();
+        foreach (Item it in items) {
+            string st = it.Res != null && it.Row >= 0 ? ResultColumns.ExcelStyle(it.Res, it.Row) : null;
+            styles.Add(st ?? (it.Kind == 2 ? "n" : it.Kind == 1 ? "y" : null));
+        }
+        try { Spreadsheet.Open("Поиск_по_списку", headers, rows, styles); }
         catch (Exception ex) { MessageBox.Show(this, "Не удалось выгрузить в Excel:\n" + ex.Message, Text); }
     }
 }
