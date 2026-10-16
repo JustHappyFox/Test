@@ -10,6 +10,7 @@ $code = @'
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing.Drawing2D;
+using System.Drawing.Imaging;
 using System.Drawing;
 using System.Globalization;
 using System.IO.Compression;
@@ -753,6 +754,7 @@ public static class Ui {
         }
         if (c is CheckBox) return Math.Max(24, c.Font.Height + 8);
         if (c is Heaters) return ((Heaters)c).NeededHeight;
+        if (c is PhotoStrip) return ((PhotoStrip)c).HeightFor(width);
         if (c is ComboBox) return Math.Max(((ComboBox)c).PreferredHeight, c.Height);
         return InputHeightCached;
     }
@@ -1100,6 +1102,8 @@ public class Card {
             c.Location = new Point(x, 12 + Math.Max(0, (Title.Height - c.Height) / 2));
             x -= 12;
         }
+        // узко - пояснение рядом с заголовком прячем, чтобы кнопки на него не налезали
+        Sub.Visible = Extra.Count == 0 || x >= Sub.Right;
         int h = Grid.Layout(width);
         Panel.Height = h;
         return h;
@@ -1539,6 +1543,2137 @@ public class Heaters : Panel {
     static string Plain(string s) { s = s.Trim(); return s == Own ? "" : s; }
 
     static readonly Regex Pattern = new Regex(@"^(?<k>.*?)\s*-?\s*(?:(?<n>\d+)\s*шт\.?)?\s*-?\s*(?:(?<p>\d+(?:[.,]\d+)?)\s*кВт)?$", RegexOptions.IgnoreCase);
+}
+
+// Машиночитаемая зона паспорта (две строки по 44 знака с «<<<» внизу страницы с фото): своё распознавание,
+// без сторонних программ. Знаки - шрифт OCR-B, образцы зашиты в программу (MrzData). Проверка - контрольные цифры.
+public class MrzResult {
+    public string Line1 = "", Line2 = "";
+    public string Personal = "", Number = "", Surname = "", Names = "";
+    public bool Valid;          // сошлись все контрольные цифры
+    public bool PersonalOk;     // сошлась контрольная цифра личного номера
+    public int Checks;          // сколько контрольных цифр сошлось (из 5)
+    public string Info = "";    // как искали - без самих данных
+}
+
+// Серое изображение (0 - чёрный, 255 - белый)
+public class GrayImage {
+    public int W, H;
+    public byte[] P;
+
+    public GrayImage(int w, int h) { W = w; H = h; P = new byte[w * h]; }
+
+    public static GrayImage FromBitmap(Bitmap b) {
+        GrayImage g = new GrayImage(b.Width, b.Height);
+        BitmapData d = b.LockBits(new Rectangle(0, 0, b.Width, b.Height), ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
+        try {
+            byte[] row = new byte[Math.Abs(d.Stride)];
+            for (int y = 0; y < b.Height; y++) {
+                Marshal.Copy(new IntPtr(d.Scan0.ToInt64() + (long)y * d.Stride), row, 0, row.Length);
+                int o = y * g.W;
+                for (int x = 0; x < b.Width; x++) {
+                    int i = x * 3;
+                    g.P[o + x] = (byte)((row[i] * 114 + row[i + 1] * 587 + row[i + 2] * 299) / 1000);
+                }
+            }
+        } finally { b.UnlockBits(d); }
+        return g;
+    }
+
+    // поворот на 90° по часовой
+    public GrayImage Rotate90() {
+        GrayImage r = new GrayImage(H, W);
+        for (int y = 0; y < H; y++)
+            for (int x = 0; x < W; x++) r.P[x * r.W + (H - 1 - y)] = P[y * W + x];
+        return r;
+    }
+
+    public float Sample(double x, double y) {
+        if (x < 0) x = 0; if (y < 0) y = 0;
+        if (x > W - 1.001) x = W - 1.001; if (y > H - 1.001) y = H - 1.001;
+        int x0 = (int)x, y0 = (int)y;
+        double fx = x - x0, fy = y - y0;
+        int i = y0 * W + x0;
+        return (float)((P[i] * (1 - fx) + P[i + 1] * fx) * (1 - fy) + (P[i + W] * (1 - fx) + P[i + W + 1] * fx) * fy);
+    }
+}
+
+public static class Mrz {
+    public const string Chars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ<";
+    public const int GW = 16, GH = 20;
+    public const int TV = 9;        // видов образца у каждого знака: толщина штриха x размытие
+
+    class Comp { public int X0, Y0, X1, Y1, N; public double Cx { get { return (X0 + X1) / 2.0; } } public double Cy { get { return (Y0 + Y1) / 2.0; } } public int Wd { get { return X1 - X0 + 1; } } public int Ht { get { return Y1 - Y0 + 1; } } }
+
+    // ---------- загрузка: поворот по EXIF, уменьшение ----------
+
+    // как повёрнут снимок (метка EXIF от телефона): 1 - как есть, 3 - вверх ногами, 6 и 8 - на боку
+    public static int Orientation(Image img) {
+        try {
+            foreach (int id in img.PropertyIdList)
+                if (id == 0x0112) {
+                    byte[] v = img.GetPropertyItem(id).Value;
+                    if (v.Length < 2) return 1;
+                    int o = v[0] | v[1] << 8;
+                    if (o < 1 || o > 8) o = v[1] | v[0] << 8;      // байты в обратном порядке (EXIF «MM»)
+                    return o >= 1 && o <= 8 ? o : 1;
+                }
+        } catch { }
+        return 1;
+    }
+
+    // работа с картинками (GDI+) - по очереди: так надёжнее и старому компьютеру легче
+    public static readonly object Gdi = new object();
+
+    public static Bitmap Load(string path, int maxSide) {
+        byte[] bytes = File.ReadAllBytes(path);
+        lock (Gdi)
+        using (MemoryStream ms = new MemoryStream(bytes))
+        using (Image img = Image.FromStream(ms)) {
+            double k = Math.Min(1.0, (double)maxSide / Math.Max(img.Width, img.Height));
+            return Draw(img, Math.Max(1, (int)(img.Width * k)), Math.Max(1, (int)(img.Height * k)), Orientation(img));
+        }
+    }
+
+    // снимок -> новая картинка w x h (размер до поворота), повёрнутая по метке EXIF: 3 - на 180°, 6 - на 90° по часовой, 8 - против
+    public static Bitmap Draw(Image src, int w, int h, int orient) {
+        bool side = orient == 6 || orient == 8;
+        Bitmap b = new Bitmap(side ? h : w, side ? w : h, PixelFormat.Format24bppRgb);
+        using (Graphics g = Graphics.FromImage(b)) {
+            g.InterpolationMode = InterpolationMode.HighQualityBilinear;
+            if (orient == 6) { g.TranslateTransform(b.Width, 0); g.RotateTransform(90); }
+            else if (orient == 8) { g.TranslateTransform(0, b.Height); g.RotateTransform(270); }
+            else if (orient == 3) { g.TranslateTransform(b.Width, b.Height); g.RotateTransform(180); }
+            g.DrawImage(src, 0, 0, w, h);
+        }
+        return b;
+    }
+
+    public static MrzResult Read(string path) {
+        // строки ищем на уменьшенном снимке, а читаем по полному - мелкие знаки так чётче
+        GrayImage g, full;
+        lock (Gdi)
+        using (Bitmap b = Load(path, 4200)) {
+            full = GrayImage.FromBitmap(b);
+            double k = Math.Min(1.0, 2400.0 / Math.Max(b.Width, b.Height));
+            using (Bitmap sm = new Bitmap(Math.Max(1, (int)(b.Width * k)), Math.Max(1, (int)(b.Height * k)), PixelFormat.Format24bppRgb)) {
+                using (Graphics gr = Graphics.FromImage(sm)) { gr.InterpolationMode = InterpolationMode.HighQualityBilinear; gr.DrawImage(b, 0, 0, sm.Width, sm.Height); }
+                g = GrayImage.FromBitmap(sm);
+            }
+        }
+        MrzResult best = null;
+        StringBuilder info = new StringBuilder();
+        for (int rot = 0; rot < 4; rot++) {
+            if (rot > 0) { g = g.Rotate90(); full = full.Rotate90(); }
+            MrzResult r = Find(g, full, info);
+            if (r != null && (best == null || r.Checks > best.Checks)) best = r;
+            if (best != null && best.Valid) break;
+        }
+        if (best == null) { best = new MrzResult(); best.Info = "строки с <<< не найдены. " + info; }
+        else best.Info = info.ToString() + best.Info;
+        return best;
+    }
+
+    // ---------- поиск двух строк ----------
+
+    static MrzResult Find(GrayImage g, GrayImage full, StringBuilder info) {
+        bool[] dark = Binarize(g);
+        List<Comp> comps = Components(dark, g.W, g.H);
+        List<Comp> cand = new List<Comp>();
+        foreach (Comp c in comps)
+            if (c.Ht >= 7 && c.Ht <= g.H / 10 && c.Wd <= 3 * c.Ht && c.N >= 8) cand.Add(c);
+        cand.Sort(delegate(Comp a, Comp b) { return a.X0.CompareTo(b.X0); });
+        List<List<Comp>> lines = Chains(cand);
+        // пара строк: друг под другом, похожие, по ~44 знака
+        List<Comp> top = null, bottom = null;
+        double bestScore = double.MinValue;
+        for (int i = 0; i < lines.Count; i++)
+            for (int j = 0; j < lines.Count; j++) {
+                if (i == j) continue;
+                List<Comp> a = lines[i], b = lines[j];
+                double ha = CapHeight(a), hb = CapHeight(b);
+                if (ha / hb > 1.3 || hb / ha > 1.3) continue;
+                double hc = (ha + hb) / 2, dy = MeanCy(b) - MeanCy(a);
+                if (dy < 1.1 * hc || dy > 3.4 * hc) continue;
+                int ax0 = a[0].X0, ax1 = a[a.Count - 1].X1, bx0 = b[0].X0, bx1 = b[b.Count - 1].X1;
+                int ov = Math.Min(ax1, bx1) - Math.Max(ax0, bx0);
+                if (ov < 0.7 * Math.Min(ax1 - ax0, bx1 - bx0)) continue;
+                double score = -Math.Abs(a.Count - 44) - Math.Abs(b.Count - 44) - Math.Abs((ax1 - ax0) - (bx1 - bx0)) / hc;
+                if (score > bestScore) { bestScore = score; top = a; bottom = b; }
+            }
+        if (top == null) return null;
+        info.Append("строки найдены (" + top.Count + " и " + bottom.Count + " знаков, высота знака " + CapHeight(top).ToString("0") + " точек); ");
+        double f = (double)full.W / g.W;
+        List<double[]> s1 = ReadLine(full, Scale(top, f)), s2 = ReadLine(full, Scale(bottom, f));
+        if (s1 == null || s2 == null) return null;
+        return Decode(s1, s2);
+    }
+
+    static bool[] Binarize(GrayImage g) {
+        int w = g.W, h = g.H, r = Math.Max(10, Math.Min(w, h) / 50);
+        int[] sum = new int[(w + 1) * (h + 1)];
+        for (int y = 0; y < h; y++) {
+            int row = 0;
+            for (int x = 0; x < w; x++) {
+                row += g.P[y * w + x];
+                sum[(y + 1) * (w + 1) + x + 1] = sum[y * (w + 1) + x + 1] + row;
+            }
+        }
+        bool[] dark = new bool[w * h];
+        for (int y = 0; y < h; y++) {
+            int ya = Math.Max(0, y - r), yb = Math.Min(h, y + r + 1);
+            for (int x = 0; x < w; x++) {
+                int xa = Math.Max(0, x - r), xb = Math.Min(w, x + r + 1);
+                int s = sum[yb * (w + 1) + xb] - sum[ya * (w + 1) + xb] - sum[yb * (w + 1) + xa] + sum[ya * (w + 1) + xa];
+                int mean = s / ((xb - xa) * (yb - ya));
+                int v = g.P[y * w + x];
+                dark[y * w + x] = mean - v > Math.Max(14, mean * 18 / 100);
+            }
+        }
+        return dark;
+    }
+
+    static int Root(int[] p, int a) { while (p[a] != a) { p[a] = p[p[a]]; a = p[a]; } return a; }
+
+    // связные области (8 соседей)
+    static List<Comp> Components(bool[] dark, int w, int h) {
+        int[] lab = new int[w * h];
+        List<int> parent = new List<int>();
+        parent.Add(0);
+        for (int y = 0; y < h; y++)
+            for (int x = 0; x < w; x++) {
+                int i = y * w + x;
+                if (!dark[i]) continue;
+                int best = 0;
+                int[] nb = { x > 0 ? lab[i - 1] : 0, y > 0 ? lab[i - w] : 0, y > 0 && x > 0 ? lab[i - w - 1] : 0, y > 0 && x < w - 1 ? lab[i - w + 1] : 0 };
+                foreach (int n in nb) if (n > 0 && (best == 0 || n < best)) best = n;
+                if (best == 0) { best = parent.Count; parent.Add(best); }
+                lab[i] = best;
+                foreach (int n in nb) if (n > 0 && n != best) {
+                    // объединение двух областей
+                    int ra = n, rb = best;
+                    while (parent[ra] != ra) ra = parent[ra];
+                    while (parent[rb] != rb) rb = parent[rb];
+                    if (ra != rb) parent[Math.Max(ra, rb)] = Math.Min(ra, rb);
+                }
+            }
+        int[] par = parent.ToArray();
+        Dictionary<int, Comp> map = new Dictionary<int, Comp>();
+        for (int y = 0; y < h; y++)
+            for (int x = 0; x < w; x++) {
+                int l = lab[y * w + x];
+                if (l == 0) continue;
+                int r = Root(par, l);
+                Comp c;
+                if (!map.TryGetValue(r, out c)) { c = new Comp(); c.X0 = c.X1 = x; c.Y0 = c.Y1 = y; map[r] = c; }
+                if (x < c.X0) c.X0 = x; if (x > c.X1) c.X1 = x;
+                if (y < c.Y0) c.Y0 = y; if (y > c.Y1) c.Y1 = y;
+                c.N++;
+            }
+        return new List<Comp>(map.Values);
+    }
+
+    // цепочки знаков слева направо: соседний справа, той же высоты строки, недалеко
+    static List<List<Comp>> Chains(List<Comp> cand) {
+        List<List<Comp>> lines = new List<List<Comp>>();
+        bool[] used = new bool[cand.Count];
+        for (int s = 0; s < cand.Count; s++) {
+            if (used[s]) continue;
+            List<Comp> chain = new List<Comp>();
+            chain.Add(cand[s]);
+            int cur = s;
+            double href = cand[s].Ht;
+            while (true) {
+                Comp c = cand[cur];
+                int next = -1;
+                for (int j = cur + 1; j < cand.Count; j++) {
+                    Comp d = cand[j];
+                    if (d.X0 > c.X1 + 2.0 * href) break;
+                    if (used[j] || d.X0 < c.X0 + 0.4 * c.Wd) continue;
+                    if (Math.Abs(d.Cy - c.Cy) > 0.45 * href) continue;
+                    if (d.Ht < 0.3 * href || d.Ht > 1.45 * href) continue;
+                    if (next < 0 || d.X0 < cand[next].X0) next = j;
+                }
+                if (next < 0) break;
+                chain.Add(cand[next]);
+                cur = next;
+                href = Math.Max(href, Math.Min(cand[next].Ht, href * 1.45));
+            }
+            if (chain.Count >= 28) {
+                foreach (Comp c in chain) used[cand.IndexOf(c)] = true;
+                lines.Add(chain);
+            }
+        }
+        return lines;
+    }
+
+    static List<Comp> Scale(List<Comp> line, double f) {
+        List<Comp> r = new List<Comp>();
+        foreach (Comp c in line) {
+            Comp d = new Comp();
+            d.X0 = (int)(c.X0 * f); d.Y0 = (int)(c.Y0 * f); d.X1 = (int)((c.X1 + 1) * f) - 1; d.Y1 = (int)((c.Y1 + 1) * f) - 1; d.N = c.N;
+            r.Add(d);
+        }
+        return r;
+    }
+
+    static double CapHeight(List<Comp> line) {
+        List<int> hs = new List<int>();
+        foreach (Comp c in line) hs.Add(c.Ht);
+        hs.Sort();
+        return hs[(int)(hs.Count * 0.8)];
+    }
+
+    static double MeanCy(List<Comp> line) {
+        double s = 0;
+        foreach (Comp c in line) s += c.Cy;
+        return s / line.Count;
+    }
+
+    // ---------- строка: выпрямить, разрезать на 44 знака, сравнить с образцами ----------
+
+    // для каждого из 44 знаков - оценки сходства со всеми знаками OCR-B
+    static List<double[]> ReadLine(GrayImage g, List<Comp> line) {
+        double cap = CapHeight(line);
+        // наклон строки - по центрам высоких знаков
+        double sx = 0, sy = 0, sxx = 0, sxy = 0; int n = 0;
+        foreach (Comp c in line) if (c.Ht >= 0.75 * cap) { sx += c.Cx; sy += c.Cy; sxx += c.Cx * c.Cx; sxy += c.Cx * c.Cy; n++; }
+        if (n < 10) return null;
+        double b = (n * sxy - sx * sy) / (n * sxx - sx * sx), a = (sy - b * sx) / n;
+        double norm = Math.Sqrt(1 + b * b), dx = 1 / norm, dy = b / norm;
+        double x0 = line[0].X0 - 0.8 * cap, x1 = line[line.Count - 1].X1 + 0.8 * cap;
+        int L = (int)((x1 - x0) * norm), SH = (int)(2.6 * cap);
+        double px = x0, py = a + b * x0;
+        float[] strip = new float[L * SH];
+        for (int v = 0; v < SH; v++)
+            for (int u = 0; u < L; u++) {
+                double off = v - SH / 2.0;
+                strip[v * L + u] = g.Sample(px + u * dx - off * dy, py + u * dy + off * dx);
+            }
+        // уровни фона и краски в полосе
+        float[] sorted = (float[])strip.Clone();
+        Array.Sort(sorted);
+        float bg = sorted[(int)(sorted.Length * 0.85)], fg = sorted[(int)(sorted.Length * 0.02)];
+        if (bg - fg < 20) return null;
+        float[] ink = new float[strip.Length];
+        bool[] bin = new bool[strip.Length];
+        for (int i = 0; i < strip.Length; i++) {
+            float k = (bg - strip[i]) / (bg - fg);
+            ink[i] = k < 0 ? 0 : k > 1 ? 1 : k;
+            bin[i] = ink[i] > 0.45f;
+        }
+        List<Comp> cs = Components(bin, L, SH);
+        List<Comp> glyphs = new List<Comp>();
+        foreach (Comp c in cs)
+            if (c.Ht >= 0.25 * cap && c.Ht <= 1.6 * cap && Math.Abs(c.Cy - SH / 2.0) < 0.7 * cap && c.N >= 6) glyphs.Add(c);
+        if (glyphs.Count < 20) return null;
+        glyphs.Sort(delegate(Comp p, Comp q) { return p.Cx.CompareTo(q.Cx); });
+        List<int> hs = new List<int>();
+        foreach (Comp c in glyphs) hs.Add(c.Ht);
+        hs.Sort();
+        double capS = hs[(int)(hs.Count * 0.8)];
+        double mid = 0; int m = 0;
+        foreach (Comp c in glyphs) if (c.Ht >= 0.75 * capS) { mid += c.Cy; m++; }
+        mid = m > 0 ? mid / m : SH / 2.0;
+        double c0 = glyphs[0].Cx, c43 = glyphs[glyphs.Count - 1].Cx, pitch = (c43 - c0) / 43;
+        if (pitch < 0.6 * capS || pitch > 1.7 * capS) return null;
+        List<double[]> res = new List<double[]>();
+        for (int i = 0; i < 44; i++) {
+            double ci = c0 + i * pitch, lo = ci - pitch / 2, hi = ci + pitch / 2;
+            int bx0 = int.MaxValue, by0 = int.MaxValue, bx1 = -1, by1 = -1;
+            foreach (Comp c in glyphs) {
+                if (c.X1 < lo || c.X0 > hi) continue;
+                if (c.Cx < lo || c.Cx >= hi) { if (c.Wd < 1.3 * pitch) continue; }
+                bx0 = Math.Min(bx0, Math.Max(c.X0, (int)Math.Ceiling(lo)));
+                bx1 = Math.Max(bx1, Math.Min(c.X1, (int)Math.Floor(hi)));
+                by0 = Math.Min(by0, c.Y0);
+                by1 = Math.Max(by1, c.Y1);
+            }
+            double[] sc = new double[Chars.Length];
+            if (bx1 < 0) { for (int k = 0; k < sc.Length; k++) sc[k] = -2; res.Add(sc); continue; }
+            float[] grid = Grid(ink, L, bx0, by0, bx1, by1);
+            double relH = (by1 - by0 + 1) / capS, relY = ((by0 + by1) / 2.0 - mid) / capS, asp = (bx1 - bx0 + 1.0) / (by1 - by0 + 1);
+            for (int k = 0; k < Chars.Length; k++) sc[k] = Score(grid, relH, relY, asp, k);
+            res.Add(sc);
+        }
+        return res;
+    }
+
+    // знак -> сетка GW x GH: высота знака - во всю сетку, ширина - по пропорции, по центру
+    public static float[] Grid(float[] ink, int stride, int x0, int y0, int x1, int y1) {
+        float[] grid = new float[GW * GH];
+        double h = y1 - y0 + 1, w = x1 - x0 + 1;
+        double k = Math.Min(GH / h, GW / w);       // точек сетки на точку знака
+        double gw = w * k, gh = h * k, ox = (GW - gw) / 2, oy = (GH - gh) / 2;
+        for (int gy = 0; gy < GH; gy++)
+            for (int gx = 0; gx < GW; gx++) {
+                // клетка сетки -> прямоугольник в знаке; среднее по нему (по 3x3 точкам)
+                double s = 0; int cnt = 0;
+                for (int sy = 0; sy < 3; sy++)
+                    for (int sxi = 0; sxi < 3; sxi++) {
+                        double fx = (gx + (sxi + 0.5) / 3 - ox) / k, fy = (gy + (sy + 0.5) / 3 - oy) / k;
+                        cnt++;
+                        if (fx < 0 || fy < 0 || fx >= w || fy >= h) continue;
+                        s += ink[(y0 + (int)fy) * stride + x0 + (int)fx];
+                    }
+                grid[gy * GW + gx] = (float)(s / cnt);
+            }
+        return grid;
+    }
+
+    static float[][] templ;          // [знак * TV + вид]
+    static double[] tRelH, tRelY, tAsp;
+
+    static void LoadTemplates() {
+        if (templ != null) return;
+        int n = Chars.Length, size = GW * GH;
+        float[][] t = new float[n * TV][];
+        tRelH = new double[n]; tRelY = new double[n]; tAsp = new double[n];
+        for (int k = 0; k < n * TV; k++) {
+            t[k] = new float[size];
+            for (int i = 0; i < size; i++) t[k][i] = Convert.ToInt32(MrzData.Grids[k * size + i].ToString(), 16) / 15f;
+        }
+        for (int k = 0; k < n; k++) {
+            string[] p = MrzData.Shapes[k].Split(';');
+            tRelH[k] = double.Parse(p[0], System.Globalization.CultureInfo.InvariantCulture);
+            tRelY[k] = double.Parse(p[1], System.Globalization.CultureInfo.InvariantCulture);
+            tAsp[k] = double.Parse(p[2], System.Globalization.CultureInfo.InvariantCulture);
+        }
+        templ = t;
+    }
+
+    // сходство знака с образцом: лучшее из видов образца (корреляция) минус штраф за размер и положение
+    static double Score(float[] grid, double relH, double relY, double asp, int k) {
+        LoadTemplates();
+        double ma = 0;
+        for (int i = 0; i < grid.Length; i++) ma += grid[i];
+        ma /= grid.Length;
+        double saa = 0;
+        for (int i = 0; i < grid.Length; i++) saa += (grid[i] - ma) * (grid[i] - ma);
+        double best = 0;
+        for (int v = 0; v < TV; v++) {
+            float[] t = templ[k * TV + v];
+            double mb = 0;
+            for (int i = 0; i < grid.Length; i++) mb += t[i];
+            mb /= grid.Length;
+            double sab = 0, sbb = 0;
+            for (int i = 0; i < grid.Length; i++) { double db = t[i] - mb; sab += (grid[i] - ma) * db; sbb += db * db; }
+            double corr = saa > 0 && sbb > 0 ? sab / Math.Sqrt(saa * sbb) : 0;
+            if (v == 0 || corr > best) best = corr;
+        }
+        return best - 1.0 * Math.Abs(relH - tRelH[k]) - 0.6 * Math.Abs(relY - tRelY[k]) - 0.35 * Math.Abs(Math.Log(asp / tAsp[k]));
+    }
+
+    // ---------- строки -> данные: что где может стоять и контрольные цифры ----------
+
+    const string Digits = "0123456789", Letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+
+    public static int Val(char c) {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'A' && c <= 'Z') return c - 'A' + 10;
+        return 0;
+    }
+
+    public static char Check(string s) {
+        int[] w = { 7, 3, 1 };
+        int sum = 0;
+        for (int i = 0; i < s.Length; i++) sum += Val(s[i]) * w[i % 3];
+        return (char)('0' + sum % 10);
+    }
+
+    // допустимые знаки в позиции второй строки (паспорт РБ: номер ББЦЦЦЦЦЦЦ, личный номер ЦЦЦЦЦЦЦБЦЦЦББЦ)
+    static string Allowed2(int i) {
+        if (i <= 1) return Letters;
+        if (i <= 9) return Digits;
+        if (i <= 12) return Letters;
+        if (i <= 19) return Digits;
+        if (i == 20) return "MF<";
+        if (i <= 27) return Digits;
+        if (i <= 34) return Digits;
+        if (i == 35) return "ABCEHKM";
+        if (i <= 38) return Digits;
+        if (i <= 40) return Letters;
+        return Digits;
+    }
+
+    static string Allowed1(int i) {
+        if (i == 0) return "P";
+        if (i == 1) return Letters + "<";
+        if (i <= 4) return Letters;
+        return Letters + "<";
+    }
+
+    class Pick { public char C; public double S; public char C2; public double S2; }
+
+    static Pick Best(double[] sc, string allowed) {
+        Pick p = new Pick();
+        p.S = p.S2 = double.MinValue;
+        foreach (char c in allowed) {
+            double s = sc[Chars.IndexOf(c)];
+            if (s > p.S) { p.C2 = p.C; p.S2 = p.S; p.C = c; p.S = s; }
+            else if (s > p.S2) { p.C2 = c; p.S2 = s; }
+        }
+        return p;
+    }
+
+    static MrzResult Decode(List<double[]> s1, List<double[]> s2) {
+        StringBuilder a = new StringBuilder(), b = new StringBuilder();
+        for (int i = 0; i < 44; i++) a.Append(Best(s1[i], Allowed1(i)).C);
+        Pick[] p2 = new Pick[44];
+        for (int i = 0; i < 44; i++) { p2[i] = Best(s2[i], Allowed2(i)); b.Append(p2[i].C); }
+        char[] l2 = b.ToString().ToCharArray();
+        bool blr = new string(l2, 10, 3) == "BLR";
+        if (blr) {
+            // в личном номере РБ - дата рождения (ДДММГГ), та же, что в поле даты (ГГММДД): читаем обе вместе
+            int[][] pairs = { new int[] { 13, 33 }, new int[] { 14, 34 }, new int[] { 15, 31 }, new int[] { 16, 32 }, new int[] { 17, 29 }, new int[] { 18, 30 } };
+            foreach (int[] pr in pairs) {
+                char bestC = l2[pr[0]];
+                double bestS = double.MinValue;
+                foreach (char c in Digits) {
+                    double sc = s2[pr[0]][Chars.IndexOf(c)] + s2[pr[1]][Chars.IndexOf(c)];
+                    if (sc > bestS) { bestS = sc; bestC = c; }
+                }
+                l2[pr[0]] = l2[pr[1]] = bestC;
+            }
+            // первая цифра личного номера - пол и век: 1, 3, 5 - мужской, 2, 4, 6 - женский
+            char sx = l2[20], d0 = l2[28];
+            if (sx == 'M' && "135".IndexOf(d0) < 0 || sx == 'F' && "246".IndexOf(d0) < 0) {
+                string allowedSex = sx == 'M' ? "135" : "246";
+                double bs = double.MinValue;
+                foreach (char c in allowedSex) if (s2[28][Chars.IndexOf(c)] > bs) { bs = s2[28][Chars.IndexOf(c)]; l2[28] = c; }
+            }
+        }
+        // поля с контрольной цифрой: [начало, конец) и место контрольной цифры
+        int[][] fields = { new int[] { 0, 9, 9 }, new int[] { 13, 19, 19 }, new int[] { 21, 27, 27 }, new int[] { 28, 42, 42 } };
+        foreach (int[] f in fields) Repair(l2, p2, f[0], f[1], f[2]);
+        string line2 = new string(l2);
+        MrzResult r = new MrzResult();
+        r.Line1 = a.ToString();
+        r.Line2 = line2;
+        int ok = 0;
+        foreach (int[] f in fields) if (Check(line2.Substring(f[0], f[1] - f[0])) == line2[f[2]]) ok++;
+        string comp = line2.Substring(0, 10) + line2.Substring(13, 7) + line2.Substring(21, 22);
+        if (Check(comp) == line2[43]) ok++;
+        r.Checks = ok;
+        r.Valid = ok == 5;
+        r.PersonalOk = Check(line2.Substring(28, 14)) == line2[42];
+        if (blr) {
+            string dob = line2.Substring(13, 6), pn = line2.Substring(28, 14);
+            bool same = pn.Substring(1, 2) == dob.Substring(4, 2) && pn.Substring(3, 2) == dob.Substring(2, 2) && pn.Substring(5, 2) == dob.Substring(0, 2);
+            bool sex = line2[20] == 'M' ? "135".IndexOf(pn[0]) >= 0 : "246".IndexOf(pn[0]) >= 0;
+            if (!same || !sex) { r.PersonalOk = false; r.Valid = false; }
+        }
+        r.Number = line2.Substring(0, 9).Replace("<", "");
+        r.Personal = line2.Substring(28, 14);
+        string names = r.Line1.Substring(5).TrimEnd('<');
+        int sep = names.IndexOf("<<");
+        r.Surname = (sep < 0 ? names : names.Substring(0, sep)).Replace('<', ' ').Trim();
+        r.Names = sep < 0 ? "" : names.Substring(sep + 2).Replace('<', ' ').Trim();
+        r.Info = "контрольных цифр сошлось " + ok + " из 5";
+        return r;
+    }
+
+    // контрольная цифра не сошлась - заменяем ОДИН самый сомнительный знак на второй вариант,
+    // и только если он и правда почти равноценен (иначе подгонка под контрольную цифру даст чужой номер)
+    static void Repair(char[] l, Pick[] p, int from, int to, int chk) {
+        if (Check(new string(l, from, to - from)) == l[chk]) return;
+        int found = -1, count = 0;
+        for (int i = from; i <= to; i++) {
+            int pos = i == to ? chk : i;
+            if (p[pos].C2 == '\0' || p[pos].S - p[pos].S2 > 0.08) continue;
+            char[] t = (char[])l.Clone();
+            t[pos] = p[pos].C2;
+            if (Check(new string(t, from, to - from)) == t[chk]) { found = pos; count++; }
+        }
+        if (count == 1) l[found] = p[found].C2;
+    }
+}
+
+// Образцы знаков OCR-B (шрифт OCR-B, общественное достояние) для распознавания строк паспорта
+public static class MrzData {
+    // знак за знаком (0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ<), у каждого 9 вида (толщина x размытие), по 320 клеток, яркость краски 0..F
+    public const string Grids =
+        "000037DFEC7200000005FFFFFFFE3000001EFFC98BFFD000009FF600007FF70000EFB000000CFD0000FF9000000AFF0002FF50000007FF0004FF4000" +
+        "0005FF2005FF30000004FF3005FF30000004FF4005FF20000004FF4005FF30000004FF4005FF30000005FF3003FF50000007FF1000FF9000000AFF00" +
+        "00FFB000000CFD00009FF600008FF700001EFFB88BFFD0000004EFFFFFFF4000000027DFFE930000001257899975310001259BBBBBB963100159BB98" +
+        "89BB9520026AB854458AB730038B95211259B940049B84100137BA4004AB73100026AA5005AB72000026AA5005AB62000025AB5005AB62000025AB60" +
+        "05AB62000025AB6005AB62000025AB6005AB62000026AB5004AB73100026BA50049B84100137BA40038BA6211259B940027AB854458BB7300148BB98" +
+        "89BB952000259BBBBBBA6310001257899986310000046777777640000004777777774000000576666667400000046655556640000004654344564000" +
+        "000454323346400000045322234540000004532122454000000443211235400000044321123540000004432112354000000453212235400000045322" +
+        "234540000004543223454000000454333356400000046544455640000004665556675000000477666677400000047777777740000004677777764000" +
+        "00004AEFFD9400000009FFFFFFFF7000006FFFFFFFFFF40000BFFFC99CFFFA0001FFFB1001DFFE0005FFF500005FFF3008FFF300004FFF6009FFF000" +
+        "001FFF700AFFD000000FFF800AFFD000000EFF900AFFC000000EFF900AFFD000000EFF900AFFE000001FFF8009FFF300004FFF7006FFF500006FFF40" +
+        "02FFFC1002DFFE1000BFFFC99CFFFB00005FFFFFFFFFF4000008FFFFFFFF800000004AEFFFB50000001368AAAA9641000137ADDDDDDB7410016ADEDD" +
+        "CDEDB620028CEDA88ACED93003ADDA6436ADEA4004BEC831137CEB5005BEB620015BEC5005CEB510015ADC5005CEA510014ADC6005CDA5100149DD60" +
+        "05CDA5100149DD6005CEB510014ADD6005CEB620015ADC6005BEC720026BEC5004BED942148CEB50039DEB8557BEEA40027CEDCAABDEC8300159CEED" +
+        "DEEDA61000259BCDDDCA631000124688987531000134677887754310024689999987642003689AAAAAA976300479AA9999A987300489A98778999740" +
+        "048998666789984005899754457998400589864334689850058986433468985005898642246898500589864224689850058986433468985005898643" +
+        "34689850058997544579985004899866678998400489A987789A98400479AA9999AA973003689AAAAAA9863002467899999864200134677887764310" +
+        "000037CEEB6200000002FFFFFFFE1000001DF953349FC000005FA000000BF500009F10000003F70000EF00000000FC0001FF00000000FE0003FD0000" +
+        "0000FF2005FD00000000EF3005FD00000000EF4005FC00000000EF4005FC00000000EF4005FD00000000EF3002FE00000000FF1000EF00000000FD00" +
+        "00AF20000003F800005FB000000CF500001CF94334AFC0000001EFFFFFFF1000000026CEFD7300000012568887642100002589999998520001479866" +
+        "668974100169853223588510027963100136971002895200002598200288410000248820029841000014892002984100001489200398410000148920" +
+        "039841000014892003984100001489200298410000148920029841000025982002895200002598200279631001369720016985322368961001479866" +
+        "678974100025899999985200001256888875210000000000000000000000000000000000000000000000000000000000000000000000000000000000" +
+        "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000" +
+        "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000" +
+        "000000004DE7000000000005FFFE00000000009FFFFE0000000019FFECFE00000000AFFC49FE00000000FFD209FE00000000260009FE000000000000" +
+        "09FE00000000000009FE00000000000009FE00000000000009FE00000000000009FE00000000000009FE00000000000009FE00000000000009FE0000" +
+        "0000000009FE00000000000009FE00000000000009FE00000000000009FE00000000000003E70000000001247996000000001258BDC900000000369B" +
+        "DDD90000000059BCCCC9000000008BA99AC900000000798669B900000000454358B900000000221148B900000000000148B900000000000148B90000" +
+        "0000000148B900000000000148B900000000000148B900000000000148B900000000000148B900000000000148B900000000000148B9000000000001" +
+        "48B900000000000148A90000000000013687000015566677777766522566777787777662266777888887776226778888888887722777888999988772" +
+        "277888999998887227888999999988722788899999998872278889999999887227788899999888722778888999988872267788888888887226777888" +
+        "888887722666777888888772256667777887777225566677777777721455566777777772144556667777776214445566677777621344455667777762" +
+        "000000019EFB10000000002CFFFF4000000003DFFFFF400000004EFFFFFF40000003FFFFFFFF40000005FFFEAFFF40000003FFF34FFF400000001210" +
+        "4FFF4000000000004FFF4000000000004FFF4000000000004FFF4000000000004FFF4000000000004FFF4000000000004FFF4000000000004FFF4000" +
+        "000000004FFF4000000000004FFF4000000000004FFF4000000000004FFF4000000000001BEB1000000001257997200000001359CDDA2000000036AD" +
+        "EFEB300000016ADEFFEB300000029DEEEEEB30000002ADDBCDEB300000028A989CEB3000000145447BDB3000000011126BDB3000000000026BDB3000" +
+        "000000026BDB3000000000026BDB3000000000026BDB3000000000026BDB3000000000026BDB3000000000026BDB3000000000026BDB300000000002" +
+        "6BDB3000000000025ACA20000000000137872000000135677876200000015789AA9720000002689BBBA82000000279BCCBA8200000028ABCCCB92000" +
+        "000289ABBBA920000002789ABBA82000000256799AA82000000145689998200000012456899820000000234679982000000012367998200000001235" +
+        "789820000000123578982000000012357898200000001235789820000000123578982000000012357888200000001235688720000000113467762000" +
+        "000000002AE6000000000003DFFE00000000005DFFFE0000000004FF95FE000000009FF504FE00000000AD4004FE00000000010004FE000000000000" +
+        "04FE00000000000004FE00000000000004FE00000000000004FE00000000000004FE00000000000004FE00000000000004FE00000000000004FE0000" +
+        "0000000004FE00000000000004FE00000000000004FE00000000000004FE00000000000001B70000000001247874000000001357ABA5000000002589" +
+        "BCB50000000048999AA500000000587679A5000000004654589500000000232247950000000011114795000000000001479500000000000147950000" +
+        "000000014795000000000001479500000000000147950000000000014795000000000001479500000000000147950000000000014795000000000001" +
+        "479500000000000147950000000000013684000066777777777777776677777777777777777777777777777777777777777777777777777777777777" +
+        "777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777" +
+        "777777777777777777777777777777777777777777777777777777777777777777777777777777777777777766777777777777776677777777777777" +
+        "00025ADFEC720000005EFFFFFFFE300000CFFEB99DFFE200007C8100018FF90000000000000EFA0000000000000CFB0000000000000EFA0000000000" +
+        "005FF9000000000009FFE10000000002BFFF40000000006EFFD4000000000BFFFA1000000001DFFE300000000008FFC200000000002FFD1000000000" +
+        "009FF3000000000000AFF0000000000000AFF8888888840000AFFFFFFFFFFE00005EFFFFFFFFF90000247899987521000048ABBBBBB952000059AA98" +
+        "8ABB940000377544469BB50000233211136AB600000110000259B60000000000126AB60000000001258BA5000000001358BB8300000012469BB95200" +
+        "0001258ABB852100001258ABA752100000158BB9632100000037BB8521000000004AB95210000000005BB84211111000005BC96444443200006CCB99" +
+        "99997400005ACCBBBBBB9500003788888888730000156667777662000015566667776200001445556677720000133444566772000012223345677200" +
+        "000112234567720000011123456772000001123456776200000123456677620000023456677652000013456676654100001456676654310000156776" +
+        "654321000026777654322000002777765432200000278876543321000028887665443100002888876655410000278887766651000026777776665100" +
+        "00037BEFFD940000008FFFFFFFFF800002FFFFFFFFFFF70002FFFFD9BFFFFB00009DB20001DFFF0000000000009FFF200000000000AFFF1000000000" +
+        "08FFFD0000000001AFFFF9000000005DFFFFC200000018FFFFFD30000001AFFFFFB200000009FFFFD6000000005FFFFC1000000000AFFFC000000000" +
+        "00BFFE100000000000CFFD888888850000CFFFFFFFFFFF3000CFFFFFFFFFFF40008FFFFFFFFFFC10003579AAA9853100007ACDDDDDCA6300009DEEDD" +
+        "DEEDA500009CCA989BDEC7000067754347BED9000023221125ADD9000001000126AED9000000001259CEC800000001369CEEB6000001247ADEEC8400" +
+        "001259CDEDB8420000259CEEDA7420000049CEDB96310000006BEEB742100000008DEC9521111000009DEC854333320000ADEDA999988500009DEEDD" +
+        "DDDDB800008CDDDDDDDDB80000578999999885000045677877654300005789999987640000678999AAA97500005788899AAA86000045666789AA9700" +
+        "0034445678AA97000022334568AA97000012234579AA97000012345789A98600002345789A99750000245789A99764000045799A9876430000579AA9" +
+        "875432000068AAA9764321000079ABA876433200008ABBA976554300008ABBA9887654000079ABAA9987650000689AA9998865000056788888776400" +
+        "00025ADFEA610000005EFFFFFFFD000000EF954345CFA00000340000002EF400000000000008FA00000000000006FA00000000000009F80000000000" +
+        "005EE2000000000002DF7000000000007EF900000000003CFE700000000006FFC200000000008EF6100000000005FE4000000000001DF50000000000" +
+        "006FD0000000000000AF80000000000000CF83333333200000CFFFFFFFFFF800005EFFFFFFFFE6000024678887642100003799999997520000477766" +
+        "678973000024432224698400001111000148950000000000013795000000000001489500000000001369840000000012368963000000012478974100" +
+        "000013589874200000014689853200000014688642100000002688642100000000389741000000000059852100000000005A853222221100006AA866" +
+        "66654200005ABA9999987300004799988888730000000000000000000000000000000000000000000000000000000000000000000000000000000000" +
+        "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000" +
+        "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000" +
+        "01ADDDDDDDDDC40004FFFFFFFFFFFA00007AAAAAAAFFFA000000000008FFC300000000008FFE300000000007FFF100000000006FFD300000000005FF" +
+        "F700000000000EFFFFF80000000005ACFFFFB1000000000017CFF80000000000000EFE00000000000006FF30000000000004FF50000000000006FF40" +
+        "00000000000DFE000065000003AFF90003FFEA89CFFFD10002EFFFFFFFFB20000037CEFEC85000000078999999997400008BBBBBCCDCA60000688889" +
+        "ACDDA500003444469BDB8400001111359BB8520000001258BB9521000000258BCA731000000137BDDA731000000138BDDB96410000012689ABBA7300" +
+        "0000124568ABA60000000111247BB800000000000249B900000000000148B900000000000149B90000221111247AB8000055544457ABA60000899888" +
+        "9ABB8400009BBBBBBBA74200006899998763210000006777776500000000778888760000000078899987000000007889998600000000678998760000" +
+        "000067899875000000006789986500000000678987640000000067898865000000006788886500000000567888760000000045667776000000002345" +
+        "677700000000223456770000000012345677000000002234567700000000333456770000000044556777000000005566777600000000667777650000" +
+        "03CDDDDDDDDDD70009FFFFFFFFFFFD0008FFFFFFFFFFFD00019AAAAADFFFFC0000000003FFFFE3000000003FFFFE3000000004FFFFF3000000002DFF" +
+        "FFC2000000005FFFFFFE700000002EFFFFFFF80000000268AFFFFE100000000003DFFF7000000000004FFF9000000000000FFFA000000000006FFF90" +
+        "0023000004EFFF5008FFFD9AEFFFFD000AFFFFFFFFFFF50007FFFFFFFFFE40000049CEFFEA620000037999999999862005ACDDDDDDDDC83004ACCCDD" +
+        "EFFFD9300368889BDEFEC83001233469DEEDA6200001147BEEDA6310000126ADEEC83100000149CEFEC8410000015ADEFEDB7410000148BCDEEDB720" +
+        "000124689BDEDA400000112347ADEB5000000000137CEC6000000000026BEC6001111111148CEC600255543458BDEB50049BA999ACDED93005BDDDDD" +
+        "DEEDA62004ACDDDDDDC9631002689AAA987521000047788888765300005899AAAA98630000589ABBCCB9740000478ABCCCB97300003679BCCCB96300" +
+        "002579ACCCA86300002469ACCBA75200002469ACCBA85200002468ABCBA863000013579ABBA97400001345789AA984000012345689AA850000112345" +
+        "78AA950000122335689A95000023344579AA95000035566789AA8500004778899AA9740000589999A998630000589999987652000047788776543100" +
+        "019DDDDDDDDDC20001EFFFFFFFFFF8000025555555BFF3000000000003FF7000000000003EF5000000000001EF9000000000003EF8000000000002DF" +
+        "F4000000000008FFFFB20000000001569DFE700000000000017DF300000000000007FC00000000000001FF20000000000000DF40000000000000EF30" +
+        "000000000005FD0000000000001CF50002BA843359DFA00002EFFFFFFFF900000007BDFEB7100000006888888998620000789999ABCB830000456666" +
+        "8ACB73000022223469A95200000001257985210000000247986310000000147AA74100000001269CA74210000001369BB97421000000246889975200" +
+        "000012334689730000000001136895000000000001479500000000000137960000000000013795000011100012589500003332223579840000676666" +
+        "789852000079999999863100005788887642100000067777777760000007777777777000000777777777700000077777777770000007777777777000" +
+        "000777777777700000077777777770000007777777776000000777777777600000077777777660000006777777666000000677777766600000067777" +
+        "766660000006777766665000000777776666500000077777666650000007777766655000000777776665500000077777666550000007777766665000" +
+        "00000008E50000000000001FFA000000000000AFF2000000000001FFB0000000000008FF5000000000002FFB0000000000006FF5000000000001DFD1" +
+        "000000000007FF5001510000000CFF000BF70000006FF7000DFA000000DFD1000DFA000002FFA3333EFB310005FFFFFFFFFFFF1004FFFFFFFFFFFF20" +
+        "005555555EFC5500000000000DFA0000000000000DFA0000000000000DFA00000000000005D4000000000137863100000000026AB74100000000148B" +
+        "A63100000000269B95200000000138BA73100000000259B95200000000147BB74100000000259BA5211110000137AB83234421000159BA6225774100" +
+        "027BB84237A96200029BB74248BA731003ACB8667ACC951003BDCBA9ACDDB82003ACCCBBCDEECA3002688889ACDDB820013444456ACB951000111112" +
+        "48BA73000000000137A96200000000002577410000000000000000000000000000000000122222222211111155677766554433225677776655544433" +
+        "6677777665555443677877766666655477888777777776657888888788888776788888888889887678889889999999877788889999AAA98767788889" +
+        "99AAA9986677788899AAA988556667788999998744455667788998773334445667788776111111122222222200000000000000000000000000000000" +
+        "0000002DFB000000000000AFFF100000000002EFFE000000000009FFF900000000001EFFE300000000008FFFA00000000000DFFF400000000007FFFA" +
+        "00000000000CFFF41AC70000006FFFB05FFE000000BFFF505FFF000005FFFC005FFF00000AFFFEDDEFFFDB200AFFFFFFFFFFFF900AFFFFFFFFFFFF80" +
+        "029AAAAACFFFA920000000005FFF0000000000005FFF0000000000005FFF0000000000002BD8000000000147974100000000137BCA510000000025AD" +
+        "DA510000000137CED941000000015ADEB620000000137CED9410000000149DEB731000000036BEDA633210000149DEC866763100027BEDA66AB95100" +
+        "039CEC857BDB620004BEEC868CEC841005CEEDAABDEDA73006CEFEDDEEFEDB5005BDEDDEEFFFEB500389AAAACEEEB940013444469CEC852000111113" +
+        "7CDB6310000000026ACA5200000000014897410000123567765421000123467887642100012357899764210001346899975421000245799997532100" +
+        "034689A98753211003579AA98754321004689AA9876533200579AAA9877643200689AAA998876530079ABBAAA9987640079BBBBAAAAA975008ABBBBB" +
+        "BBBBA86008ABBBBBCCCCB970079ABBBBCCCCBA8006899AABBCCCBA7005678899ABBBA970034566789AAA986002334456799987500112233567777540" +
+        "00000006D20000000000000FF20000000000005FB0000000000000CF60000000000007FB0000000000000AF40000000000003FE0000000000000CF60" +
+        "000000000004FD00000000000008F60003A40000002FE20008F9000000AF800008FA000001FE100008FA000005FE88888CFD850004FFFFFFFFFFFF10" +
+        "009AAAAAADFDA7000000000008FA00000000000008FA00000000000008FA00000000000004E500000000013686310000000012588631000000001479" +
+        "742000000000258963100000000147985210000000025897310000000013798521000000002489741111100001369853112321000147974213554200" +
+        "02688521247863100379752125897310049A8533479A852005AB976679BCA730059BBA99ABCDC950037899999BCDB9400245555568BB973001122222" +
+        "469A84200000000025896310000000001478521000000000000000000000000000000000000000000000000000000000000000000000000000000000" +
+        "777666677777777677777777777777767777777788888877777777778888888766777777888888876666777788888887566667777888888755566667" +
+        "778888774455556677777776444455566777776600000000000000000000000000000000000000000000000000000000000000000000000000000000" +
+        "0004CDDDDDDDC200000CFFFFFFFFF600000DFFAAAAAA9000000EFE0000000000000FFD0000000000000FFC0000000000000FFE9851000000000FFFFF" +
+        "FE600000000EFFFFFFFD1000000144456BFFC0000000000000CFF20000000000002FF70000000000000EFA0000000000000EF90000000000005FF600" +
+        "0000000002FFF000000000028EFF700000078ADFFFFA0000007FFFFFFE400000003EEDB85100000000168999999861000029BCCBBBBA8200002ACB98" +
+        "88875100002AB96444432000002AB84211111000002BB95321100000002BCB8764310000002ACCBAA86420000028AAABBBA74100001456678ABA7100" +
+        "0001222247AB920000000000148BA20000000000027BB30000000000137BB20000000000249BA2000001112358BB8200001344579AB961000026889A" +
+        "BBA730000029BBBBA8631000002899876421000000266777766651000026788776655100002788877665410000278887655441000027888765443100" +
+        "002788876544310000278887665431000027788776554100002677777766510000156677777662000014555667776200001334455677720000022233" +
+        "456772000001122345677200000111223567720000011122456772000001223345677200001233445677720000134455677762000014556677766200" +
+        "0008DDDDDDDDD400000FFFFFFFFFFC00000FFFFFFFFFFB00000FFFCAAAAAA200001FFF5000000000002FFF5000000000003FFFFEC7100000003FFFFF" +
+        "FFE90000003FFFFFFFFFA0000007999CFFFFF300000000003CFFFA000000000002EFFE000000000000AFFF000000000000DFFF000000000007FFFD00" +
+        "00000002AFFFF60000189BEFFFFFE00000BFFFFFFFFE300000DFFFFFFFA20000006FFEDA6300000000268999999973000049CDDDDDDDA500005BEEDD" +
+        "CCCCA500005BEDB988886300005BEC9543332100005BEC9543211000005CEDCA87531000005BEEEDCB973100005ACDDDEEDB73000036889ABDEDA400" +
+        "001334457ADEC6000000111137BEC6000000000025ADD7000000000026BED7000000011259CEC600001234569CEEB500003789ABDEEC8300005BCDDE" +
+        "EDC95200006CDDDDCA8521000048AA98753210000035678887765300004789999987630000489AAA998763000059ABAA987652000059ABA987654200" +
+        "0059BBA9876532000059ABAA986542000058AAAA98764200004799AAA9976300003678899AA974000024566789A984000012344679AA850000112235" +
+        "689A950000112235689A95000012334679AA85000023456789A98400003567899AA9730000367899A997530000478999987642000036788776543100" +
+        "0004CDDDDDDDA000000CFFFFFFFFF000000DF85555552000000EF30000000000000FF20000000000000FF10000000000000FF54200000000000FFFFF" +
+        "DA300000000AEDDEFFF500000000000037FE500000000000004FD00000000000000BF10000000000000AF40000000000000AF40000000000000CF100" +
+        "00000000007FC0000000000008FE20000002357ADFE40000003FFFFFFC200000002EEDA61000000000158888888751000028AAA9999851000028A976" +
+        "665531000029974222221000002995210000000000299632110000000029B975432100000028AA998753100000168888998630000013444567985100" +
+        "000111122579720000000000126982000000000002589200000000000258920000000000136982000000001125897100000122346898510000146678" +
+        "997530000027899987531000002688765321000000000000000000000000000000000000000000000000000000000000000000000000000000000000" +
+        "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000" +
+        "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000" +
+        "000000002C91000000000001DFF300000000001CFF700000000000CFF9000000000008FFB000000000005FFC100000000002EFF300000000000AFFDA" +
+        "AA400000003FFFFFFFFA300000BFFFFFFFFFC00000FFFA0000AFFA0002FFB000000BFF0004FF60000007FF2005FF30000004FF4004FF30000005FF30" +
+        "01FF80000009FF1000EFE500006EFD00005FFFC99DFFF3000006FFFFFFFE5000000037CEEC620000000000247974100000000147AB8410000000137A" +
+        "B96310000001369BA7310000001269BA7410000000149BC9531000000137BDC964321000025ADEDBA9863100037BEEDCBBBA7310049CDCA99ABB9620" +
+        "05ACB854458AB83005BC85211258BA4006BB63100136BA5006BA52000026AB5005BA62100136BA5005AB84211258BA50049BA864568BB830026ABB99" +
+        "9ABBA6200137ABBBBBB96310001367999875310002345677765432100345677876543210035678888755322004578899876543200568999987654320" +
+        "06789AA99876543006899AA9987765400789999988777650078999887777776007888876666777600788776555667770077776544456677007776543" +
+        "344567700777654333456770077765433445677007776654445667700677766555667770067777666667776005677777777776600456677777776650" +
+        "000000008DC3000000000009FFF800000000007FFFF70000000005FFFFC1000000003EFFFD1000000001CFFFD20000000009FFFF40000000002FFFFF" +
+        "FFC4000000AFFFFFFFFFA00000EFFFFFFFFFF90005FFFFD77DFFFE1009FFF90000AFFF600AFFF300004FFF800AFFD000000FFF900AFFF200003FFF80" +
+        "07FFFA1001BFFF6002EFFFC9ACFFFE10009FFFFFFFFFF800001AFFFFFFFF9000000049DFFD940000000000248995200000000248CDB730000000148C" +
+        "EEB62000000137BEEC94100000126ADED952000000259DEEB73100000148CEFEB8532100026AEFFEDBA75210038CEFFEEEDC952004ADFEDCCDEEC930" +
+        "05BEECA889CEEB5006CED963358CEC6006CEB731126BED6006CEB620015ADD7006CEC731136BED6005BEDA64469DEC6004ADEDB99BCEDB50037BDEED" +
+        "DDEEC8300147ACDDDDDB85100013689AA9864200001234677765321001124578987532100124679AA9753210023579AAA975321003468ABBA9753210" +
+        "0468ABCCB97643200579BCCCBA875420068ABCCCBA987530069BCCCBBBA98650079BBBAAAAAA9860079AAA98899AA870089AA9777799A970089A9865" +
+        "5689A970089A98656689A970079A98766799A970079AA988889AA8700689AA9999AA986005789AAAAAA9875004578999998875400245677877765420" +
+        "000000002A70000000000000AFA0000000000008FC2000000000006FD1000000000005FE2000000000003DF5000000000000CF90000000000006FF77" +
+        "74000000002EFFFFFFD90000005FFFDAADFF800000BFC200002DF50001EF20000003FA0004FE00000000FF1005FC00000000EF3004FD00000000EF30" +
+        "01FF00000000FE00008F60000008F700003EF853359FD3000003FFFFFFFE2000000036BEEB6200000000012578631000000012479752000000001469" +
+        "853100000001368863100000001368974100000000258A96421100000147BCA865421000026ACCBA98753200038BCBA999986410049BB87667898620" +
+        "04AA74222347983005A95210012589400598410000148950059741000014895005984100001489500498521111269940038975333358983002689876" +
+        "678985200146899999986310001356788764310000000000000000001222222222222222556666777777776655666777777777665666777777777776" +
+        "666777778877777666777788888777776677788888887777677788888888777777778888888877777778888888887777777888888887777777788888" +
+        "887777777778888877777766777777777777766677777777777766667777777777666666777777776666665522222222222222220000000000000000" +
+        "02CDDDDDDDDDDB2005FFFFFFFFFFFF50019AAAAAAAACFF5000000000000BFE2000000000008FF9000000000003FFF000000000003EFF400000000000" +
+        "AFF9000000000009FFA000000000003EFD100000000000BFE4000000000000FFA0000000000006FF5000000000000AFE1000000000000EFA00000000" +
+        "00002FF70000000000003FF50000000000004FF50000000000005FF50000000000001CD2000000000279999999999720029BBBBBBBCCCA2002788888" +
+        "89ACDA3001344444568BC92000111111258BB7200000000136ABA5100000001269BA7310000000259BB8410000000147BB95200000001269B9621000" +
+        "0000148BA7310000000026AB85100000000137BB63100000000149BA5200000000025AB94100000000026AB83100000000036BA72100000000037BA7" +
+        "2000000000037A9620000000000258741000000000000000000000006777777777777666777777777777776677777888888887767777788888888877" +
+        "777778888888887767777888899888876677788889988887666777888898888756667788888888775566777888888877556667788888877645566777" +
+        "888877764556677778877766455667777777766545566777777766554556677777766655556667777766655455666777766655440000000000000000" +
+        "04DDDDDDDDDDDC300AFFFFFFFFFFFF9009FFFFFFFFFFFF9001AAAAAAAAEFFF600000000005FFFF10000000002EFFFB0000000001CFFFF10000000009" +
+        "FFFF50000000006FFFF90000000000DFFFB00000000006FFFD20000000000AFFF700000000000DFFD000000000003FFFA000000000006FFF60000000" +
+        "00008FFF3000000000009FFF000000000000AFFE000000000000AFFD0000000000004EF700000000038999999999973005BDDDDDDDDDDB5005ACCCCC" +
+        "DDEFEC50037888889BDEEC500123333469DEEA40000001136ADEC830000000259DEDA51000000148CEDB73100000126BDEB841000000149DEC841000" +
+        "000026BEDA620000000148DEC731000000015ADDA510000000026BEC8310000000027CEB7200000000038CEB6200000000038CDA5100000000038CDA" +
+        "5100000000037BC8410000000002588631000000026777788887651002788999AAA987200278999AABBA98200267889ABBCBA82002566789ABCBA820" +
+        "01345679ABBB972001234578ABBA862000124579AAA9751000124679AA97641000235789A98643100024689A98753200013568999754210001357999" +
+        "864311000146899975321000014689986431100001578997632100000157899753210000015789865311000001578886421000000146777542100000" +
+        "01CDDDDDDDDDDA1002FFFFFFFFFFFF30004555555555FE10000000000005FA0000000000003FF3000000000000BF9000000000000AFD000000000000" +
+        "6FC2000000000002EF4000000000000DF70000000000004FC0000000000000CF60000000000003FD10000000000008F90000000000000AF400000000" +
+        "00000BF20000000000000DF00000000000000EF00000000000000FF00000000000000AA00000000002788888888886200289999999ABB92002566666" +
+        "678AB920012333333469A820000000011369961000000001247975100000000247985300000000136886310000000125887410000000024897420000" +
+        "000013698521000000002489731000000001369852000000000147974100000000015896310000000002599520000000001269852000000000137984" +
+        "100000000013798410000000001268631000000000000000000000000000000000000000777777777777777777777777777777777777777777777777" +
+        "777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777" +
+        "777777777777777777777777777777777777777777777777777777777777777777777777777777777777777700000000000000000000000000000000" +
+        "000026CEEB6200000003EFFFFFFD2000001EFFD99EFFD000007FF700008FF500009FE000001FF700007FF300005FF600001EFF4005FFD0000006FFFB" +
+        "BFFF500000006EFFFFE5000000006FFFFFF50000000AFFF88FFF9000007FFD3003EFF60000FFD100002DFE0003FF60000008FF2005FF20000004FF40" +
+        "04FF60000008FF2000FFC400004DFE00009FFFB98BFFF7000008FFFFFFFF8000000048DEFE940000001357899874210000269BBBBBA852000159BB98" +
+        "9ABB8410016AB954469BA610017BB731238BB710017BB842248BA6100159BA7668AB95100037ACBAABCA630000259CDDDDC9520000259CDDDDC95200" +
+        "0148BCA99ACA7410017AB96556ABA610029BA631136AB92002AB83100148BA2003BB73000137BA2002AB84111248BA20029BA754457AB920017ABA98" +
+        "89BBA7100147ABBBBBBA7400002367999986310000356777776653000036777777776300004778777787740000478877778874000047887777887400" +
+        "004788888888740000478899998874000047899999987400004789AAAA987400004789AAAA9874000047899999987400004788888888740000477766" +
+        "667774000047765555677400005766544567750000576654456775000057765555677500004776666677740000477777777774000036677777776300" +
+        "000039DFFD8300000007FFFFFFFF6000005FFFFFFFFFF30000AFFFCAADFFFA0000AFFD1002EFFA0000AFFE2003FFFA0000AFFFE45EFFF900003FFFFF" +
+        "FFFFE2000006FFFFFFFF50000006FFFFFFFF5000006FFFFFFFFFF40001EFFFE44EFFFC0007FFFC1002DFFF500AFFF300004FFF900AFFE000002FFF90" +
+        "09FFF700009FFF8005FFFFB99CFFFF3000BFFFFFFFFFFA00002BFFFFFFFFB10000015AEFFFB610000013689AA98531000137BCDDDDCA6300026BDEDD" +
+        "DEEDA510038CEDB99BDEC710039DEC8558CEC810038DEC8559CEC710027CEDB99CEEB610015ADEEDDEED94100148CEFFFFEC73000149DEFEEFEC8410" +
+        "027BEEDCCDEDB61004ADEC978ADED92005BED95336ADEB3006CEB731138CEC3006CEB731138CEC3005CEDA6557ADEB3004ADEDBAABDED920037BDEED" +
+        "DEEDB7100147ACCDDDCA731000135788987531000134567787754310014678999997641001579AAAAAA986100268ABBBBBBA97200279ABBAABBA9720" +
+        "0279ABBBBBBB97200279ABBBBBBB97200269ACCCCCCB97200269ACCDDDCB97200269BCCDDCCB97200279ABCBBCBB97200279ABAAAABAA820028AAA98" +
+        "89AAA820028AA987789AA930029AA987789AA930028AA988889AA9200289AA9999AA982002689AAAAAA9872001568999999875100135677887765410" +
+        "000016BEEA5100000001EFFFFFFD0000001CFA5445AFB000005FB000000DF400005F9000000AF500004FD000001EF300000CF90000AFB0000000EFE8" +
+        "8FFD000000001AFFFF91000000001CFFFFB100000003FFB22BFF2000002EF700008FD200009F50000007F80002FE00000000FF1005FC00000000EF30" +
+        "04FD00000000FF2000CF30000005FA00004FE753347FF3000006FFFFFFFF5000000047CEFD8400000012467887642100002479999997520000379876" +
+        "67897400005896422369960000599521014896000058963113599500003798644589740000247A9999A8520000136ACCCCA7310000136ABBBBA74100" +
+        "003589877898630000579753347985000079842112479700008962100025890000985200001589000089621000258900007985322347980000589866" +
+        "567986000036899999986300001356888875310000000000000000000000000000000000000000000000000000000000000000000000000000000000" +
+        "777777777777777677777777777777777777888888887777777888888888777777788888888887777778888888888777777888888888777777778888" +
+        "888877777777777777777777677777777777777600000000000000000000000000000000000000000000000000000000000000000000000000000000" +
+        "000016CEEC6200000002DFFFFFFD3000001DFFD99DFFE20000BFF800007FFB0000FFA000000AFF0004FF50000006FF2005FF30000004FF4004FF5000" +
+        "0006FF3001FFA0000009FF1000CFF900005EFF00001DFFFFFFFFF9000003BFFFFFFFE200000005AAAEFF9000000000003FFE100000000001CFF50000" +
+        "0000000AFF9000000000009FFD000000000008FFD100000000004FFD2000000000001AB200000000001357899875310001369ABBBBB963100259BBA9" +
+        "9ABB9520038BB965569BB83004AB85211258BA4005AB73100137BA5006BA62000026AB5005BA62100026BB5005AB84211248BA50049BA754457ACA40" +
+        "026ABBA99ABCC8300147ABBBCCDDB7200013689ABDED9510000123469CDB6310000011359CB9410000000137AB9621000000137ABA6310000001369B" +
+        "A7410000000148BA74100000000147974200000005567777777665400567777777777650067776666677766006776655566777600777655445567760" +
+        "077665434456777007765433345677700776544334567770077765444556777007776655566787700677766667788870066777777888887005667788" +
+        "8999987004567788999997600345678999A9876002345678999986500223567889987540012345788887653001234567887654300123456777654320" +
+        "000038DFFD8300000006FFFFFFFF7000005FFFFFFFFFF60001CFFFDAADFFFC0005FFFC2002CFFF5009FFF400004FFF800AFFE000000FFF900AFFF200" +
+        "002FFF9008FFF900006FFF7002FFFFD77CFFFF30009FFFFFFFFFFD00000BFFFFFFFFF90000005CFFFFFFE10000000004FFFF80000000001DFFFC1000" +
+        "000001CFFFE3000000001CFFFF60000000009FFFF90000000000AFFFA000000000004DD7000000000013579AA98632000136ACDDDDCB7410026ADEED" +
+        "DEEDB830039DEDBA9BDEDA4005BEDB7546ADEC5006CEC841136BED6006CEB620015ADD7006CEB731125ADD6005CED963348CED6004ADECA889BDEC60" +
+        "038CEEDCCDEEEB500158BDEEEFFFD930002479BCEFFEB7200011357ADFED94100000135ADEDA62000000148CEEB73100000138BEEC84100000025ADE" +
+        "C952000000026BDC95210000000158A8521000000235677777765320035688999988653005689AAAAAA986500679AAA99AAA9760078AA998899AA860" +
+        "079A99777799A970089A98666689A970089A98655689A980079A9976679AA970079AA98889AAA9700689AAAAAABBA97005789AABBCCBA860045789AB" +
+        "CCCBA850034578ABCCCB97400234679BCCBA85300123579ABBA864200123579ABA9753200123579AA976421001245789876431100123567876432100" +
+        "000015AEEA6100000000DFFFFFFD1000001CFB5445AFC200006FB000000AF60000DF00000000FD0003FE00000000FF2005FC00000000EF3003FE0000" +
+        "0000FF2000CF20000000FD00006FC2000008F9000009FFDAACFFF50000009DFFFFFFD1000000004779FF40000000000009FC0000000000004FD30000" +
+        "00000002EF5000000000001DF7000000000002CFA000000000000BFA0000000000000891000000000012467887642100013589999998631002589877" +
+        "778985200379854334589730048963111136984005984100001589500597410000148950059741000014895004985210012589500489742222479940" +
+        "02689866678AA830014789999ABCA72000235789ABCC9510001124568ACA73100000112469A842000000001479952100000001368873100000001358" +
+        "974200000001257984210000000136875210000000000000000000004444444444555554666666777777777766667777777777776677777777777777" +
+        "777777777777777777777778888777777777778888877777777778888888777777778888888777777777888888877776777788888877777677777888" +
+        "877777667777778877777766777777777777766677777777777766656777777777766665667777777666665544444544444444330000000000000000" +
+        "000001CFFD300000000005FFFF600000000007FFFFA0000000000CFFEFE0000000001FFEAFF4000000005FF96FF800000000AFF51FFD00000001EFE1" +
+        "0CFF20000004FFB007FF50000005FF7003FF60000008FF2000DFB000000CFE8888DFE000002FFFFFFFFFF400006FFFFFFFFFF90000BFF755555FFD00" +
+        "01FFE000000BFF3005FFA0000007FF7009FF60000002FFA00AFF20000000DFA005E9000000008F700000247997420000000137ACCA631000000158CE" +
+        "EC84100000026ACDDC95200000137ACCCCA6200000148BBAABB7310000149BA89BB841000126AB9669B952000137BB8559BA62100148BB7448BB7310" +
+        "0259CB8558BC8410026ADCA88ACC9520037BDDCAACDDA630048CDCCBBCDDB740059CCA9889ACB85006ABA754457AB96008BB84211248BA7008BA6310" +
+        "0137AB8008A9520001259A8007873100001478700234567887654320023467888876542003457899998754300345789AA98765300356789AA9876530" +
+        "0456789AA998654004568899998866400466889999887640046788999988765005678899998876500577899999887750067889999998876006789999" +
+        "999988600688999999998870078999999999987007899999999998700788998888998870078888877888887007787776667777700777765555667770" +
+        "000005EFFF80000000000DFFFFF0000000000FFFFFF1000000002FFFFFF5000000007FFFFFFA00000000CFFFFFFE10000002FFFFFFFF40000007FFFD" +
+        "AFFF9000000AFFF95FFFA000000BFFF41FFFD000001FFFE33CFFF300005FFFFFFFFFF80000AFFFFFFFFFFD0000FFFFFFFFFFFF0001FFFEAAAADFFF20" +
+        "04FFFB00008FFF700AFFF600003FFFC00DFFF200000FFFF00DFFF000000DFFF006FF80000005EF9000012589A8621000000148CDDC94100000025ADF" +
+        "FEB6200000026BEFFEC7310000137CEFFFD8410000149DEFFFD952000026AEEEEEEB62000037BEDCCDEC83100138CECAACED94100149DEC99BEDA510" +
+        "026BEECBACEEB620027BEFEDCDEEC830038CEFEEEEFED94004ADEEDCCDEEDA5005BEECA889BEEB6007CED964459DEC7008DEC731136BED9008DDB620" +
+        "025ADD9008CC94100148BC80058863100125886001234677776432100124578998764310023569ABBA975320023579BCCBA8642002468ACCCCA86430" +
+        "03579BCDDCB9753003579BCDDCB9753004679BCDDCBA86400468ABCCCCBA86400579ACCCCCCA97500579BCCCCCCB9850068ABCCCCCCBA860068ABCCC" +
+        "CCCBA970079ABCCCCCCBA970079ABBBBBBBBA970089ABAAA9AABA980089AA998889AA980089998766789998007888655556888800777654334567770" +
+        "0000009FF8000000000003FFFE100000000007FEFF50000000000BF89F90000000001FF23FD0000000005FC00EF3000000009FA00AF600000000EF80" +
+        "09FC00000003FF4006FF10000005FF1002FF40000007FA0000CF5000000BFA3333BF8000000EFFFFFFFFC000005FFFFFFFFFF300009F8000000AF600" +
+        "00DF40000006FB0003FE00000001FF1007FB00000000CF400AFA00000000AF8005D3000000005D4000002478864100000001369BB9620000000148BC" +
+        "CA731000000259BBBA841000001269A99A95200000136997799621000014798668973100002489745797410000258963469852000136985335886310" +
+        "01479853358974100259A965569A8410026ABA9889BB9520037ACBAAAABCA620038ABA9999ABA730048A97655679A830049974222247984005985200" +
+        "012589500597410000148950058631000013685002456677776654200245677777765420024567788776653003556778877665300356677887766530" +
+        "035667777776653003566777777665300356677777766530035666777766653003566677776665300366677777766630046677777777664004677777" +
+        "777776400467777777777640047777777777774004778888788777400477888778877750057777777777775004777777777777500477777667777740" +
+        "0CFFFFFFEDA400000FFFFFFFFFFFB1000FFEDDDDEFFFFB000FFA0000027FFF400FFA00000005FFA00FFA00000001FFC00FFA00000003FFB00FFA0000" +
+        "138FFF500FFFFFFFFFFFFC000FFFFFFFFFFFF2000FFEDDDDDFFFFE100FFA0000016EFF900FFA00000003FFE00FFA00000000AFF00FFA00000000AFF0" +
+        "0FFA00000003EFE00FFA0000028EFF900FFEDDDDEFFFFE100FFFFFFFFFFFC2000CFFFFFFEC950000047888888765311007BCCBBBBBBA742009CCBAAA" +
+        "ABBBA73009CB8666679BB95009BA63222359BA7009B952111147BB7009BA63212258BB7009CB8655568ACA6009CDBA99AACDC95009DDCCBBCCDDC940" +
+        "09CCB9999ABCC95009CB8655568ACA7009BA63222247BB8009B952000125AB9009B952101136AB9009BA63222358BB8009CB8666678ABA6009CCBAAA" +
+        "ABBBA74007BCCBBBBBBA7520047888888765321005677777776655400677877777776650067887777777766007788766667777600778776666778770" +
+        "078887666677887007888766667888700788887777889870078998877889987007899888888998700789988777899870078887766778887007887765" +
+        "566788700777765555677870077776544556777007777655556777700678776666677770067887776777776006778777777766500567777776666540" +
+        "1CFFFFFFFEB710005FFFFFFFFFFFE4005FFFFFFFFFFFFE205FFFEDDEFFFFFF605FFF700005CFFFA05FFF7000004FFFC05FFF7000006FFFC05FFFA555" +
+        "6BFFFFA05FFFFFFFFFFFFF605FFFFFFFFFFFFF105FFFFFFFFFFFFF705FFFB8889AFFFFD05FFF7000005FFFF35FFF7000000CFFF45FFF7000001EFFF4" +
+        "5FFF700016CFFFF15FFFEDDEFFFFFFB05FFFFFFFFFFFFF405FFFFFFFFFFFF6001CFFFFFFFDB61000157899998876421028BDDDDDDCCA852029DEEDDD" +
+        "DEEDC8412AEEDBBBBCDEDB612ADDB76568ADEC822ADDA532358CED822ADDA533358CED822ADEC97789BEEC822AEEECCCCDEEEC712AEFEEEEEEFFEB61" +
+        "2AEEECCCCDEEEC722ADEC98789BDED922ADDA633358CEDA22ADD9411126ADEA32ADD9522247BDEA22ADDB76567ADED922AEEDBBBBCDEEC7229DEEDDD" +
+        "DEEDC95128BDDDDDDCCA8620157899998876421015677888877654312689999999987641279AAAAAAAA99761289AAAA99AAAA87228AAAA9999ABA972" +
+        "28AAA99889ABBA8228AAAA9899ABBA8228ABBA999ABBBA8228ABBBAAABBCBA8228ABBBAAABBCBA8228ABBBAAAABBBA8228ABAA9999ABBA8228AAA987" +
+        "889ABA92289A9877789AAA92289AA987789AAA82289AA988899AA982289AAA9999AAA972279AAAA99AA9986226899999999876511567788887765431" +
+        "08FFFFFFED8200000FFFFFFFFFFF80000FF5333345AFFB000FF200000005FF000FF200000000CF400FF200000000BF600FF200000000DF400FF20000" +
+        "001AFF000FFBAAAAABFFF8000FFFFFFFFFFFE0000FF9888889EFFB000FF200000007FF200FF2000000009F800FF2000000005FC00FF2000000004FD0" +
+        "0FF2000000008FA00FF200000004EF400FF5333345BFFE000FFFFFFFFFFF900008FFFFFFEC830000058999888876431007ABAA999998752008BA8766" +
+        "6789984008A86433335799600897421111358970089741000024797008A852111236897008A975444568A96008BB988888ABB94008CCBA9AAABCB940" +
+        "08BB9877789AA95008A965444467996008A842111235798008974100001369800897410000136980089742111124798008A864333357897008BA8766" +
+        "6789985007ABAA9999997520058999888876431000000000000000000000000000000000000000000000000000000000000000000000000000000000" +
+        "000000000000000022222222222222227777666666667777777776666667777777777766666777777777776666677777777776666666777777776666" +
+        "566667772222222222222222000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000" +
+        "00000049CC82000000001CFFFFFF60000000BFFFFFFFF3000003FFE3006FFA000009FF40000CF800000EFE0000000000003FFA0000000000005FF700" +
+        "00000000007FF60000000000008FF50000000000008FF50000000000007FF70000000000005FF80000000000003FFA0000000000000EFE0000000000" +
+        "0009FF30000CF8000003FFD1005FFA000000CFFFEEFFF50000002DFFFFFFA0000000006CFEB500000001245788753100000248ABBBBA710000037ABB" +
+        "AABBA20000169BA8667AA2000017AB84334772000029B96211133100002AB85100011000002AB84100000000002AB73100000000002AB73100000000" +
+        "002AB73100000000002AB73100000000002AB84100000000002AB851000110000029B962111331000017AB842247720000169BA7557AA30000047ABB" +
+        "AABBA200000248ABBBBA8200000124689986410000000567777000000000067777700000000007777660000000000777655000000000076654400000" +
+        "000007654330000000000664322000000000065432100000000006542110000000000654211000000000065421100000000006542110000000000654" +
+        "321000000000066532200000000007654330000000000776554000000000077766500000000007777760000000000677777000000000056777700000" +
+        "0000047BDDB5100000004FFFFFFFB0000003FFFFFFFFF9000008FFFFDEFFFA00001FFFFB02EFFA00006FFFB0003FF800009FFF800000000000AFFF40" +
+        "0000000000AFFF200000000000AFFF100000000000AFFF100000000000AFFF200000000000AFFF5000000000009FFF8000000000006FFFB0004FF800" +
+        "001FFFF901EFFA000009FFFFBDFFFA000004FFFFFFFFFA0000005FFFFFFFD1000000049EFFD72000000135799986420000136ACDDDCB83000026ADEE" +
+        "EEEEB5000038CEEDBCDEC600004ADEC978ACB600005BEDA634688400006CEC8311244200006CEB7200111100006CDA6200000000006CDA5200000000" +
+        "006CDA5200000000006CDA6200000000006CEB7200111100006CEC8311244200005BEDA533588400004ADEC977ACB6000038CEECBBDEC6000026ADEE" +
+        "EEEEB60000136ACDDDDB840000013689AA975200001345678877620000146789999872000015789AAAA98200002689AAAA99820000279AA998877200" +
+        "002899987666520000289987654441000028998643222100002899753211100000289875321110000028997532111000002899754221100000289986" +
+        "43322100002899976544410000279A987766620000279AA998887200002689AAAA9982000015789AAAA9820000145789999872000013456777775200" +
+        "00000028CC710000000008FFFFFD600000006FFB56BFF0000002EE60000BF4000009F80000018000000DF50000000000000FF40000000000000FF200" +
+        "00000000002FF10000000000002FF00000000000002FF00000000000001FF10000000000000FF20000000000000FF40000000000000DF50000000000" +
+        "0009F800000290000002FE40000BF40000007FF8339FF10000000AFFFFFF80000000004AEEA200000001246788864100000247999999720000136998" +
+        "667882000014798533467200001698531113410000279741000110000028963100000000002896210000000000299521000000000029952100000000" +
+        "002995210000000000299621000000000028963100000000002897310000100000279742000121000016886311244100001479864357720000035898" +
+        "778982000001368999997200000013578876410000000000000000000000000000000000000000000000000000000000000000000000000000000000" +
+        "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000" +
+        "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000" +
+        "008EEC830000000000FFFFFFB400000000FFFFFFFF60000000FFC16EFFF5000000FFC0018FFF300000FFC0000AFFA00000FFC00002EFF20000FFC000" +
+        "006FF90000FFC000001FFD0000FFC000000DFF0000FFC000000CFF0000FFC000000DFF0000FFC000001FFE0000FFC000007FF90000FFC00002EFF400" +
+        "00FFC0002BFFA00000FFC14AFFFF300000FFFFFFFFF5000000FFFFFFFB300000008FFEC7200000000168987642100000028BCCBA86421000029CCCBB" +
+        "B974200002ACB99ABB97310002AB96568AB96300029B953358BB8410029B852136ABA610029B8520147AB820029B8510036AB820029B85100259B920" +
+        "029B85100259B920029B85100259B920029B8510026AB920029B8521148BB720029B952236ABA61002AB964469BB841002ACB989ABB95200029CCBBB" +
+        "BB963100028BCCBBA8631000016899876421000000067777665430000007788877654000000788888776500000078888777760000007887777776000" +
+        "000777766667700000077765556670000007765545567000000666544456600000066654444560000006665434456000000666544445600000077654" +
+        "445660000007766555567000000777666666700000077777667770000007888777776000000788888777600000078888777650000006777776654000" +
+        "01CFFEB61000000005FFFFFFFA10000005FFFFFFFFC2000005FFFFFFFFFD100005FFF99FFFFFA00005FFF703EFFFF30005FFF7002FFFFB0005FFF700" +
+        "08FFFF1005FFF70001EFFF4005FFF70000AFFF5005FFF700007FFF5005FFF700009FFF5005FFF70001EFFF5005FFF70008FFFF2005FFF7005FFFFB00" +
+        "05FFF86BFFFFF30005FFFFFFFFFFA00005FFFFFFFFF9100005FFFFFFFF80000001CFFFDA60000000026999875321000002ACDDDCA852100003BEEEEE" +
+        "DB95310003BEEEDEEEC9520003BEDCABDEEB841003BDD977ADEDA61003BDC8546BDEC82003BDC84248CED92003BDC83126ADDA3003BDC831159DDB30" +
+        "03BDC831149DEB3003BDC831159DDB3003BDC84126ADDA3003BDC84348CED92003BDD9668BDEC82003BEDB9ABDEDA61003BEEDCDEEDB841003BEEEEE" +
+        "EDB8520002ACDDDDCA7421000269999875311000015778876543210002789AA9886532100289ABBAA9865310028ABBBBAA986510028ABBBAAAA97610" +
+        "028AAAA99AA987200289A99899AA97200289987778999820028998766799982002899866678998200289986667899820028998766789982002899877" +
+        "789998200289A988899A9820028AAA9999AA9720028ABBAAAAA98620028ABBBBAA9875100289ABBAA9875410027899A9987543100156777766542200" +
+        "008EDB610000000000FFFFFE8100000000FF96BFFF20000000FF7003CFD2000000FF70001BFC000000FF700001FF700000FF7000006FF20000FF7000" +
+        "000EF80000FF7000000AFC0000FF70000007FF0000FF70000006FF0000FF70000007FF0000FF70000009FD0000FF7000000DF90000FF7000007FF200" +
+        "00FF700001FF900000FF70005DFD100000FF958DFFD2000000FFFFFFE8000000008FFDA61000000000578876421000000079AA9875310000008AA988" +
+        "98641000008A965689863100008A74335898520000897411368964000089731013688600008973100247970000897310013798000089731001369800" +
+        "00897310013698000089731001369800008973100137980000897310024797000089741124698500008A742246897400008A865578985200008AA988" +
+        "998631000079BAA987531000005788875421000000000000000000000000000000000000000000000000000000000000000000000000000000000000" +
+        "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000" +
+        "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000" +
+        "00CFFFFFFFFFFB0003FFFFFFFFFFFF2004FFEDDDDDDDD90004FF90000000000004FF90000000000004FF90000000000004FF90000000000004FF9000" +
+        "0000000004FFFFFFFFFE700004FFFFFFFFFFF00004FFEDDDDDDD600004FF90000000000004FF90000000000004FF90000000000004FF900000000000" +
+        "04FF90000000000004FF90000000000004FFEDDDDDDDD90003FFFFFFFFFFFF2000BFFFFFFFFFFB000047888888887600007ACCBBBBBBA800009CCBAA" +
+        "AAAA9700009CB86655555400009BA63222222100009B952111100000009BA63211111000009CB86555443100009CDBA999985300009CDCCBBBBA7300" +
+        "009CCB9999875300009CB86555543100009BA63211111000009B951000000000009B952100000000009BA63222222100009CB86655555400009CCBAA" +
+        "AAAA9700007ACCBBBBBBA800004788888888750000002667777200000000277877720000000027888772000000002788776200000000278876520000" +
+        "000028887652000000002888776200000000288887620000000028998872000000002899987200000000289988720000000028888762000000002788" +
+        "765200000000277765510000000027776541000000002777665100000000278776620000000027887772000000002778777200000000266777720000" +
+        "02DFFFFFFFFFFD2009FFFFFFFFFFFF8009FFFFFFFFFFFF8009FFFEDDDDDDDB1009FFF4000000000009FFF4000000000009FFF4000000000009FFF855" +
+        "5555200009FFFFFFFFFFE30009FFFFFFFFFFF50009FFFFFFFFFFF30009FFFA888888400009FFF4000000000009FFF4000000000009FFF40000000000" +
+        "09FFF4000000000009FFFEDDDDDDDB1009FFFFFFFFFFFF8009FFFFFFFFFFFF8002DFFFFFFFFFFD200168999999998620029CDDDDDDDDC92002AEEEDD" +
+        "DDDDCA2003BEEDBBAAAAA82003BEDA755555531003BEC9422222210003BEC9532222110003BEDB877776420003BEEDCCBBBA841003BEFEEEDDDC9510" +
+        "03BEEDCCBBBB841003BEDB987776520003BEC9533332210003BDC8311111000003BEC8421111110003BEDA755555531003BEEDBBAAAAA82002AEEEDD" +
+        "DDDDCA20029CDDDDDDDDC92001689999999986200035778888777400004789999998850000489AAA999885000059AAAA988774000059AAA987766300" +
+        "0059AAA9876653000059AAA9876653000059ABA9987663000059BBBAA98763000059BBBBA98874000059BBBA998763000059ABA9877653000059AA98" +
+        "765542000059AA98755442000059AA98765542000059AAA8876653000059AAA99887740000489AAA9998850000478999999885000035778888777400" +
+        "00AFFFFFFFFFFD0000FFFFFFFFFFFF0000FF63333333310000FF40000000000000FF40000000000000FF40000000000000FF40000000000000FF4000" +
+        "0000000000FFBAAAAAA9300000FFFFFFFFFFD00000FFA8888888200000FF40000000000000FF40000000000000FF40000000000000FF400000000000" +
+        "00FF40000000000000FF40000000000000FF63333333310000FFFFFFFFFFFF0000AFFFFFFFFFFD0000378998888884000049BAA999999500005AA876" +
+        "66665300005A964333332100005A8421111110000059841000000000005A853211111000005A975444442100005BB98888775200006BCBAA99986200" +
+        "005AB98777764200005A975444432100005A85211111100000598410000000000059741000000000005A842111111000005A964333332100005AA876" +
+        "666653000049BAA999999500003789988888840006677777776666600677777777766660077777777777666007777777777776600777777777777760" +
+        "077777777777777007777777777777700777777777777770077777777777777007777777777777700777777777777770077777777777777007777777" +
+        "777777700777777777777770077777777777777007777777777777700777777777777770077777777777766006777777777766600677777777766660" +
+        "000BFFFFFFFFB100004FFFFFFFFFF400004FFEDDDDDD9000004FF90000000000004FF90000000000004FF90000000000004FF90000000000004FF900" +
+        "00000000004FFFFFFFF90000004FFFFFFFFD0000004FFEDDDDD70000004FF90000000000004FF90000000000004FF90000000000004FF90000000000" +
+        "004FF90000000000004FF90000000000004FF90000000000004FF80000000000000AC2000000000000057888888860000008BCBBBBBA80000009CCBA" +
+        "AAA970000009CB97666650000009BA63222220000009B952100000000009B952111100000009CB8544431000000ACCA988753000000ADDCBBBA84000" +
+        "000ADDBAAA9740000009CB97665420000009CA74332210000009B952100000000009B951000000000009B951000000000009B951000000000009B951" +
+        "000000000008A84100000000000786310000000000005677777700000000677787770000000067888877000000007788877600000000778887660000" +
+        "000077887766000000007788776500000000788877660000000078888766000000007888887600000000789988770000000078999887000000007899" +
+        "988700000000789998870000000078888877000000007888877600000000788877650000000077777654000000007777654400000000677665430000" +
+        "003DFFFFFFFFE400009FFFFFFFFFFA00009FFFFFFFFFF900009FFFEDDDDDC200009FFF4000000000009FFF4000000000009FFF4000000000009FFFBA" +
+        "AAA80000009FFFFFFFFF5000009FFFFFFFFF5000009FFFFFFFFF3000009FFF6333310000009FFF4000000000009FFF4000000000009FFF4000000000" +
+        "009FFF4000000000009FFF4000000000009FFF4000000000009FFF4000000000002DEB00000000000036899999986300005ACDDDDDDCA500006CEEED" +
+        "DDDCA500006CEECBAAAA8400006CEC9655554200006CEC8422221100006CEC8432221000006CEDA776642100006CEEDBBBA84100006CEFEEDDCA5200" +
+        "006CEEDCCCB95100006CEDB988753100006CEC8533321000006CEB7311100000006CDB6200000000006CDB6200000000006CDB6200000000006CDB62" +
+        "00000000005BCA6200000000004897410000000000156778887762000026789999887200002789AAA998820000279AAAA988720000289AAA99876200" +
+        "00289AAA9876520000289AAA9876510000289ABA9876510000289ABBA98762000028ABBBA98762000028ABBBBA8762000028ABBBA987620000289ABA" +
+        "9876510000289AA987654100002899987543210000289987643210000027898754211000002788865321000000278876431100000026776543110000" +
+        "000BFFFFFFFFB000000FFFFFFFFFE000000FF63333331000000FF40000000000000FF40000000000000FF40000000000000FF40000000000000FF400" +
+        "00000000000FFBAAAAA50000000FFFFFFFFB0000000FFA8888710000000FF40000000000000FF40000000000000FF40000000000000FF40000000000" +
+        "000FF40000000000000FF40000000000000FF40000000000000FF30000000000000AA0000000000000057899888870000007ABAA999980000008BA98" +
+        "777760000009A975444430000008A8521111100000089741000000000008A852111100000009A964333210000009BA97766530000009BCBA99874000" +
+        "0009BCA9998740000009BA87665430000009A964332210000008A8421110000000089741000000000008974100000000000897410000000000089741" +
+        "000000000008974100000000000786310000000004777777777766400477777777776640047777777777764004777777777777400477777777777740" +
+        "047777777777774004777777777777400577777777777750057777777777775005777777777777500577777777777750057777777777775005777777" +
+        "777777500577777777777750047777777777774004777777777777400477777777777740047777777777764004777777777766400467777777766640" +
+        "0000007CEDA4000000007FFFFFFFD2000005FFFEACFFFB00002FFF80002CFF10006FFA000002A60000BFE1000000000001FF80000000000004FF5000" +
+        "0000000005FF50000000000005FF5002CDDDDA0005FF5009FFFFFF5005FF5003AAACFF5003FF70000005FF5001EFA0000005FF5000BFF1000005FF50" +
+        "006FFB000005FF50002FFF910006FF500005FFFEBBDFFF5000007FFFFFFFFC100000006BEEC830000001357898764210001479BBCBBA85200136ABBA" +
+        "AABBA7300159BB8655789730027BB95322356420038BA62100112210049B84100000100005AB73111111110005AB73124454431005AB732478998630" +
+        "05AB73359BBCCA4005AB732478ABCB5005AB84223469CB50049B95211247BA50038BA6310137BA50027BB9532247BB500159BB965579CB500136ABBA" +
+        "99ABCA40001479BBBBBBA730000135789987641000466777776654000056777776665400006777666665540000677665555443000077665444443300" +
+        "007665433333320000765543333333000076554444444300007655444555540000765555566665000076655556777600007665555677770000766555" +
+        "567787000077655556778700007766555667870000777665567787000067776666778700006777777778770000567777777776000045667777776500" +
+        "0000049DEEB720000000BFFFFFFFE400000CFFFFFFFFFF40005FFFFFCEFFFF6000CFFFD4018FFF4003FFFF200003640007FFF800000000000AFFF500" +
+        "000000000AFFF404555555100AFFF23FFFFFFF800AFFF35FFFFFFFA00AFFF52EFFFFFFA009FFF502556FFFA007FFF900002FFFA002FFFF40002FFFA0" +
+        "00BFFFD5003FFFA0005FFFFFCCFFFFA0000CFFFFFFFFFFA00000CFFFFFFFFE400000059DEEDA520000124689A997531000248BCDDDDC96200148CEEE" +
+        "EEEEC940027BEEDBABCDDA40039DEDA7668AA84004AEEB732245652005BEC8411112221006CEB7322233321006CEB7456777652006CEB768ABBBB940" +
+        "06CEB779CDEEEC6006CEB768ABCEEC6006CEC855679CEC6005BED953237BEC6004ADEB74236BEC60039DEDA7568CEC60027BEEDBAACDEC600148CEEE" +
+        "DDEEEB5000248BCDDDDCB84000124689AA9875200134567888775420024678999998753003679AAAAA99763003789AA9998876300489AA9887776530" +
+        "048AA98766665420059A997665555420059A987666665420059A987777776530059A998788988730059A998889AA9840059A998889AAA850059AA988" +
+        "89AAA950059AA98888AAA950048AAA9889AAA9500479AAA999AAA95003689AAAAAAAA840035799AAAAAA974002457899999986300134567788776520" +
+        "0000005BED92000000004EFFFFFFA0000003FFD856AFFA00000BFA100003CA00004FD1000000000000AF70000000000001FF20000000000003FE0000" +
+        "0000000005FC00000000000005FC00006888850005FC0003FFFFFF5005FD00008AAAEF5003FF10000000CF5000EF40000000CF5000AF90000000CF50" +
+        "004FE1000000CF50000BFA100000CF500003FFE8557BFF5000004EFFFFFFFC100000005ADEB720000001356788753200001368999998741000368997" +
+        "778885100158975333466410017985311112320002897310000111000299620000000000029851001111100003984112234432000398411357776510" +
+        "0398411479AAA82003985213578AB920029952112357A920029962101126992002897310002599200179853111269920015898643347A92000368997" +
+        "7789A8200024689999AA9610000135678876531000000000000000000000000000000000000000000000000000000000000000000000000000000000" +
+        "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000" +
+        "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000" +
+        "009E40000002DB1002FFB0000008FF5002FFB0000008FF5002FFB0000008FF5002FFB0000008FF5002FFB0000008FF5002FFB0000008FF5002FFB000" +
+        "0008FF5002FFEDDDDDDEFF5002FFFFFFFFFFFF5002FFFFFFFFFFFF5002FFB0000008FF5002FFB0000008FF5002FFB0000008FF5002FFB0000008FF50" +
+        "02FFB0000008FF5002FFB0000008FF5002FFB0000008FF5002FFA0000008FF50008C30000001CA00048752000035884005A963000137AA4005BA7310" +
+        "0147AB5005BA73100147BB5005BA73100147BB5005BA73100148BB5005BB85222258BB5005BCA755557ACB5005CDCA9999ACDC5005CDDCBBBBCDDC50" +
+        "05CDCA9999BCDC5005CCA765568ACB5005BB85322359BB5005BA74111148BB5005BA73100147BB5005BA73100147BB5005BA73100147BB5005BA7310" +
+        "0147AB5005A9630001379A40048752000025783000000000000000000000000000000000000000000000000022222211111222226777654444567777" +
+        "777776555566777777887766667788877888877777788887789988877888998778999888888999887899988888899988788988877788998778888777" +
+        "777888877788766666678887777766555556777767776544445667772222221111122222000000000000000000000000000000000000000000000000" +
+        "00CFE100000CFD1002FFF600003FFF5002FFF600003FFF5002FFF600003FFF5002FFF600003FFF5002FFF600003FFF5002FFF600003FFF5002FFF733" +
+        "335FFF5002FFFFFFFFFFFF5002FFFFFFFFFFFF5002FFFFFFFFFFFF5002FFFCAAAABFFF5002FFF600003FFF5002FFF600003FFF5002FFF600003FFF50" +
+        "02FFF600003FFF5002FFF600003FFF5002FFF600003FFF5002FFF500003FFF5000BDC100000BDC10037873100147873005BCA520026ACA4005CDB620" +
+        "137BDB5005CDB620137BDB5005CDB620137BDB5005CDB620137BDB5005CDB742248CDB5005CEDA7667ADEC5005CEECBAABDEEC5005CEEEDDDEEFEC50" +
+        "05CEEDDCCDEEEC5005CEDB9889BDEC5005CEC854469CEB5005CDB731138CDB5005CDB620137BDB5005CDB620137BDB5005CDB620137BDB5005CDB620" +
+        "137BDB5005BCA520026ACA40038974100147973045544322223455446787654334577876788876444567888778987654456899877999876556789987" +
+        "799998766789A99789AAA988889AAA9789ABAA9999AABA9789ABBBAAAABBBA9789BBBBBAABBBBA9889BBBBAAAABBBA9889ABAA9999AABA9789AAA988" +
+        "889AAA9779AA98777789AA97799987655678998778998655557899877898765445678987788875444467888767876543345678766777643334567776" +
+        "008C10000000990000CF50000002FF0000CF60000003FF0000CF60000003FF0000CF60000003FF0000CF60000003FF0000CF60000003FF0000CF6000" +
+        "0003FF0000CFB8888889FF0000CFFFFFFFFFFF0000CFCAAAAAABFF0000CF60000003FF0000CF60000003FF0000CF60000003FF0000CF60000003FF00" +
+        "00CF60000003FF0000CF60000003FF0000CF60000003FF0000CF50000002FF00007A0000000088000786410000147860089741000025897008984100" +
+        "002589800898410000258980089842000025898008A8521001258A8008A8632222369A8008AA86555568AA8008BBA988889ABB8009BCBAA99AABCB80" +
+        "08BBA998899BCB8008AA86555668AA8008A9632222469A8008A8521001258A8008984200002589800898410000258980089841000025898008984100" +
+        "002589800897410000258970078631000014786000000000000000000000000000000000000000000000000000000000000000000000000000000000" +
+        "000000000000000022222222222222227777666666667777777776666667777777777766667777777777776666777777777776666677777777776666" +
+        "666677772222222222222222000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000" +
+        "0006EFFFFFFF9000000DFFFFFFFFF1000004CDEFFEDD70000000005FF80000000000005FF80000000000005FF80000000000005FF80000000000005F" +
+        "F80000000000005FF80000000000005FF80000000000005FF80000000000005FF80000000000005FF80000000000005FF80000000000005FF8000000" +
+        "0000005FF80000000000005FF8000000001BDDEFFEDDC300007FFFFFFFFFFA00002DFFFFFFFFE400000368888887300000049BCCCCB9400000038ACD" +
+        "DCA84000000247ACCA7520000001248BB84210000000137AB83100000000027AB83100000000027AB83100000000027AB83100000000027AB8310000" +
+        "0000027AB83100000000027AB83100000000027AB83100000000027AB83100000000137AB83100000001248BB8521000000257ACCA75300000059ACD" +
+        "DCB950000005ABCCCCBA6000000478888887400000000477774000000000048888400000000005899850000000000488884000000000047887400000" +
+        "000004777740000000000367763000000000036776300000000003666630000000000366663000000000036666300000000003666630000000000367" +
+        "763000000000036776300000000004777740000000000478874000000000058888400000000005899850000000000588885000000000047777400000" +
+        "000AFFFFFFFFC100003FFFFFFFFFF500003FFFFFFFFFF5000008DDEFFFDDA100000000AFFD000000000000AFFD000000000000AFFD000000000000AF" +
+        "FD000000000000AFFD000000000000AFFD000000000000AFFD000000000000AFFD000000000000AFFD000000000000AFFD000000000000AFFD000000" +
+        "000000AFFD000000003CDDEFFFDDD400008FFFFFFFFFFA00008FFFFFFFFFFA00004EFFFFFFFFF50000158899998851000028CDDDDDDB82000029CDEE" +
+        "EEDC82000027ACDEEDBA6100001358BEEB853100000126ADDA521000000015ADD9410000000015ADD9410000000015ADD9410000000015ADD9410000" +
+        "000015ADD9410000000015ADD9410000000015ADD9410000000025ADD9410000000136ADDA521000001468BEEB8541000028ACDEEDCA8200003ADEEE" +
+        "EEDDA300003ACDDDDDDCA300002789999998620000006678776500000000789999870000000079ABBA970000000079ABBA970000000078ABBA860000" +
+        "0000679AA975000000005789986500000000468998640000000046899764000000004689975400000000468997540000000046899764000000004689" +
+        "9864000000005789987500000000689AA9760000000079ABBA870000000089ABBA980000000089ABBA9800000000789AA98700000000677887760000" +
+        "0006EFFFFFFE5000000BFFFFFFFF90000000237FF63200000000005FF30000000000005FF30000000000005FF30000000000005FF30000000000005F" +
+        "F30000000000005FF30000000000005FF30000000000005FF30000000000005FF30000000000005FF30000000000005FF30000000000005FF3000000" +
+        "0000005FF30000000000005FF30000000001337FF6331000005FFFFFFFFFF400002DFFFFFFFFC1000002689999862000000279BCBB972000000157AB" +
+        "B96510000001248AA8420000000013799621000000001269962000000000026996200000000002699620000000000269962000000000026996200000" +
+        "0000026996200000000002699620000000000269962000000000026996200000000012699620000000001379962100000001348AA8431000000157AB" +
+        "BA75100000028ABCBB982000000278999987200000000047740000000000004775000000000000477400000000000046640000000000004664000000" +
+        "000000366400000000000035530000000000003553000000000000355300000000000035530000000000003553000000000000355300000000000035" +
+        "530000000000003553000000000000466400000000000046640000000000004774000000000000477500000000000057750000000000004775000000" +
+        "00000000005E70000000000000DFF0000000000000DFF0000000000000DFF0000000000000DFF0000000000000DFF0000000000000DFF00000000000" +
+        "00DFF0000000000000DFF0000000000000DFF0000000000000DFF0000000000000DFF0000000000000DFF0000007FC0000DFF000000CFF0000DFF000" +
+        "000CFF0000EFF0000008FF7002FFC0000001FFFFFFFF300000006FFFFFFA00000000019DDA200000000000001378700000000000249A800000000000" +
+        "259B900000000000259B900000000000259B900000000000259B900000000000259B900000000000259B900000000000259B900000000000259B9000" +
+        "00000000259B900000011100259B900000044310259B900000077521259B90000009A74225AB9000000AB95347AB90000009BB9779BA70000007ABBB" +
+        "BBB9600000047ABBBB963000000246888753100000000000000000000000000000000000000000000000000044444555566677775555555566667777" +
+        "555555566667777766666666677777776666666677777777666677777777777777777777777777777777777777777777777778888887777677778888" +
+        "887777767777888887777766777777777777766667777777777766656667777777766655000000000000000000000000000000000000000000000000" +
+        "0000000003CFB1000000000008FFF5000000000008FFF5000000000008FFF5000000000008FFF5000000000008FFF5000000000008FFF50000000000" +
+        "08FFF5000000000008FFF5000000000008FFF5000000000008FFF5000000000008FFF5000008ED4008FFF500001FFFA008FFF500003FFFA008FFF500" +
+        "002FFFE31CFFF500000DFFFFDFFFF2000007FFFFFFFFA0000000BFFFFFFD2000000006BEEC71000000000000248861000000000136BC920000000001" +
+        "37CDB2000000000138CDB2000000000138CDB2000000000138CDB2000000000138CDB2000000000138CDB2000000000138CDB2000000000138CDB200" +
+        "0001110138CDB2000002331138CDB2000016874238CDB2000029BA6348DDB200002BDC8559DDB200002BEEB89BEDA200002ADEDCCDED92000018CEEE" +
+        "EEEB710000158BDDDDB84100000247899864200000000112467774000000012356787400000001235788850000000123578985000000012357898500" +
+        "000001235789850000000123578985000000112357898500001112235789850000122234678985000023334567898500002445557899850000366667" +
+        "889985000047788889998500004889999AA9850000589AAAAAA9840000489AABBAA9740000479AAAAA98740000367899998753000025677887654200" +
+        "00000000002C300000000000007FA00000000000008FA00000000000008FA00000000000008FA00000000000008FA00000000000008FA00000000000" +
+        "008FA00000000000008FA00000000000008FA00000000000008FA00000000000008FA00000000000008FA00000036100008FA000000AF500008FA000" +
+        "000AF600008FA0000007FB0000CF50000001DFC65BFD000000006DFFFFD500000000018DD71000000000000012587000000000001369800000000000" +
+        "136980000000000013699000000000001369900000000000136990000000000013699000000000001369900000000000136990000000000013699000" +
+        "000000001369900000011000136990000002211013699000000453101369800000067421136980000008863124798000000798544589700000068988" +
+        "889850000004699999863000000246888864200000000000000000000000000000000000000000000000000000000000000000000000000000000000" +
+        "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000" +
+        "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000" +
+        "06E800000004DA000AFE0000007FFF200AFE000003EFF9000AFE00007EFF80000AFE0003FFFA00000AFE005EFFA000000AFE04FFFB0000000AFE4EFF" +
+        "900000000AFFFFFB000000000AFFFFC1000000000AFFFFF7000000000AFEAFFF300000000AFE08FFE60000000AFE00BFFF4000000AFE0008FFD50000" +
+        "0AFE0000BFFF30000AFE00001AFFD3000AFE000000AFFE400AFE0000001DFFA007FA00000000BF70058741001247884006A95201247AB94006BA6212" +
+        "57ABA73006BA63247ABA852006BA7446ABB8531006BB868ABA85210006CBA9ABA852100007CCCBCB8531000007CEEDCA5310000007DEEEC942100000" +
+        "07CEEDCA5210000007CDCCCB8521000006BBA9ABA852100006BA868ABA85210006BA7457ABA7421006BA63247ABA852006BA621257ABA83006BA6211" +
+        "257ABA5006A952001247AA60047741000124785006777777766667700677888777777770067888888887777007789999988887700788999999888760" +
+        "07899AAAA99887600789AAAAAA9887600789AABBAA9887600789ABBBAA9876500799ABBBBA9876500789ABBBAA9876500789AABBAA9887600789AAAA" +
+        "AA98876007899AAAA9988760078899999998876007889999988887700778888888887770067888888777777006777777777777700677777666666660" +
+        "07EE7000003DFD100EFFE00003EFFF300EFFE0003DFFFF200EFFE001EFFFFD000EFFE03EFFFFB0000EFFE3DFFFFA20000EFFEEFFFFD000000EFFFFFF" +
+        "FC0000000EFFFFFFB20000000EFFFFFE100000000EFFFFFF700000000EFFFFFFF70000000EFFEFFFFF6000000EFFE6FFFFF500000EFFE08FFFFF5000" +
+        "0EFFE007FFFFF4000EFFE0008FFFFF400EFFE00008FFFFD00EFFE000009FFFE008FF80000009FF80058852101358873008CB8311369CCA5009DC9423" +
+        "69CEDA5009DD95469CEEC84009DDA779DEEC952009DDBABCEEC8521009DEDCDEEC95210009DFEEEEC952100009DFFFED9621000009DFFFEC84100000" +
+        "09DFFFED9520000009DFFFEEB741000009DEEDEEDB73100009DECBCDEDB7410009DDB89BDEDA741009DDA657BDEDA73009DD94348BDEDA6009DC9412" +
+        "48BDEC8008CB8310248BDC800698621012479960256665545567776226787766678888722789988888999872279AA99999A9986228AABBAAAAA98751" +
+        "28ABBBBBBA99764128ACCCCCBA97643128BCDDDCBA86532028BCDDDCB976431028BCDDDCB975421028BCDDDCB975421028BCDDDCBA86432028ACCDCC" +
+        "BA87542128ABCCCBBA98753128ABBBBAAAA98751289AAAA9AAAA986227999988899A9972278988777899997226777655567888722566654444677772" +
+        "02C200000001B80009F80000001DFA0009F9000001CFD20009F900001CFD200009F90001CFD2000009F9001BFD20000009F901BFE200000009F90EFE" +
+        "0000000009FDCFE30000000009FFFF500000000009FFFFC10000000009F92FFB0000000009F906FF7000000009F9002EFB00000009F90003FFA00000" +
+        "09F900006EF7000009F9000003EF900009F90000004FF70009F900000007FE4004E3000000005E400476410001357740059852001357884005985211" +
+        "3579863005985212579864100598533479864210059964579874210005A976788742100005AA99997421000006BCCBA85210000006BDDCB831000000" +
+        "06BCCBA84210000005ABA9996421000005AA878986321000059965579863210005985335898631000598522368986310059852114689852005985210" +
+        "246898400598520012468850047741000124675004667777777666400467777777777640046777777777774004777888888777400477888888887740" +
+        "047788888888775004778889988887500478889999888750057889999998885005788999999888500578899999988850057889999998885004788899" +
+        "998887500477888998888750047788888888775004778888888877400477788888877740046777777777774004677777777776400466777777766640" +
+        "03EB10000000000007FF50000000000007FF50000000000007FF50000000000007FF50000000000007FF50000000000007FF50000000000007FF5000" +
+        "0000000007FF50000000000007FF50000000000007FF50000000000007FF50000000000007FF50000000000007FF50000000000007FF500000000000" +
+        "07FF50000000000007FF50000000000007FFEDDDDDDDDC3007FFFFFFFFFFFF8003EFFFFFFFFFFE40048852100000000005AA63100000000005AA7310" +
+        "0000000005BB73100000000005BB73100000000005BB73100000000005BB73100000000005BB73100000000005BB73100000000005BB731000000000" +
+        "05BB73100000000005BB73100000000005BB73100000000005BB73100000000005BB73100000000005BB85322222221005BCA8766666653005BCCBAA" +
+        "AAAA9840049BCBBBBBBBB950036788888888874000000000000000000000000000000000777776665544332277777666554433327777776655544333" +
+        "777777666554443377777777665554447777777766655544777777777666555577788877776666557778888777776666777888887777766677778888" +
+        "877777667777888887777777677777887777777766777777777777776666777777777777566667777777777700000000000000000000000000000000" +
+        "05FE8000000000000CFFF100000000000CFFF100000000000CFFF100000000000CFFF100000000000CFFF100000000000CFFF100000000000CFFF100" +
+        "000000000CFFF100000000000CFFF100000000000CFFF100000000000CFFF100000000000CFFF100000000000CFFF100000000000CFFF10000000000" +
+        "0CFFF100000000000CFFFDDDDDDDDC500CFFFFFFFFFFFFD00CFFFFFFFFFFFFE005FFFFFFFFFFFE60037873100000000005BC95100000000005CDB520" +
+        "0000000005CDB6200000000005CDB6200000000005CDB6200000000005CDB6200000000005CDB6200000000005CDB6200000000005CDB62000000000" +
+        "05CDB6200000000005CDB6200000000005CDB6200000000005CDB6200000000005CDB7321111110005CEC9655555542005CEECBAAAAAA94005CEEEDD" +
+        "DDDDDB5004ACDDDDDDDDCB50037899999999873004777653210000000478765321000000058887542100000005898754210000000589876421000000" +
+        "058987642100000005898764210000000589876421000000058987642100000005898764210000000589876421100000058987642211110005899865" +
+        "3221111005899876433322100589A987655544200589AA98777666300589AAA9988877400489AAAA9998885003689999999887500356788888777740" +
+        "02C400000000000007FA00000000000007FB00000000000007FB00000000000007FB00000000000007FB00000000000007FB00000000000007FB0000" +
+        "0000000007FB00000000000007FB00000000000007FB00000000000007FB00000000000007FB00000000000007FB00000000000007FB000000000000" +
+        "07FB00000000000007FB00000000000007FB33333333310007FFFFFFFFFFFF5002CFFFFFFFFFFD300277420000000000028852000000000002995210" +
+        "000000000299521000000000029952100000000002995210000000000299521000000000029952100000000002995210000000000299521000000000" +
+        "029952100000000002995210000000000299521000000000029952100000000002995210000000000299632111111100029A854444444310029BA877" +
+        "77777620028AAA9999999820016899988888872000000000000000000000000000000000000000000000000000000000000000000000000000000000" +
+        "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000" +
+        "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000" +
+        "08FFF600008FFE600FFFFF1003FFFFE00FFFFF6007FFFFE00FFFFFB00DFFFFE00FFCEFF00FFCEFE00FFC9FF23FF7EFE00FFC5FF79FF5EFE00FFC3FFC" +
+        "DFF2EFE00FFC0DFFFFB0EFE00FFC08FFFF60EFE00FFC02FFFF10EFE00FFC00CFFB00EFE00FFC007FF500EFE00FFC001FE000EFE00FFC00011000EFE0" +
+        "0FFC00000000EFE00FFC00000000EFE00FFC00000000EFE00FFC00000000EFE00AF6000000008F80168986311358986128CDC952258CDC9229DEEB74" +
+        "36ADEDA32ADEEC8557BEEDA32ADEDCA779CDEDA329CDDCB99ACCDCA329CCBCCBBCCBCCA329BBABCDDDBAABA329BA9ACEEDB9ABA329BA89CEECA89BA3" +
+        "29B977ADDB878BA329B9669CDA768BA329B9658BB9658BA329B9535786458BA329B9523453248BA329B9521221148BA329B9510000148BA329B95100" +
+        "00148BA329A8410000147A9227863100001368720000000000000000000000000000000044554443344555446888877667788876789A99877899A987" +
+        "89AAAA9999AAAA9789ABBAAAAAABBA9889ABBBBAABBBBA9889ABBBBBBBBBBA9779AABBBBBBBBAA87789AABBBBBBAA987789AAABBBBAAA98778999AAA" +
+        "AAA998877788999999998876678888888888887667777777777777766777666666677776677665544556677600000000000000000000000000000000" +
+        "0CFFFE3005EFFFA00FFFFFB00DFFFFF00FFFFFF23FFFFFF00FFFFFF55FFFFFF00FFFFFF8AFFFFFF00FFFFFFDEFFFFFF00FFFFFFFFFFFFFF00FFFFFFF" +
+        "FFFFFFF00FFFCFFFFFFDFFF00FFF8FFFFFE9FFF00FFF7AFFFF89FFF00FFF76FFFF59FFF00FFF74FFFF39FFF00FFF70DFFB09FFF00FFF70277109FFF0" +
+        "0FFF70000009FFF00FFF70000009FFF00FFF70000009FFF00FFF70000009FFF00DFF30000004FFC0169AA8533589A96228CDDC8558BDDD922ADFFDA7" +
+        "7ADFFEA32AEFFEC99BEFFEB32AEFFFDCCDEFFEB32AEFFFEEEEFFFEB32AEFFFFFFFFFFEB32AEFFFFFFFFFFEB32AEEEEFFFFEEEEB32ADEDDEFFEDDEEB3" +
+        "2ADDCCDEFDCCDEB32ADDBACEEDBBDEB32ADDA9BDDB9ACDB32ADDA789A879CDB32ADC95566558CDB32ADC94222238CDB32ADC94100138CDB32ADC9310" +
+        "0138CDA329CB83100027BC9216985200002589723455554444555543679999888899997679ABBAA99AABBA867ABCCCBBBBCCCB978ACDDDCCCCDDDCA7" +
+        "8ACDEDDDDDEEDCA88ACDEEEEEEEEDCA88ACDEEEEEEEEDCA88ACDEEEEEEEEDCA88ACDDEEEEEEDDBA88ABCDDDDDDDDCBA78ABCCCCCDCCCCB9779BBBBBB" +
+        "BBBBBA9779ABBAAAAAABBA9779AA99888899AA9779999877778999977899876556789987788875444467888768876533345678764554332112344544" +
+        "08FFD300004EFE600FFFFB0000CFFFE00FFFFF1002FFFFE00FFDFF5007FFEFE00FF8BF900AFAAFE00FF76FB00DF59FE00FF72FF12FE19FE00FF70BF8" +
+        "AF909FE00FF706FFFF409FE00FF702FFFE109FE00FF700AFF9009FE00FF7006FF5009FE00FF7005FF4009FE00FF7000980009FE00FF7000000009FE0" +
+        "0FF7000000009FE00FF7000000009FE00FF7000000009FE00FF7000000009FE00AE2000000003E80168875211247886128BCA7411369BB9229CDC953" +
+        "258BDDA229CDCA74369CDCA329BBBA8547ABBBA329AAAA8668AAAA9229A9999889999A9229A879AAAA977992299768ACCB867992299757ACDB756992" +
+        "2996569CCA6569922996458BB95459922996336997435992299632467533599229963224432259922996311121125992299631000012599229962100" +
+        "000259922895210000025882277520000001477200000000000000000000000000000000000000000000000000000000000000006777765555667776" +
+        "788887666677888778888877777888877899888778889987789998888889998778899998889998877889999999999887678899999999887767788899" +
+        "998888766778888998888776667788888888777666777777777777660000000000000000000000000000000000000000000000000000000000000000" +
+        "02DFA0000001BD1009FFF6000005FF7009FFFD000006FF7009FFFF700006FF7009FFFFE00006FF7009FFDFF30006FF7009FF9FFB0006FF7009FF5DFF" +
+        "4006FF7009FF45FFD006FF7009FF40DFF106FF7009FF403FFA06FF7009FF400FFF26FF7009FF4007FFB6FF7009FF4001EFF9FF7009FF40006FFDFF70" +
+        "09FF40000FFFFF7009FF40000AFFFF7009FF400002FFFF7009FF4000009FFF7004EC1000001DFE20037874200013663005BCA7310025995006CEC951" +
+        "0126AA5006CEEB731126AB5006CEEC942126AB5006CEEDB63126AB5006CDCCC85236AB5006BCBBBA7337AB5006BB99AB9547AB5006BA879BA657AB50" +
+        "06BA757BB878BB5006BA6459BA89BB5006BA6337ABAACB5006BA62259CCCCB5006BA62147BDDDC5006BA62125ADEEC5006BA621138BEEC5005BA6201" +
+        "26ADEC5005A95200148BCB50036631000247973047777653333445534788876443445553589998654445666458AAA9765555666459AAA98765566764" +
+        "58AAA98766667764589AA99876677774589AA99877777774489999988888877447899988888888744788888888898874477888888999987447777778" +
+        "899A998447777677899AA9854677666779AAA98546766556789AAA8546665555689AAA85466654455789A98535554434567898743554433345678774" +
+        "07EFF8000008FE500EFFFE10000FFFC00EFFFFA0001FFFC00EFFFFF2001FFFC00EFFFFF7001FFFC00EFFFFFE201FFFC00EFFFFFF801FFFC00EFFFFFF" +
+        "D01FFFC00EFFEEFFF71FFFC00EFFE8FFFE1FFFC00EFFE3FFFF6FFFC00EFFE0AFFFCFFFC00EFFE02FFFFFFFC00EFFE00AFFFFFFC00EFFE004FFFFFFC0" +
+        "0EFFE000AFFFFFC00EFFE0004FFFFFC00EFFE0000CFFFFC00EFFE00004FFFFC008FF800000BFFF70048996310136873005BDCA621159CB5006DFEC84" +
+        "125ADC6006DFFEA6226ADC6006DFFEC8426ADC6006DFFFDA636ADC6006DFFFEC856ADC6006DFFFFDA77ADC6006DEEEEEC99BDC6006DEDCDEDBACEC60" +
+        "06DDCABDEDCDEC6006DDB89CEEEEEC6006DDA77ADFFFFC6006DDA658CEFFFC6006DDA536AEFFFC6006DDA5248CEFFC6006DDA5226AEFFC6006CD9511" +
+        "48DEEC6005BB841126ACDA5003775310136897303678765434456653479998755556776448ABBA876667887459BCCB987778887459BCCCA988889984" +
+        "59BCDCBA9889998459BCDDCBA99AA98459BCDDCBBAAAAA8459BCDDCCBBBBBA8459BCCCCCCCCCBA8559ABCCCCCCCCCA9558ABBBBBCCDDCB9558AAAAAB" +
+        "BCDDCB95489A999ABCDDCB9548999889ABCDCB95489988789BCCCB954888876789BCBA954788765678AABA8446776555578999743565543345677763" +
+        "02DE400000007C1009FFE1000000AF7009FFF8000000BF7009FFFE100000BF7009FFFF800000BF7009FC8FC00000BF7009FA1EF40000BF7009FA05FD" +
+        "0000BF7009FA00DF6000BF7009FA006FD000BF7009FA001FF500BF7009FA0009FA00BF7009FA0002FF20BF7009FA00007FB0BF7009FA00001EF5BF70" +
+        "09FA00000AFEFF7009FA000003FFFF7009FA000000BFFF7009FA0000004FFF7004E700000008FE20048864100013563005BB96200013684006CDB831" +
+        "0014795006CDCA521014895006CDCA631014895005BCBA852114895005AA99974124895005A978985224895005986689642489500598557985358950" +
+        "05974368974589500597424798668A500597423689779A50059742247999AA500597411258ABBB500597410147BCDC500597410136ADDC5005974100" +
+        "249CDC5005863100126ABB50036521000147984047776643323334434788765433334453588877644334455358888765444445535888876554445553" +
+        "488887765545555347888776555555644778777665555664477777666666666446777666666666644666666666667764466666666677777446665556" +
+        "667787743565555566788874355555556678888535554445567888853555444456788885355443344577888535443333456788853444333334567774" +
+        "000004AEEA4000000000AFFFFFFA00000009FFFEEFFF8000003FFE3003EFF10000AFF400005FF80003FFD000000EFF1007FF70000009FF500BFF3000" +
+        "0004FF900DFF00000002FFB00EFE00000001FFC00EFE00000001FFC00DFF10000002FFB00AFF30000005FF8006FF8000000AFF4002FFE000000FFE00" +
+        "009FF400006FF700002FFE3004FFF1000008FFFEEFFF70000000AFFFFFF90000000004BFEA400000000236899763200001257ABBBBA742000137ABBA" +
+        "ABBA7310036ABA7557ABA520048BB742257BB740069B94200259B95007AB83100138BA6008BA62000127AB8009B962000026AB8009B951000026AB80" +
+        "09B951000026AB8008BA62000026AB8008BA72100127AB7007AB83100148BA60069B9520025AB950047BB742258BB740036ABA7558ABA5200137ABBA" +
+        "ABBA731000257ABBBBA74100000236899763200000006677777620000000677777772000000077777777200000007666666720000000665555662000" +
+        "000065444456200000006543334520000000543223452000000054322235200000005432223520000000543222352000000054322235200000005432" +
+        "234520000000654333452000000065444456200000006655556620000000766666672000000077777777200000006777777720000000667777762000" +
+        "000037DFFD7300000002DFFFFFFD2000000FFFFFFFFFE000008FFFFCCFFFF60002FFFFB11BFFFE1005FFFE0000FFFF5009FFF700008FFF700CFFF100" +
+        "003FFFA00EFFC000000EFFC00EFFA000000BFFC00EFFA000000CFFC00DFFC000000EFFB00BFFF200004FFF9008FFF800009FFF6005FFFF0000FFFF50" +
+        "01FFFFB11CFFFE00007FFFFCCFFFF600000EFFFFFFFFE0000002DFFFFFFD1000000037DFFD7200000013579AA975210001269BDDDDB952100259CEEE" +
+        "EEEC9520037CEECBBDEEB73005ADEC9779DED95007BEDA5336ADEB6008CEC831138CEC7009DDA620027BED8009DD9510015ADD900ADD94100159DD90" +
+        "0ADD94100159DD9009DD9510026ADD9009DEB620027BEC8008CEC831148CEC7007BEDA6336ADEB60059DEC977ADED940037CEECBBDEEB7300259CEEE" +
+        "EEEC942001269BDDDDB952100013579AA975210002346778887653200346789AA998653004679AAAAAA9864005789AAAAAAA97500689AA99999A9860" +
+        "078999877899987007999866568999700799875445789980089986543468998008998643346899800899864334689980089986543468998007999764" +
+        "45789980079998766689997006899987789998700689AA9999AA986005789AAAAAAA9750045799AAAAA986400346789AA99865300234577887764320" +
+        "0000029EE920000000007EFFFFE700000004FF9449FF3000002EF600007FD10000AF80000009F80001FF50000005FE0005FE10000002FF4006FC0000" +
+        "0000EF5008FA00000000BF6009F900000000AF7009F900000000AF7007FA00000000CF5005FC00000000EF5004FF10000003FF4001EF50000005FD00" +
+        "009F9000000AF700001DF600007FC1000003FF9339FE200000007EFFFFE600000000029EE91000000001357787532000001368999986410001268987" +
+        "789863100148975434798520026985211247973003797310013698400488620000258940059851000014795005984100001479500597410000137950" +
+        "059741000013795005984100001479500498520000147950048862000025894003797310013698300269852112489630014897543579852001268987" +
+        "789863100013689999864100000135788753200000000000000000000000000000000000000000000000000000000000000000000000000000000000" +
+        "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000" +
+        "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000" +
+        "03EFFFFFEC83000007FFFFFFFFFE910007FFEDDDDFFFFB0007FF5000016DFF4007FF50000005FF7007FF50000005FF9007FF50000005FF8007FF5000" +
+        "0008FF6007FF855555AFFF3007FFFFFFFFFFF70007FFFFFFFFFE500007FFA8887652000007FF50000000000007FF50000000000007FF500000000000" +
+        "07FF50000000000007FF50000000000007FF50000000000007FF50000000000003EC100000000000046888888765311007ABBBBBBBA9642008BCCBAA" +
+        "ABBBA74009CC9876789BB96009BB74322469BB7009BA63100137BB8009BA62100136AB9009BA63212358BB8009BB8654568ABA7009CCB98899BBB850" +
+        "09CDDCBBBBBA852009CDCBAAA987421009CC98666543210009BA74222111000009BA63100000000009BA62100000000009BA62000000000008BA6200" +
+        "0000000008A9520000000000068742000000000022222222222222216677777777776655677887777777766567888777667777767788776666677776" +
+        "778776655566777777777655556677777777765555567777778776655566777777887766666777777888877766777776788988777777776678999887" +
+        "777776657899988777766654789988776665554378888776655443327788776554433322777766543322221167776543322111112222211110000000" +
+        "06FFFFFFFDA610000CFFFFFFFFFFE4000CFFFFFFFFFFFD100CFFFDDDEFFFFF700CFFF10000BFFFC00CFFF100004FFFE00CFFF100002FFFE00CFFF100" +
+        "03CFFFD00CFFFAABCFFFFF900CFFFFFFFFFFFD200CFFFFFFFFFFD6000CFFFFFFFFD910000CFFF433310000000CFFF100000000000CFFF10000000000" +
+        "0CFFF100000000000CFFF100000000000CFFF100000000000CFFF1000000000005FF800000000000047899998876321007ACDDDDDCBA742008CEEEDD" +
+        "DEEDB84009DEDCBBBCDEDA6009CEB86568BDEC8009CDA632248CED9009CDA621137BED9009CEB74446ACEC9009DECA989ACEEB7009DEEDCCDDEED960" +
+        "09DEEEEDDDDC963009DEECBBBAA8631009DEC9766654210009CDA6322211000009CDA5210000000009CDA5100000000009CDA5100000000009CD9510" +
+        "0000000008BC841000000000058863100000000035678888777654323688999999887652489AAAAAAAA99863589AAAA99AAA997458AAAA9999AAA984" +
+        "59AAA988899AAA9559AA9987889AAA9559AAA988889AAA9559AAA99889AAAA8559ABBAA999AAA98459ABBBAAAAAA987459ABBBAAA999875359ABBAA9" +
+        "9887654259ABAA987766543259AA98765443322158998765433221105899865422111100589876432111000047887542110000004777653210000000" +
+        "02CFFFFFEB71000007FFFFFFFFFE700007FC3333349FF70007FB00000005FE1007FB00000000CF6007FB000000009F8007FB00000000AF7007FB0000" +
+        "0001EF4007FB0000127CFA0007FFFFFFFFFFE10007FFFFFFFFF9200007FD88887510000007FB00000000000007FB00000000000007FB000000000000" +
+        "07FB00000000000007FB00000000000007FB00000000000007FA00000000000002D4000000000000047899888775421005ABAA999998752006AB9877" +
+        "7889973006A964333457995006A85211112589600698420000147960069842000014796006A852111135896006A964333457995006BB977777899840" +
+        "06BCBAA99998752006BBA9888765421006AA86554432110006A963222111000006A85210000000000698420000000000069841000000000006984100" +
+        "000000000597410000000000047631000000000077777777777666667777777777777666777777777777766677777777777777667777777777777776" +
+        "777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777" +
+        "777777777777777777777777777777777777777677777777777777667777777777777666777777777777666677777777777766667777777777666666" +
+        "000006ADC61000000003EFFFFFF30000000EFFFFFFFE100000AFF9000AFFC00002FFE00000CFF00008FF6000002FF6000BFF2000000FFA000EFF0000" +
+        "000DFD000FFF0000000BFF000FFF0001000AFF100FFF003FD00BFF000DFF108FFA0DFD000BFF301FFF6FFB0007FF8004FFFFF60002FFE0007FFFF100" +
+        "008FFB201FFFE000001EFFFDFFFFF5000001BFFFFFEFFF60000007CFE818FFD00000000000007E60001246788753110001258ABBBB9742000158ABBA" +
+        "ABBA6310037ABA8679BB9520049BA742358BA73005AB85211369B93005BB73100148BA4006BA62100137BA5006BA62111136AA5006BA63233236AB50" +
+        "06BA63456547AB5006BB74589879BB5006BB7459BBABCA5005BB8547ACCDCA4004AB96458CDEC930038BB8668BEEC9300269BB99ACDEC94001369BBB" +
+        "CCCDCB500023689AAA9ABB60000124566556895003566777776654200366777777766520046777777777653004777666667766300477655555666630" +
+        "047665444566664004765443445666400476544344567640057665444566774005776555566777400577665667788740057776667888874005777777" +
+        "899998500577788899AA9850047888899AAA985004778899AAAAA85004678899AAAA9850036678899AAA985003566778899987400244566777887640" +
+        "000048CDD94000000007FFFFFFF90000006FFFFFFFFF800002EFFFFDFFFFF10005FFFF504FFFF60009FFF80004FFFC000CFFE10000EFFF100EFFB000" +
+        "00BFFF400FFFA000007FFF500FFFA07A926FFF500FFFB0FFFC7FFF500EFFD0FFFFEFFF400CFFF2DFFFFFFF2009FFF83DFFFFFD0005FFFF36FFFFF800" +
+        "01EFFFFFFFFFFA00004FFFFFFFFFFF600008FFFFFFFFFFD0000029EFFC6FFFE0000000000006FF80001357999864210001369CDDDCB84200036ADEEE" +
+        "EEEB8410049CEDCBCDEDA62006BDEB978BDEC83008CEC85347BED95009DEB631259DDA6009DDA521147CDB6009DDA533347CDB700ADDA767778CDB70" +
+        "09DDB89BBBBDEB7009DEB9ADEDDEEB6008DECAACEFFFEB6008CEDAABEFFFDA5006BEECBBDFFFD950049CEEDDEFFFDA60026ADEEEEEFFEC800137ACDD" +
+        "DDDEED9000135799999BCC9000012344445688600235677887654320035689999987643004689AAAAA9875400579AAAAAAA987500689AA9999AA9750" +
+        "0799A988889A986007999877789998700899987667899970089A9877789AA970089AA988899AA970089AAA999ABBB970089ABAAABBCCBA70079ABBBB" +
+        "CCDCBA70079ABCCCDDDDCA70068ABCCDDDDDCA700689BBCDDDDDCA800578ABBCCDDCBA80045789ABBBBBB970024567899AAA98700123456677777760" +
+        "0000049CB50000000001BFFFFFB30000000CFE756DFB0000008FB10002CF600002FF4000002FE00005FE0000000AF50006FB00000006F90008FA0000" +
+        "0005FC000AFA00000005FE000AFA00000005FF0009FA00194005FF0008FB004FE305FD0005FD000BFC06FA0005FF1001CFBCF50001EF50001DFFD000" +
+        "008FB00009FF90000019FCA89DFFD20000009FFFFFDCFD10000005AAA603EF600000000000003D400013467887642100012578999987520001479876" +
+        "778974100269864334688520037974211247973004886310013688400598520000258840059841000014795005A841000013795005A8421111136950" +
+        "05A842234324795005A852356545795005985335887799500498532489AAA9400489642369BCB8400379853358BDC8300258876569BDC83001368888" +
+        "9ABCB9400013578999999950000134667655685000000000000000002222222222222222555666677777777656666677777777766666677777887777" +
+        "666777778888877766677788888888776777778888888877677778888888887777778888888888877777888889888887777888888888888777788888" +
+        "888888877777888888888877777788888888887777777888888887776777777788877776667777777777777622222222222222220000000000000000" +
+        "01CFFFFFD940000005FFFFFFFFFC400005FFEDDDFFFFF30005FF600016BFFC0005FF6000000DFF0005FF6000000DFE0005FF6000001FFC0005FF6000" +
+        "007FF80005FF955557FFE20005FFFFFFFFFF500005FFFFFFFFF8000005FFB88FFF60000005FF6009FFC0000005FF6001DFF6000005FF60004FFC0000" +
+        "05FF60000BFF600005FF600004FFE30005FF600000AFFB0005FF6000002DFF2001DE30000005FA000157888877542100028ACBBBBAA86310029CCBAA" +
+        "ABBB961002ACB97778ABB82002AB9633347ABA2002AB95211259BA3002AB85200259BA2002AB9632247AB92002ACA754579BA72002ACCA989ABB9610" +
+        "02ADDCCCDDCA631002ACDCBCDDB8420002ACB98ACCA7310002AB96469BB8410002AB95347AB9520002AB852259BB741002AB852136ABA610029B8410" +
+        "148BB820029A84101369A920027863100136882025677777776665512677777777776652267888877777776227788877777777722778877766777772" +
+        "277877766667777227777766666777722777776666677772278887766667777227888777777777722788888888888772288999988888877228899999" +
+        "999887622889999999998762288999999999876228899999999887622788888888888762278888888888776227777777777777622777766666777762" +
+        "02EFFFFFEB74000005FFFFFFFFFF800005FFFFFFFFFFF80005FFFEDEFFFFFD0005FFF50017EFFF0005FFF50000AFFF0005FFF50000DFFE0005FFF500" +
+        "19FFFB0005FFFCAADFFFFA0005FFFFFFFFFFF30005FFFFFFFFFF600005FFFFFFFFF4000005FFF75FFFF9000005FFF50DFFFF100005FFF503FFFFA000" +
+        "05FFF5008FFFF50005FFF5002EFFFC0005FFF50006FFFF2005FFF50000CFFF3001EFC100004EFC000158999988653100028CDDDDDCB9741002ADEEED" +
+        "EEEDA71002AEEDBBCDEED92002ADDA7679CEEB3002ADC95336ADEB3002ADC842259DEB3002ADDA6458BDDA2002AEEC999BDED92002AEEEDCDEEEB710" +
+        "02AEFEEEFFEC841002AEEDDEEFDB620002AEDCABDEDA520002ADD978BEEB730002ADC9569DED951002ADC8447BEEB71002ADC84248CEDA2002ADC831" +
+        "26ADDB30029CB731148BCA300168752002579720045678887776543006789999998875400689AAAAAAA98750079AAAAAAAAA9860079AAAA99AAAA870" +
+        "079AAA9999AAA970079AA99899AAA970089AAA9999AAA970089ABAAAAAAAA870089BBBBBBBBA9860089BCCCCCCBA9750089BCCCCCCBA9750089BCCCC" +
+        "CCBA8650089ABBBBBBBA8640079AAAAABBBA8650079AAA99AAAA97500789998889AA9760078988777899986006787766678887600567665455677760" +
+        "009FFFFFD940000000FFFFFFFFFA300000FF833348EFF30000FF6000001BFB0000FF60000008FF0000FF60000008FD0000FF6000000AFB0000FF6000" +
+        "000BF60000FF6000039FC10000FFFFFFFFFE200000FFFFFFFFD3000000FFB88AFF20000000FF6000EF90000000FF60007FF3000000FF60001DF70000" +
+        "00FF600002FF300000FF6000008FC00000FF6000001EF50000FF60000008FE00009C10000001CA000168998887653100028ABAA999975310029BA877" +
+        "88998610029A8543446898200299731112379920029962100126992002996210013698200299731112479820029A854334688610029BA87778997510" +
+        "02ACCAAABBA85200029BB99ABBA63100029A9768AA952100029A74358995210002997323589741000299621146985200029962112579741002996210" +
+        "135886100289621001478720027752000125772000000000000000000000000000000000000000000000000000000000000000007777776666666666" +
+        "777777776666666677777777777666667778877777777777778888887777777777888888887777777788888888877777778888888887777777788888" +
+        "887777777777777777777777777777777777777777777777777777760000000000000000000000000000000000000000000000000000000000000000" +
+        "0000049CDA5000000003EFFFFFFE4000001CFFFBAEFFC100007FFA2001BFF60000BFF300003FF70000BFF30000046000007FF80000000000001EFFB1" +
+        "000000000006FFFEA300000000004EFFFF9000000000005EFFFE5000000000017CFFC10000000000009FF70000030000003FFB0000AF9000001FFD00" +
+        "00DFF200004FFA00009FF91002CFF500002DFFEBBFFFB0000005FFFFFFFD2000000006BDD9300000001246888764210000269BBBBBA852000049BBAA" +
+        "ABBA7300005BB97557AB9400006BA74224688300006BA73111355200005BB85311122100004ABB86321100000037ABBA86421000001479BBB9752100" +
+        "00013579BBB95200000012358ABB83000011111246ABA40000243100148BB50000475310137AB500005A9632248BB500005BB96567ABA4000049BBAA" +
+        "ABBA730000269BBBBBA84100001357888764200000266777776652000026777777765200002777777666520000278776665551000027877655544100" +
+        "002777765544410000277776554431000026777665543100002667776655410000156677776551000014556677766200001344566777620000133445" +
+        "667772000013344556777200001444455677720000155555567772000025666666777200002666667777720000267777777762000026677777766200" +
+        "000037BDDC8300000006FFFFFFFF7000005FFFFFFFFFF40000DFFFFDDFFFFB0000FFFF7106FFFD0000FFFE0000CFFB0000FFFF800003200000BFFFFC" +
+        "70000000003EFFFFFD5100000005FFFFFFFB100000001AFFFFFFD10000000049FFFFFA00000000003BFFFF0000AED20000EFFF0000FFFA0000DFFF00" +
+        "00FFFF5017FFFF0000EFFFFCDFFFFB00007FFFFFFFFFF3000008FFFFFFFE5000000048CDDB62000000135799997531000036ACDDDDCA7300006ADEEE" +
+        "EEEDA600008CEECBBCEEC800009DEC9668BDC80000ADEC74348A9600009DEC9633455300008CEEC975432100005ADEEDB97421000036ACEEEDB85200" +
+        "001358ACDEEC950000123468ADEEB700003443346ADED9000068752237BEDA00009CB84236BEDA0000ADDB8669CED900009DEDCABCEEC800007BDEEE" +
+        "EEEDA6000047ACDDDDB9630000136899997531000035678888765300005689999998650000689AAAAA9975000079AAAAAA9976000079ABAA99887500" +
+        "0089BBA9988765000079ABA9887654000078AAAA9876540000679AAA99875400005689AAAA98640000457899AAA97500004567899AAA860000456678" +
+        "9AAA97000056677789AA98000067788889AA9800006899999AAA980000689AAAAAAA970000689AAAAAA9860000568999999865000045678887765300" +
+        "0000038CC94000000001BFFFFFFC1000000BFFA658EFB000006FC200002DF50000AFA0000008F40000AFA00000001000005FD10000000000000BFC50" +
+        "000000000000AFFC50000000000019FFFB30000000000007EFF900000000000019FF800000000000003EF50000000000000AFA00006A2000000AFA00" +
+        "00AF9000000AFA00008FC100003DF400001DFE855AFF90000002DFFFFFFA0000000005ADC82000000013578888753100002589999998520000389876" +
+        "678973000049964334677300005985211134520000598520001221000049964210011000003799753210000000257998653210000013578997642000" +
+        "000123578997520000001124579973000000001125798400001211001258950000243100014795000047531112489500004886433469940000489876" +
+        "678973000026899999985200001357898865210000000000000000000000000000000000000000000000000000000000000000000000000000000000" +
+        "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000" +
+        "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000" +
+        "08FFFFFFFFFFFF700EFFFFFFFFFFFFD007DDDDEFFEDDDD600000005FF50000000000005FF50000000000005FF50000000000005FF50000000000005F" +
+        "F50000000000005FF50000000000005FF50000000000005FF50000000000005FF50000000000005FF50000000000005FF50000000000005FF5000000" +
+        "0000005FF50000000000005FF50000000000005FF50000000000005FF50000000000003EE20000000478888888888740059BBBCCCCBBB950058AABCD" +
+        "DCBA9840035678ADCA8765300122358BB85322100000137BB73100000000137BB73100000000137BB73100000000137BB73100000000137BB7310000" +
+        "0000137BB73100000000137BB73100000000137BB73100000000137BB73100000000137BB73100000000137BB73100000000137BB73100000000137B" +
+        "B73100000000137AA6210000000012588520000000000000000000000000000000000000444555555555444477777888888777767778888888888777" +
+        "778888999888887777888999999888777788899999988877778889999998887767788899998887766677888998887766667788888888776556677888" +
+        "888776655566778888776655456677777777665445566777777665444456677777665544233444455444433200000000000000000000000000000000" +
+        "2CFFFFFFFFFFFFB15FFFFFFFFFFFFFF45FFFFFFFFFFFFFF30ADDDDFFFFDDDD80000000FFFD000000000000FFFD000000000000FFFD000000000000FF" +
+        "FD000000000000FFFD000000000000FFFD000000000000FFFD000000000000FFFD000000000000FFFD000000000000FFFD000000000000FFFD000000" +
+        "000000FFFD000000000000FFFD000000000000FFFD000000000000FFFD0000000000008FF6000000057899999999885008BCDDDDDDDDDC8008CDDEEE" +
+        "EEEDDC90069ABCDEEDCBA970034558BDEC865430011125ADDA6321100000149DDA5100000000149DDA5100000000149DDA5100000000149DDA510000" +
+        "0000149DDA5100000000149DDA5100000000149DDA5100000000149DDA5100000000149DDA5100000000149DDA5100000000149DDA5100000000149C" +
+        "DA5100000000138BC941000000000268863100000066777777776600007889999998870000789AABBBA9870000789ABBBBA9870000678ABBBBA97600" +
+        "005679AABA9765000034689AA98654000024578999754300002346899875320000124689986432000012468998643100001246899864310000124689" +
+        "986431000012468998643100001246899864310000124688986431000012467898643100001246788864310000124578876421000012356776542100" +
+        "08FFFFFFFFFFFE600CFFFFFFFFFFFFA00033337FF63332000000005FF30000000000005FF30000000000005FF30000000000005FF30000000000005F" +
+        "F30000000000005FF30000000000005FF30000000000005FF30000000000005FF30000000000005FF30000000000005FF30000000000005FF3000000" +
+        "0000005FF30000000000005FF30000000000005FF30000000000004FF30000000000001CB0000000027889999999872002899ABBBBAA9820026778AB" +
+        "CA8876200133357AA8543310001113699631110000001258963100000000025896310000000002589631000000000258963100000000025896310000" +
+        "000002589631000000000258963100000000025896310000000002589631000000000258963100000000025896310000000002589631000000000258" +
+        "963100000000025886210000000002477521000000000000000000000000000000000000222222222222222267777777777777767777777777777777" +
+        "777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777" +
+        "777777777777777777777777777777777777777667777777777777666667777777777666222222222222222200000000000000000000000000000000" +
+        "03DA00000001BD2009FF40000005FF7009FF40000006FF7009FF40000006FF7009FF40000006FF7009FF40000006FF7009FF40000006FF7009FF4000" +
+        "0006FF7009FF40000006FF7009FF40000006FF7009FF40000006FF7009FF40000006FF7009FF40000006FF7009FF40000006FF7008FF50000007FF60" +
+        "05FF9000000AFF3001DFE610037FFD00008FFFFEEFFFF700000AFFFFFFFF9000000029DFFC920000068741000024786008A9520000259A8009B95200" +
+        "0025AB9009BA52000026AB9009BA52000026AB9009BA52000026AB9009BA52000026AB9009BA52000026AB9009BA52000026AB9009BA52000026AB90" +
+        "09BA52000026AB9009BA52000026AB9009BA52000026AB9009BA62100136AB8008BA63100137BB8007BB85322369BA70069BB976679BB950047ABBA9" +
+        "9ABBA7400247ABBBBBBA7420012467899876321000000000000000000000000000000000000000000000000000000000000000000000000000000000" +
+        "000000000000000077655444444566777766554444556677777666555566677777776666666777777777776666777776677777777777777666777777" +
+        "777777665666777777776665000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000" +
+        "07EE70000008FE500EFFE000000FFFC00EFFE000001FFFC00EFFE000001FFFC00EFFE000001FFFC00EFFE000001FFFC00EFFE000001FFFC00EFFE000" +
+        "001FFFC00EFFE000001FFFC00EFFE000001FFFC00EFFE000001FFFC00EFFE000001FFFC00EFFE000001FFFC00EFFF000001FFFC00EFFF500006FFFC0" +
+        "0BFFFC1003DFFFA005FFFFFEFFFFFF3000BFFFFFFFFFFA00002DFFFFFFFFC10000016BEFFEA61000058853100136885008BC84100148CB8009CD9510" +
+        "0159DC9009DD9510015ADC9009DD9510015ADC9009DD9510015ADC9009DD9510015ADC9009DD9510015ADC9009DD9510015ADC9009DD9510015ADC90" +
+        "09DD9510015ADC9009DD9510015ADC9009DD9510025ADC9009DDA620126AEC9009CEB742248CEC8008CEDA7557BDEC8006ADEDBABCDEDA60048CEEED" +
+        "DEEEB8400258BDDDDDCB85200124789AA987421047776432235677744787653233568874588875433457888558987543345789855898754334678985" +
+        "589875433467898558987543346789855898754334678985589875433467898558987643346789855898764334678985589976444568998558998755" +
+        "567899855899986667899985489A99877899A984479AAA9999AAA9744789AAAAAAAA986336799AAAAAA9876324678899998875422345677777765431" +
+        "03D6000000007C2009FA00000000AF7009FA00000000BF7009FA00000000BF7009FA00000000BF7009FA00000000BF7009FA00000000BF7009FA0000" +
+        "0000BF7009FA00000000BF7009FA00000000BF7009FA00000000BF7009FA00000000BF7009FA00000000BF7009FA00000000BF7008FA00000000BF60" +
+        "05FC00000001EF3000DF7000000AFB00004FFA5336CFF3000006EFFFFFFE5000000018CEEC7100000786310000136870089731000014798008974100" +
+        "001489800897410000148980089741000014898008974100001489800897410000148980089741000014898008974100001489800897410000148980" +
+        "089741000014898008974100001489800897410000148980089841000014898008984100002589700799631111369960058985433468985003689887" +
+        "889986300246899999986320012357888875321000000000000000000000000000000000000000000000000000000000000000000000000000000000" +
+        "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000" +
+        "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000" +
+        "08E5000000006E600FFE00000001FFD00BFF30000005FFA007FF80000009FF5002FFA000000AFF1000DFC000000DFB0000AFF100003FFA00009FF600" +
+        "008FF700004FFB0000DFF200000EFE0002FFD000000AFF5007FF80000006FF900BFF40000001FFE00EFD00000000CFF01FF9000000007FF35FF60000" +
+        "00005FF89FF4000000003FFCDFE1000000000DFFFFB00000000009FFFF700000000002EFFD100000078631000013787009A8420000259A8009BA6210" +
+        "0136AB8008BA73100137BB8007AB84100258BA60069B95200269B950058BA630137AB840037AB841148BA730036AB941259BA6200259B95226AB9520" +
+        "0148BA7337BB73100137BB8458BA63100126AB9669BA520000259BA88AB9410000148BBAABB8310000137BCCCCA7310000026ACDDC952000000259CE" +
+        "EC841000000147BDDA731000000125799742000007777666666677700777777666777770077777777777777007777777777777700777788888877770" +
+        "0778888888888770077888888888877007788899998887700778899999988870077899999999887007789999999988700778999AAA998770067899AA" +
+        "AA9987700678999AAA9987700678899AA999876006678999999887600567889999887660056778888887765005567788887765500455667777766540" +
+        "0BFE20000003EFA00FFF9000000BFFF00FFFE000001FFFF00FFFF300005FFFE00BFFF80000AFFF9006FFFA0000BFFF5002FFFD0000EFFF1000CFFF30" +
+        "05FFFA00007FFF800AFFF600005FFFC00EFFF500002FFFF34FFFF100000DFFF55FFFB0000008FFF79FFF60000003FFFCEFFF10000000FFFFFFFF0000" +
+        "0000EFFFFFFB000000008FFFFFF6000000004FFFFFF2000000000EFFFFC00000000007FFFF600000068852000025886009CB84100148BC8009DDA510" +
+        "026ADD9009DEB620027BEC8008CEC831138CEC7006BED94114ADEB6005ADDA5226BDD950049DEB6337CED840037CEC8448DEC730026BED966ADDB520" +
+        "015ADEB88BED94100149DECAACEC83100137CEDCCDEB72000026BEEDEEDA62000015ADFFFED9410000148CFFFEC8310000037BEFFEB6200000026AEF" +
+        "FDA52000000148CDDB741000000125899742000027776532235677722888754334678872289986544568998228998755567899822899976556899982" +
+        "2799987667899872278999877899987226899988889998622689AA9999AA97621579AAAAAAAA97511579AABBBBAA96511468ABBCCBBA86411468ABCC" +
+        "CCB9854114589BCDDCB9753113579BCDDCB9743113479ACDDCA8642102468ABCCB986320023579ABBA97532001246799997642100123567887643210" +
+        "08C1000000002D600DF8000000009FB009FA00000000AF7005FC00000000EF3001EF20000004FD0000BF60000008F900007FA000000CF500001FF100" +
+        "002FE000000DF400006FB0000009F80000AF70000005FE0001FF50000004FF3005FF20000001FF7008FD00000000AFA00AF8000000006FB00DF40000" +
+        "00002FF12FE0000000000CF68FA00000000008FEEF600000000004FFFF200000000000BFF90000000575310000125750059741000013686005985200" +
+        "001479600598631000258950048973100136994003897420014798400379852102489830026996311258973002589741136996200148984214798520" +
+        "01379863258974100136897436896310002589754798521000147986689842000013699779974100001269A999963100000258ABBA852100000137AC" +
+        "CA7410000001259BB9631000000024688742100047777777777776624777777777777762477777777777777247777777777777725777777777777772" +
+        "577777777777777257777777777777725777788888777772577778888877777257777888888777725777788888877772577778888887777257777888" +
+        "887777725777788888777772577777888777777247777777777777724777777777777762467777777777766246677777777776624666777777776662" +
+        "08E4000000006E600FFC00000000EFE00FFD00000000FFD00EFE00000001FFC00EFE00000002FFC00DFF00000003FFB00CFF10000004FFA00BFF2005" +
+        "5005FF9009FF407FF406FF7008FF50CFFA07FF6007FF72FFFF19FF5005FF87FFFF5AFF3003FFACFFFFBAFF1001FFCFFDEFFBFE0000EFFFF89FFFFC00" +
+        "00CFFFF34FFFFA0000AFFFF00FFFFA0000AFFFD00EFFF800008FFF8009FFF500002DFD2001AFC100078621000013687009A8310000148A900AB84100" +
+        "00149BA00AB9410000249BA00AB9410000259BA00AB9421111259B900AB952222235AB9009B964566546AB9009BA657AA757AB9009BA779CC978BB80" +
+        "08BB99BEEB99BB8008BBABCEECBBCB7008BCCCDEEDCCCB7007BDDDDDDDDEDA6006ADEEDBBDEEDA6006ADEEB99CEED950059DEDA77ADEC840048CEC95" +
+        "59CDB740037ACA7337ABA630024787422478742000000000000000002222211111122222777665444456677777776655556677777787777667777877" +
+        "78888888888888877889999999999887789AAAAAAAAAA987899AABBBBBBBA98789ABBBBCCBBBBA9889ABBCCCCCCBBA9889ABCCCCCCCBBA9889ABBCCC" +
+        "CCCBBA9779ABBBBBBBBBBA8778AABBBBBBBBA987789AAAAA9AAA99866789998888998876567888777778776522222222222222210000000000000000" +
+        "0CFE20000003EEA00FFF70000009FFF00FFF8000000AFFF00FFF9000000BFFF00FFFA000000CFFF00FFFB000000DFFF00FFFC000000EFFF00FFFD08C" +
+        "C60FFFF00FFFE4FFFF4FFFD00EFFF6FFFF8FFFC00DFFFCFFFFDFFFB00BFFFEFFFFFFFF9009FFFFFFFFFFFF7007FFFFFFFFFFFF5005FFFFFFFFFFFF30" +
+        "02FFFFFEFFFFFF0000EFFFF9AFFFFC0000BFFFF56FFFF900008FFFF34FFFF600004FFFA007EFE300068852100025786008BB83100127BC9009DD9410" +
+        "0138CDA009DD94100138CDA009DD94100139DDA009DDA5211249DDA009DDA644445ADDA009DDB878877BDD9008CECABCCBACED9008CEDCDEEDDDED90" +
+        "07CEEEEFFEEEEC8007CEFFFFFFFFEC8006BEFFFFFFFFEC7006BEFFFFFFFFEB7005AEFFFFFFFFEB60059DFFEDDEFFEA50049DFFDCBDEFD940038CEECA" +
+        "9BEEC840026ACCA769BCA730014688643578742067765432234567767887653223467887789875433456898779987654456789987999876556789998" +
+        "79A9987767899A9879AAA998889AAA9879ABBBAAAABBBA9879ACCCCCCCCCCB9879BCDDDDDDDDCB9879BCDEEEEEEDDB9879BDDEEEEEEEDB9779BDEEEF" +
+        "FEEEDB9779BDEEEEEEEEDB9768ACDEEEEEEDDB9768ACDDDDDDDDCA86579BCCDDDDCCBA86578ABBBBBBBBA87546799999999997643567888777887654" +
+        "08C1000000002C600FF7000000009FD00FF800000000AFD00EF900000000AFC00DF900000000AFB00CFA00000000AFB00BFA00000000AFA00AFA0001" +
+        "0000AF8009FA003EE200BF7008FA006FF500CF6006FB00BFF900EF4005FC01FFFE00FF3003FE05FFFF32FF1001FF3AF8AF95FD0000EFBEF24FEDFC00" +
+        "00BFFFD00DFFF900008FFFA00AFFF600006FFF8009FFF300002FFF3003FFF100000AFA00007E90002874100000024872298520000002598229952000" +
+        "001259922995200000126992299520000013699229962111111369822896322332236982289633455434798228964469864479822897569BB8657982" +
+        "289867ACCA768972279878BDDB88997227999ABCCBA9A97117ABBBBBBBBBB96116ACCCA99ACCC96116ADDC9779CDD951159DDB8558BDD841148CCA64" +
+        "46ACC741137BB852258AA630025886311368742000000000000000000000000000000000000000000000000000000000000000006777777777777776" +
+        "67788888888888777788899999998877788999999999988778999AAAAAA999877899AAAAAAAA99877899AAAAAAAA99877899AAAAAAAA998778999999" +
+        "999999877889999889999887678888888888887667777777777777760000000000000000000000000000000000000000000000000000000000000000" +
+        "00BD30000004EA0003FFB000000CFF1000CFF300005FFB00006FFD1002EFF500000CFF7009FFB0000004EFE01FFE200000008FF79FF7000000003FFE" +
+        "FFE30000000008FFFF700000000001EFFD000000000003FFFF20000000000BFFFFA0000000004FFDEFF300000000AFF46FF900000005FFD00EFF4000" +
+        "001EFF5007FFD000007FFB0001DFF60000DFF200003FFC0005FFA000000BFF3002ED20000004ED100278631001368720029A85211269A820028BA841" +
+        "248BB820016AB95336ABA6100149BB8558BB94100026ABA99AB9620000158BCBBCB84100001369CDDC963100000248CEEB741000000137BEEB631000" +
+        "000147CEEB731000000259CEDC85200000147ACCCCA7410000269BBAABB952000138BB9779BA7300015ABA6447ABA510027BB842259BB720029BA731" +
+        "137AB920029A74100258A920027752100135772000777777777777000077788888877700007788888888770000788899998877000078899999987700" +
+        "0078899AA9987600006789AAAA987600006789AAAA987600006789AAAA987600006789AAAA987600006789AAAA987600006789AAAA987600006789AA" +
+        "AA987600006789AAA99876000078899AA998770000788999999877000078889999887700007788888888770000777777777777000077777777777700" +
+        "03DFB100002CFC2008FFF90000AFFF6008FFFD1003EFFF6002FFFF900BFFFE10006FFFF45FFFF600002EFFFBCFFFD1000006FFFFFFFF50000000EFFF" +
+        "FFFD000000005FFFFFF3000000000AFFFF90000000000DFFFFC0000000008FFFFFF600000000FFFFFFFE00000008FFFFFFFF7000002FFFF9AFFFE200" +
+        "008FFFF34FFFF70003FFFF7009FFFF200AFFFD1001EFFF800AFFF800009FFF9006FFB100002DFE40037874200257873005ACB731148BCA4005BDDA63" +
+        "36ADDA5004ADEC8559CED940037CEDB99BEEB7200259DEDCCDED95100137CEEEEEEB731000259DEFFEC9410000137BEFFEB7210000026AEFFDA52000" +
+        "00026AEFFDA6200000138CEFFEB731000025ADEFFEDA52000148CEEDDEEC7310026ADEDBBDEDA520038CEDA88BDEC73004ADEC8458CEDA4005BEDA52" +
+        "36ADEB5005BCB731137BCB5004897410024798400477766556677740058888777788884005899998899998500489AAAAAAAA98400479ABBBBBBA9740" +
+        "0478ABCCCCBA87300368ABCCCCB9863003579BCDDCB9752002579BCDDCB9652002569BCDDCB8642002569BCDDCB8642002579BCDDCB9752003679BCD" +
+        "DCB975300368ABCCCCBA86300479ABCCCCBA87400489ABBBBBBA97400589AAAAAAAA9850058999888899985005888877778888500477765556677740" +
+        "00A900000000A80001EF40000006FD00006FD000001EF500000DF600008FB0000005FE3004FF40000000DF900AFC000000005FE12EF30000000009FD" +
+        "EF700000000001EFFD1000000000008FF7000000000000AFF9000000000004FFFF20000000000CFABFA0000000008FC00DF600000001EF8009FE1000" +
+        "0006FD1002EF6000001EF500006FD000008FB000000DF60002EE30000004FE1002D900000000AD100078631001357700007985211247880000689631" +
+        "13689700004798523479850000368974568873000024799778985200001258AAAA963100000147ACBA852000000126ACCA7310000000259CCA631000" +
+        "0001269CCA731000000137ACCA842000001258AAAA863100001369988997420000258985579863000047986335897400005897422468860000798531" +
+        "125897000088741001368800007752100124770000267777777762000027777777777200002777777777720000277788887772000027788888877200" +
+        "002778888887720000278888888772000027888888877200002788888888720000278888888872000027888888887200002788888888720000278888" +
+        "888772000027888888877200002778888887720000277888888772000027778888777200002777788777720000277777777772000027777777776200" +
+        "00CD20000003DB0004FFA000000BFF2000DFE200003FFC00007FFB0000CFF600001EFF5006FFD0000006FFD00EFF40000000BFF45FF9000000004FFC" +
+        "DFF4000000000CFFFFA00000000004FFFF3000000000008FF70000000000005FF30000000000005FF30000000000005FF30000000000005FF3000000" +
+        "0000005FF30000000000005FF30000000000005FF30000000000005FF30000000000001FE00000000288631001258820029A85210147AA30028BA742" +
+        "136AB920017AB963258BA8200158BA8547AB96100137BB9779BB741000249BBBABB9520000137ACCCCB83100000159CDDC962100000137ADDB841000" +
+        "0000258CC95200000000147BB84200000000137AB84100000000137AB84100000000137AB84100000000137AB84100000000137AB84100000000137A" +
+        "B841000000001369A7310000000012588631000047777777777777725777777777777772577888888888877257788888888887724788899999888772" +
+        "477889999998877247788999999887724778899999988772467889999998876246788999999877623667889999887662366788999988765235677888" +
+        "888776513566788888776551355677888877655134566788877665412456677777766541245567777766554124556677776654412445667777665441" +
+        "04DFA100001BFD3009FFF800009FFF8009FFFD0001DFFF7003FFFF7008FFFF20008FFFF33FFFF600002FFFF89FFFE2000009FFFFFFFF70000000FFFF" +
+        "FFFF000000008FFFFFF7000000001EFFFFD00000000005FFFF500000000001FFFE100000000000FFFD000000000000FFFD000000000000FFFD000000" +
+        "000000FFFD000000000000FFFD000000000000FFFD000000000000FFFD0000000000009FF7000000027874200147882002ACB731137BCB2002BDDA63" +
+        "259DEB3002ADEC8547BEDB20017CEDB87ADEC820015ADEDBBCEDA6100037BEEDDEEC840000259DEFFEDA620000136BEFFEC74100000249DEFDA52000" +
+        "000127BEEC831000000015ADEB6200000000149DDA5100000000149DDA5100000000149DDA5100000000149DDA5100000000149DDA5100000000149C" +
+        "DA5100000000148BC941000000000268863100000477765555677740058887766788885005899988889998500589AA999AAA98500489AABBBBAA9840" +
+        "0479ABBCCBBA97400368ABCCCCBA863003589BCCCCB9753002479ABCCBA8742002468ABCBB986420013579ABBA975310013568AAA98642100124689A" +
+        "A97642100124579998754210012357899875321001235789986531100113568988653100011356788764310000134678876431000013456776542100" +
+        "009A000000007B0000BF70000004FE00008FE000000DFA00001EF400001FF3000005FD1000BF80000000BF8004FE100000003FE10CF6000000000CFC" +
+        "AFE00000000004FFFF800000000000BFFE1000000000001FF50000000000000FF30000000000000FF30000000000000FF30000000000000FF3000000" +
+        "0000000FF30000000000000FF30000000000000FF30000000000000FF300000000000009C00000000087521001257700008864100247980000798521" +
+        "135897000068974224798500004798644689740000358976689852000024799999974100001258ABBA852100000147ACCA7310000001259BB9521000" +
+        "0000248AA74100000000137A973100000000137996310000000013699631000000001369963100000000136996310000000013699631000000001369" +
+        "963100000000136986310000000012577521000007777777777777700777777777777770077777777777777007777777777777700777777777777770" +
+        "077777777777777007777777777777700777777777777770077777777777777007777777777777700777777777777770077777777777777007777777" +
+        "777777700777777777777770077777777777777006777777777777700667777777777770066777777777776006667777777776600666777777777660" +
+        "01CFFFFFFFFFA00005FFFFFFFFFFF30000ADDDDDDEFFC000000000000BFF6000000000004FFE100000000000CFF6000000000005FFD000000000001E" +
+        "FF3000000000005FFB000000000000BFF5000000000006FFC000000000001DFF5000000000007FFC000000000002FFF2000000000006FFB000000000" +
+        "001CFF5000000000008FFB000000000001EFFEDDDDDDD90005FFFFFFFFFFFF4002CFFFFFFFFFFB1000378888888752000059BBBBCCCB83000048AAAA" +
+        "BCDC9300002455669BDB7300001122248BCA5200000001248BB8310000000136AB95200000000148BB7310000000136AB95200000000148BA7310000" +
+        "000136AB95200000000148BB7310000000136AB95200000000148BA7310000000026AB95210000000038CB8532222100005ADC9765555200006BDDBA" +
+        "AAAA8400005BCCCBBBBBA500003788888888740000035667777640000003567788874000000356778998500000024567888850000002345678874000" +
+        "000123567887400000012356777630000001235677653000000124567665200000013466765420000002456766431000000245676543100000035677" +
+        "653210000003677765321000000477876543100000047887764420000005888876553000000588988765300000047888776640000004677777663000" +
+        "03EFFFFFFFFFD20005FFFFFFFFFFF90005FFFFFFFFFFF80002CDDDDDEFFFF20000000002EFFFA0000000000AFFFF40000000001FFFFA00000000008F" +
+        "FFF20000000003EFFFA00000000009FFFF30000000002FFFF80000000000AFFFF10000000004FFFFA0000000000BFFFE20000000003FFFF700000000" +
+        "00CFFFF00000000004FFFFEDDDDDDB2005FFFFFFFFFFFF5005FFFFFFFFFFFF5003EFFFFFFFFFFD300168999999986310029CDDDDDDDC9510029CDDDE" +
+        "EEEEB6100279AABCDFFEA51001345579CEEC841000112259CEDB62000000125ADEC841000000138CEDA62000000025ADEC841000000148CEDA620000" +
+        "00026ADEC831000000138CEDA52000000025ADEC831000000148CEDA52100000016AEEC952211100028CEEC97555431002ADFFDCBAAA972003BEFEEE" +
+        "DDDDC920029CDDDDDDDDC9200168999999998610001567778876520000267899AA9872000026799ABBB982000026789ABBBA82000014678ABBBA8200" +
+        "00134689ABB9720000123579AAA8620000023579AA97510000024689A986410000134689997531000014579A986420000014689A97532000001679AA" +
+        "8753200000279AAA8753210000289BBA976431000028ABBB987651000029ABBBA98762000028ABBBA9987200002789AA998872000026778877776200" +
+        "00CFFFFFFFFFA00000FFFFFFFFFFF2000013333334FF70000000000004FE1000000000000CF70000000000005FD0000000000001EF40000000000008" +
+        "FE0000000000001EF80000000000008FE1000000000000FF50000000000006FC0000000000001EF40000000000007FC0000000000002FF2000000000" +
+        "000AFD0000000000003FF6000000000000AFF5333333310000FFFFFFFFFFFF0000CFFFFFFFFFFB00002688889999620000279999ABBB820000146666" +
+        "79BB82000002233358AA6100000011124799510000000012589731000000001379852000000001258964100000000136985200000000125896310000" +
+        "0000247974200000000136896310000000014798420000000002689731000000001489851000000000159974111110000027AA75333321000029BB97" +
+        "666652000029BBAA99998200002799998888820000001556677200000000145667720000000014556672000000001345666200000000134456620000" +
+        "000013445552000000001344555200000000134455510000000013445541000000001445554100000000145554410000000014555431000000001555" +
+        "443100000000255544310000000025554431000000002665543100000000266654310000000027665541000000002776655100000000277766520000" +
+        "0000000000001AD5000000000005EFFD0000000001AFFFFA000000005EFFFF700000002BFFFFC200000006EFFFF700000002BFFFFC200000006EFFFF" +
+        "700000002BFFFFC200000000DFFFF70000000000DFFFE700000000002BFFFFB200000000006EFFFE700000000002BFFFFB200000000006EFFFE70000" +
+        "0000002BFFFFB200000000006EFFFE700000000002BFFFF9000000000006EFFD0000000000002AD60000000012357985000000112468ABA500000124" +
+        "579BBA84000113578ABBA8620012468ABBB97531012468ABBB97531013579BBBA8642100268ABBA87531100049BCCA85421000005ADDC96321000000" +
+        "5ACDC9642100000048ACCB96531100002579BBB98642100012468ABBB97531100123579BBBA8642100123579ABBA86410000124679BBB97300000123" +
+        "468ABB950000000123579AA5000000000124688404445566667777700455566677777770055566777777777005667777777777700667777888877760" +
+        "067778888887776007778888888777600778888888877760078888988887776007888899888776600788889988877660078888988887766007788888" +
+        "888777600777888888877760067778888887776006677788888777600566777777777770055566777777777004556666777777700445556666777770" +
+        "000000000001AED500000000005EFFFD000000003CFFFFFE00000007FFFFFFFA000001CFFFFFFF7000004DFFFFFFE500004DFFFFFFE5000006FFFFFF" +
+        "FD100000AFFFFFFF91000000FFFFFFD400000000FFFFFFD300000000AFFFFFFF8100000006FFFFFFFD100000004DFFFFFFE5000000004DFFFFFFE500" +
+        "000001CFFFFFFF7000000007FFFFFFF9000000003CFFFFFE00000000006EFFFD000000000002AED60000000012357886000000012468BCB800000123" +
+        "69BCEEC900001347ACDEEDB80012368ADEEECA85012479BDEEDC97532468BDEEDCA85311479BDEEDB97421007ACEEEDB863210008CEFFECA63110000" +
+        "8CEFFECA531100007ACEEEDB85321000479CDEEDB96421002468BDEEDCA85311012479BDEEDC97530012468ADEEECA8500001347ACDEEDB800000123" +
+        "69BDEEC9000000012469BCB800000000123578860011223456677774011233456788988512234567889999851234567899A99984234667899AA99874" +
+        "3567899AAA9987633689AAAAA9876542479ABBBAA876543258ABBCBA9865432159ABCCBA9765432159ABCCBA9765432158ABBCBA98654321479ABBBA" +
+        "A87654313689AAAAA98765423567899AAA998753234677899AA998741234567899999984122345678899998501123345678898850011223456677774" +
+        "00000000000007C2000000000002CFF700000000007FFF90000000003CFFD40000000007FFF91000000003CFFD40000000007FFF91000000003CFFD4" +
+        "0000000008FFF910000000008FFF5000000000008FFF50000000000008FFF81000000000003CFFD30000000000008FFF81000000000003CFFD300000" +
+        "00000008FFF81000000000003CFFD30000000000007FFF80000000000003CFF700000000000007C20000000012346785000000012357898500000123" +
+        "4678987400011245789886420012346799876421012357899864321013568998754211002578998753210000479AA8642110000059BB974210000000" +
+        "59BB97421000000047AAA864211000002578998753210000135689987542110001245789986432100012346799875421000112457898864200000123" +
+        "467898740000001123578985000000001235678500000000000000000000000000000000000000000000000000000000000000000000000000000000" +
+        "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000" +
+        "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
+    // высота знака / высота заглавной; смещение середины; ширина / высота
+    public static readonly string[] Shapes = {
+        "1.087;-0.043;0.640",
+        "1.087;-0.043;0.400",
+        "1.072;-0.051;0.608",
+        "1.072;-0.036;0.635",
+        "1.087;-0.043;0.640",
+        "1.072;-0.036;0.568",
+        "1.087;-0.043;0.640",
+        "1.072;-0.036;0.649",
+        "1.087;-0.043;0.640",
+        "1.087;-0.043;0.640",
+        "1.000;0.000;0.681",
+        "0.971;0.000;0.716",
+        "1.014;-0.007;0.557",
+        "0.971;0.000;0.597",
+        "0.971;0.000;0.642",
+        "0.986;0.007;0.529",
+        "1.029;0.000;0.634",
+        "1.000;0.000;0.623",
+        "0.971;0.000;0.552",
+        "1.014;0.007;0.500",
+        "1.000;0.000;0.681",
+        "0.986;-0.007;0.676",
+        "1.000;0.000;0.696",
+        "1.000;0.000;0.667",
+        "1.014;-0.007;0.686",
+        "0.986;0.007;0.676",
+        "1.014;-0.007;0.686",
+        "0.986;0.007;0.618",
+        "1.029;0.000;0.592",
+        "0.986;0.007;0.706",
+        "1.000;0.000;0.667",
+        "1.000;0.000;0.696",
+        "1.000;0.000;0.696",
+        "1.000;0.000;0.638",
+        "1.000;0.000;0.638",
+        "0.971;0.000;0.627",
+        "0.884;-0.043;0.787",
+    };
+}
+
+// Фото документов абонента (паспорт, свидетельство): у каждого договора своя папка с фото,
+// миниатюры в форме, окно просмотра рядом с формой, перенос фото с телефона по кабелю.
+
+public static class Photo {
+    public static bool IsPhoto(string f) {
+        string e = Path.GetExtension(f).ToLowerInvariant();
+        return e == ".jpg" || e == ".jpeg" || e == ".png" || e == ".bmp";
+    }
+
+    // фото целиком (повёрнуто как снимали), не больше max точек по длинной стороне; файл не занимается
+    public static Bitmap Open(string path, int max) { return Mrz.Load(path, max); }
+
+    // миниатюра: встроенная в снимок (быстро), если её нет - из самого снимка
+    public static Bitmap Thumb(string path, int max) {
+        byte[] bytes = File.ReadAllBytes(path);
+        lock (Mrz.Gdi)
+        using (MemoryStream ms = new MemoryStream(bytes))
+        using (Image img = Image.FromStream(ms, false, false)) {
+            int orient = Mrz.Orientation(img);
+            Image small = null;
+            MemoryStream ts = null;
+            try {
+                foreach (int id in img.PropertyIdList)
+                    if (id == 0x501B) {
+                        ts = new MemoryStream(img.GetPropertyItem(id).Value);
+                        small = Image.FromStream(ts);
+                    }
+            } catch { small = null; }
+            // встроенная миниатюра другой формы или слишком мелкая - не годится
+            if (small != null && (Math.Abs((double)small.Width / small.Height - (double)img.Width / img.Height) > 0.05 || Math.Max(small.Width, small.Height) < max / 2)) {
+                small.Dispose();
+                small = null;
+            }
+            try {
+                Image src = small ?? img;
+                double k = Math.Min(1.0, (double)max / Math.Max(src.Width, src.Height));
+                return Mrz.Draw(src, Math.Max(1, (int)(src.Width * k)), Math.Max(1, (int)(src.Height * k)), orient);
+            } finally {
+                if (small != null) small.Dispose();
+                if (ts != null) ts.Dispose();
+            }
+        }
+    }
+
+    // свободное имя файла в папке: IMG_1.jpg, IMG_1 (2).jpg, ...
+    public static string Free(string dir, string name) {
+        string to = Path.Combine(dir, name);
+        string b = Path.GetFileNameWithoutExtension(name), e = Path.GetExtension(name);
+        for (int i = 2; File.Exists(to); i++) to = Path.Combine(dir, b + " (" + i + ")" + e);
+        return to;
+    }
+}
+
+public delegate void PhotoHandler(string path);
+
+// Миниатюры фото договора; щелчок - открыть, правая кнопка - меню
+public class PhotoStrip : Control {
+    public const int TW = 150, TH = 112, CapH = 22, Gap = 12;
+    readonly List<string> files = new List<string>();
+    readonly Dictionary<string, Bitmap> thumbs = new Dictionary<string, Bitmap>(StringComparer.OrdinalIgnoreCase);
+    readonly Dictionary<string, string> marks = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+    readonly Dictionary<string, Color> markColors = new Dictionary<string, Color>(StringComparer.OrdinalIgnoreCase);
+    readonly Queue<string> queue = new Queue<string>();
+    System.Threading.Thread loader;
+    int hover = -1;
+    ContextMenuStrip menu;
+    string menuFile;
+    public string Hint = "";
+    public event PhotoHandler OpenPhoto, RemovePhoto;
+    public event EventHandler Resized;
+
+    public PhotoStrip() {
+        BackColor = St.Card;
+        DoubleBuffered = true;
+        SetStyle(ControlStyles.ResizeRedraw | ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer, true);
+    }
+
+    public List<string> Files { get { return new List<string>(files); } }
+
+    public void SetFiles(List<string> list) {
+        int before = Rows(Width);
+        files.Clear();
+        files.AddRange(list);
+        // миниатюры исчезнувших фото - выбросить
+        List<string> gone = new List<string>();
+        foreach (string k in thumbs.Keys) if (!files.Contains(k)) gone.Add(k);
+        foreach (string k in gone) { thumbs[k].Dispose(); thumbs.Remove(k); }
+        lock (queue) {
+            queue.Clear();
+            foreach (string f in files) if (!thumbs.ContainsKey(f)) queue.Enqueue(f);
+            if (queue.Count > 0) {
+                if (loader == null) {
+                    loader = new System.Threading.Thread(Load);
+                    loader.IsBackground = true;
+                    loader.Priority = System.Threading.ThreadPriority.BelowNormal;
+                    loader.Start();
+                } else System.Threading.Monitor.Pulse(queue);
+            }
+        }
+        hover = -1;
+        Invalidate();
+        if (Rows(Width) != before && Resized != null) Resized(this, EventArgs.Empty);
+    }
+
+    // пометка под миниатюрой (по имени файла): «личный номер прочитан» и т.п.
+    public void Mark(string path, string text, Color color) {
+        string n = Path.GetFileName(path);
+        if (text == null) { marks.Remove(n); markColors.Remove(n); }
+        else { marks[n] = text; markColors[n] = color; }
+        Invalidate();
+    }
+
+    public void ClearMarks() { marks.Clear(); markColors.Clear(); Invalidate(); }
+
+    void Load() {
+        while (true) {
+            string f;
+            lock (queue) {
+                while (queue.Count == 0) System.Threading.Monitor.Wait(queue);
+                f = queue.Dequeue();
+            }
+            Bitmap b = null;
+            try { b = Photo.Thumb(f, 2 * TW); } catch { }
+            string file = f;
+            Bitmap bmp = b;
+            try {
+                if (IsHandleCreated && !IsDisposed)
+                    BeginInvoke((MethodInvoker)delegate {
+                        if (bmp == null) return;
+                        if (!files.Contains(file) || thumbs.ContainsKey(file)) { bmp.Dispose(); return; }
+                        thumbs[file] = bmp;
+                        Invalidate();
+                    });
+                else if (b != null) b.Dispose();
+            } catch { if (b != null) b.Dispose(); }
+        }
+    }
+
+    int Cols(int width) { return Math.Max(1, (width + Gap) / (TW + Gap)); }
+    int Rows(int width) { return files.Count == 0 ? 0 : (files.Count + Cols(width) - 1) / Cols(width); }
+
+    public int HeightFor(int width) {
+        if (files.Count == 0) return 46;
+        return Rows(width) * (TH + CapH + Gap) - Gap + 2;
+    }
+
+    protected override void OnResize(EventArgs e) {
+        base.OnResize(e);
+        Invalidate();
+    }
+
+    Rectangle Tile(int i) {
+        int c = Cols(Width);
+        return new Rectangle((i % c) * (TW + Gap), (i / c) * (TH + CapH + Gap), TW, TH);
+    }
+
+    int At(Point p) {
+        for (int i = 0; i < files.Count; i++) {
+            Rectangle r = Tile(i);
+            r.Height += CapH;
+            if (r.Contains(p)) return i;
+        }
+        return -1;
+    }
+
+    protected override void OnPaint(PaintEventArgs e) {
+        Graphics g = e.Graphics;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        if (files.Count == 0) {
+            Rectangle r = new Rectangle(0, 0, Width - 1, Height - 1);
+            using (Pen p = new Pen(St.InputBorder)) { p.DashStyle = DashStyle.Dash; g.DrawRectangle(p, r); }
+            TextRenderer.DrawText(g, Hint, St.Small, Rectangle.Inflate(r, -12, 0), St.Hint, TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.WordBreak);
+            return;
+        }
+        for (int i = 0; i < files.Count; i++) {
+            Rectangle r = Tile(i);
+            if (!e.ClipRectangle.IntersectsWith(new Rectangle(r.X, r.Y, r.Width + 1, r.Height + CapH + 1))) continue;
+            using (SolidBrush b = new SolidBrush(St.Box)) g.FillRectangle(b, r);
+            Bitmap t;
+            if (thumbs.TryGetValue(files[i], out t)) {
+                double k = Math.Min((double)(r.Width - 4) / t.Width, (double)(r.Height - 4) / t.Height);
+                int w = (int)(t.Width * k), h = (int)(t.Height * k);
+                g.InterpolationMode = InterpolationMode.HighQualityBilinear;
+                g.DrawImage(t, r.X + (r.Width - w) / 2, r.Y + (r.Height - h) / 2, w, h);
+            } else TextRenderer.DrawText(g, "загружаю...", St.Small, r, St.Hint, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+            using (Pen p = new Pen(i == hover ? St.Accent : St.Border, i == hover ? 2f : 1f)) g.DrawRectangle(p, r.X, r.Y, r.Width - 1, r.Height - 1);
+            string name = Path.GetFileName(files[i]), mark;
+            Rectangle cap = new Rectangle(r.X, r.Bottom + 2, r.Width, CapH - 2);
+            if (marks.TryGetValue(name, out mark))
+                TextRenderer.DrawText(g, mark, St.Small, cap, markColors[name], TextFormatFlags.Left | TextFormatFlags.EndEllipsis | TextFormatFlags.VerticalCenter);
+            else TextRenderer.DrawText(g, name, St.Small, cap, St.Hint, TextFormatFlags.Left | TextFormatFlags.EndEllipsis | TextFormatFlags.VerticalCenter);
+        }
+    }
+
+    protected override void OnMouseMove(MouseEventArgs e) {
+        base.OnMouseMove(e);
+        int h = At(e.Location);
+        Cursor = h >= 0 ? Cursors.Hand : Cursors.Default;
+        if (h != hover) { hover = h; Invalidate(); }
+    }
+
+    protected override void OnMouseLeave(EventArgs e) {
+        base.OnMouseLeave(e);
+        if (hover >= 0) { hover = -1; Invalidate(); }
+    }
+
+    protected override void OnMouseWheel(MouseEventArgs e) { Ui.Wheel(this, e); }
+
+    protected override void OnMouseUp(MouseEventArgs e) {
+        base.OnMouseUp(e);
+        int i = At(e.Location);
+        if (i < 0) return;
+        string f = files[i];
+        if (e.Button == MouseButtons.Left) { if (OpenPhoto != null) OpenPhoto(f); }
+        else if (e.Button == MouseButtons.Right) {
+            if (menu == null) {
+                menu = new ContextMenuStrip();
+                menu.Font = St.Base;
+                menu.Items.Add("Открыть", null, delegate { if (OpenPhoto != null) OpenPhoto(menuFile); });
+                menu.Items.Add("Удалить фото...", null, delegate { if (RemovePhoto != null) RemovePhoto(menuFile); });
+            }
+            menuFile = f;
+            menu.Show(this, e.Location);
+        }
+    }
+
+    protected override void Dispose(bool disposing) {
+        if (disposing) {
+            foreach (Bitmap b in thumbs.Values) b.Dispose();
+            thumbs.Clear();
+            if (menu != null) menu.Dispose();
+        }
+        base.Dispose(disposing);
+    }
+}
+
+// Окно просмотра фото: рядом с формой (можно печатать в форме, глядя на фото), крупнее/мельче колёсиком,
+// двигать мышью, повернуть, листать
+public class PhotoViewer : Form {
+    readonly List<string> files = new List<string>();
+    int index;
+    Bitmap img;
+    double scale = 1, ox, oy;
+    bool fit = true, drag;
+    Point last;
+    readonly Panel bar = new Panel();
+    readonly Label name = new Label(), hint = new Label();
+    readonly Button prev, next;
+    readonly View view = new View();
+    readonly ToolTip tip = new ToolTip();
+
+    class View : Control {
+        public View() {
+            DoubleBuffered = true;
+            SetStyle(ControlStyles.ResizeRedraw | ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.Selectable, true);
+            BackColor = Color.FromArgb(46, 50, 56);
+        }
+    }
+
+    public PhotoViewer() {
+        Text = "Фото документов";
+        Font = St.Base;
+        BackColor = Color.White;
+        ShowInTaskbar = false;
+        MinimizeBox = false;
+        KeyPreview = true;
+        StartPosition = FormStartPosition.Manual;
+        MinimumSize = new Size(420, 320);
+
+        bar.Dock = DockStyle.Top;
+        bar.Height = 50;
+        bar.BackColor = Color.White;
+        prev = Bar("‹", 40);
+        next = Bar("›", 40);
+        prev.Font = next.Font = new Font("Segoe UI", 14f, FontStyle.Bold);
+        prev.Click += delegate { Go(index - 1); };
+        next.Click += delegate { Go(index + 1); };
+        Button turn = Bar("Повернуть", 100);
+        turn.Click += delegate { Turn(); };
+        Button fitB = Bar("Целиком", 86);
+        fitB.Click += delegate { Fit(); };
+        tip.SetToolTip(turn, "Повернуть на четверть оборота (R)");
+        tip.SetToolTip(fitB, "Всё фото по размеру окна (0)");
+        // правая кнопка: открыть в программе Windows (распечатать и т.п.)
+        ContextMenuStrip menu = new ContextMenuStrip();
+        menu.Font = St.Base;
+        menu.Items.Add("Повернуть", null, delegate { Turn(); });
+        menu.Items.Add("Целиком", null, delegate { Fit(); });
+        menu.Items.Add("Открыть в программе Windows", null, delegate {
+            if (index >= 0 && index < files.Count) try { System.Diagnostics.Process.Start(files[index]); } catch (Exception ex) { MessageBox.Show(this, ex.Message, Text); }
+        });
+        view.ContextMenuStrip = menu;
+        name.AutoSize = false;
+        name.AutoEllipsis = true;
+        name.Font = St.Small;
+        name.ForeColor = St.Text;
+        name.TextAlign = ContentAlignment.MiddleLeft;
+        hint.AutoSize = false;
+        hint.Font = St.Small;
+        hint.ForeColor = St.Hint;
+        hint.Text = "колёсико - крупнее / мельче, мышью - двигать, правая кнопка - меню";
+        hint.Dock = DockStyle.Bottom;
+        hint.Height = 22;
+        hint.TextAlign = ContentAlignment.MiddleLeft;
+        hint.Padding = new Padding(8, 0, 0, 0);
+        bar.Controls.Add(name);
+        bar.Resize += delegate {
+            int x = 10;
+            foreach (Button b in new Button[] { prev, next }) { b.SetBounds(x, 8, b.Width, 34); x += b.Width + 6; }
+            int r = bar.ClientSize.Width - 10;
+            foreach (Button b in new Button[] { fitB, turn }) { r -= b.Width; b.SetBounds(r, 8, b.Width, 34); r -= 6; }
+            name.SetBounds(x + 6, 8, Math.Max(10, r - x - 12), 34);
+        };
+        bar.Paint += delegate(object s, PaintEventArgs e) { using (Pen p = new Pen(St.Border)) e.Graphics.DrawLine(p, 0, bar.Height - 1, bar.Width, bar.Height - 1); };
+
+        view.Dock = DockStyle.Fill;
+        view.Paint += delegate(object s, PaintEventArgs e) { Draw(e.Graphics); };
+        view.Resize += delegate { if (fit) Fit(); else view.Invalidate(); };
+        view.MouseWheel += delegate(object s, MouseEventArgs e) { Zoom(e.Delta > 0 ? 1.25 : 0.8, e.Location); };
+        view.MouseDown += delegate(object s, MouseEventArgs e) { view.Focus(); if (e.Button == MouseButtons.Left) { drag = true; last = e.Location; view.Cursor = Cursors.SizeAll; } };
+        view.MouseMove += delegate(object s, MouseEventArgs e) {
+            if (!drag) return;
+            ox += e.X - last.X; oy += e.Y - last.Y;
+            last = e.Location;
+            fit = false;
+            view.Invalidate();
+        };
+        view.MouseUp += delegate { drag = false; view.Cursor = Cursors.Default; };
+        view.DoubleClick += delegate {
+            if (img == null) return;
+            if (fit) { Point p = view.PointToClient(Cursor.Position); Zoom(2.5, p); }
+            else Fit();
+        };
+        Controls.Add(view);
+        Controls.Add(hint);
+        Controls.Add(bar);
+        KeyDown += delegate(object s, KeyEventArgs e) {
+            if (e.KeyCode == Keys.Escape) Close();
+            else if (e.KeyCode == Keys.Left || e.KeyCode == Keys.PageUp) Go(index - 1);
+            else if (e.KeyCode == Keys.Right || e.KeyCode == Keys.PageDown) Go(index + 1);
+            else if (e.KeyCode == Keys.Add || e.KeyCode == Keys.Oemplus) Zoom(1.25, Center());
+            else if (e.KeyCode == Keys.Subtract || e.KeyCode == Keys.OemMinus) Zoom(0.8, Center());
+            else if (e.KeyCode == Keys.D0 || e.KeyCode == Keys.NumPad0) Fit();
+            else if (e.KeyCode == Keys.R) Turn();
+            else return;
+            e.Handled = true;
+        };
+        FormClosed += delegate { if (img != null) { img.Dispose(); img = null; } };
+        Shown += delegate { view.Focus(); };
+    }
+
+    Button Bar(string text, int width) {
+        Button b = Ui.Button(text, false);
+        b.Width = width;
+        b.TabStop = false;
+        bar.Controls.Add(b);
+        return b;
+    }
+
+    public string Current { get { return index < files.Count ? files[index] : null; } }
+
+    public void ShowFiles(List<string> list, string current) {
+        files.Clear();
+        files.AddRange(list);
+        int i = current == null ? 0 : files.IndexOf(current);
+        if (i < 0) i = Math.Min(index, files.Count - 1);
+        index = -1;
+        Go(Math.Max(0, i));
+    }
+
+    void Go(int i) {
+        if (files.Count == 0) { if (img != null) { img.Dispose(); img = null; } name.Text = "фото нет"; view.Invalidate(); return; }
+        if (i < 0 || i >= files.Count || i == index) return;
+        index = i;
+        Cursor old = Cursor.Current;
+        Cursor.Current = Cursors.WaitCursor;
+        try {
+            if (img != null) { img.Dispose(); img = null; }
+            img = Photo.Open(files[i], 3200);
+        } catch (Exception ex) {
+            img = null;
+            name.Text = Path.GetFileName(files[i]) + " - не открывается: " + ex.Message;
+        } finally { Cursor.Current = old; }
+        if (img != null) name.Text = "Фото " + (i + 1) + " из " + files.Count + "\n" + Path.GetFileName(files[i]);
+        prev.Enabled = i > 0;
+        next.Enabled = i < files.Count - 1;
+        Fit();
+    }
+
+    Point Center() { return new Point(view.ClientSize.Width / 2, view.ClientSize.Height / 2); }
+
+    void Fit() {
+        fit = true;
+        if (img != null) {
+            scale = Math.Min((double)view.ClientSize.Width / img.Width, (double)view.ClientSize.Height / img.Height) * 0.98;
+            if (scale <= 0) scale = 1;
+            ox = (view.ClientSize.Width - img.Width * scale) / 2;
+            oy = (view.ClientSize.Height - img.Height * scale) / 2;
+        }
+        view.Invalidate();
+    }
+
+    void Zoom(double k, Point at) {
+        if (img == null) return;
+        double fitScale = Math.Min((double)view.ClientSize.Width / img.Width, (double)view.ClientSize.Height / img.Height) * 0.98;
+        double s = Math.Max(fitScale * 0.5, Math.Min(6.0, scale * k));
+        ox = at.X - (at.X - ox) * s / scale;
+        oy = at.Y - (at.Y - oy) * s / scale;
+        scale = s;
+        fit = false;
+        view.Invalidate();
+    }
+
+    void Turn() {
+        if (img == null) return;
+        Bitmap t = Mrz.Draw(img, img.Width, img.Height, 6);
+        img.Dispose();
+        img = t;
+        Fit();
+    }
+
+    void Draw(Graphics g) {
+        if (img == null) return;
+        // рисуем только видимую часть снимка
+        RectangleF dest = new RectangleF((float)ox, (float)oy, (float)(img.Width * scale), (float)(img.Height * scale));
+        RectangleF vis = RectangleF.Intersect(dest, new RectangleF(0, 0, view.ClientSize.Width, view.ClientSize.Height));
+        if (vis.Width <= 0 || vis.Height <= 0) return;
+        RectangleF src = new RectangleF((float)((vis.X - ox) / scale), (float)((vis.Y - oy) / scale), (float)(vis.Width / scale), (float)(vis.Height / scale));
+        g.InterpolationMode = scale < 1 ? InterpolationMode.HighQualityBilinear : InterpolationMode.Bilinear;
+        g.PixelOffsetMode = PixelOffsetMode.Half;
+        g.DrawImage(img, vis, src, GraphicsUnit.Pixel);
+    }
+}
+
+// ---------- фото с телефона по кабелю ----------
+// Телефон (Android, режим «Передача файлов») виден в «Компьютер» как устройство, а не как диск: обычными
+// файловыми функциями его не прочитать. Берём его через оболочку Windows (Shell.Application, как Проводник):
+// ищем на телефоне папку DCIM, в ней новые снимки и копируем их в папку договора.
+
+public delegate object ShellMaker();
+public delegate void TextHandler(string text);
+
+public class PhoneResult {
+    public string Error;                                   // ничего не вышло (нет телефона, закрыт и т.п.)
+    public string Device = "";
+    public readonly List<string> Copied = new List<string>();
+    public readonly List<string> Failed = new List<string>();
+    public bool NoneNew;                                   // новых фото нет
+    public DateTime Newest = DateTime.MinValue;            // время самого нового забранного фото (по телефону)
+    public int Total;                                      // фото на телефоне всего
+}
+
+public static class Phone {
+    // оболочку можно подменить (проверка программы без телефона)
+    public static ShellMaker MakeShell = delegate { return Activator.CreateInstance(Type.GetTypeFromProgID("Shell.Application")); };
+    public static int CopySeconds = 120;   // сколько ждать одно фото
+    public const int MaxNew = 15;          // за раз - не больше стольких новых
+
+    class Pic { public object Item; public string Name; public DateTime Date; public long Size; }
+
+    static object Call(object o, string m, params object[] a) { return o.GetType().InvokeMember(m, System.Reflection.BindingFlags.InvokeMethod, null, o, a); }
+    static object Prop(object o, string p) { return o.GetType().InvokeMember(p, System.Reflection.BindingFlags.GetProperty, null, o, null); }
+
+    static List<object> Items(object folder) {
+        List<object> r = new List<object>();
+        if (folder == null) return r;
+        object items = Call(folder, "Items");
+        if (items == null) return r;
+        int n = Convert.ToInt32(Prop(items, "Count"));
+        for (int i = 0; i < n; i++) {
+            object it = Call(items, "Item", i);
+            if (it != null) r.Add(it);
+        }
+        return r;
+    }
+
+    static string Str(object o, string p) { try { object v = Prop(o, p); return v == null ? "" : v.ToString(); } catch { return ""; } }
+    static bool Flag(object o, string p) { try { return Convert.ToBoolean(Prop(o, p)); } catch { return false; } }
+    static object Sub(object item) { try { return Prop(item, "GetFolder"); } catch { return null; } }
+
+    static string Ext(object item, string key) {
+        try { object v = Call(item, "ExtendedProperty", key); return v == null ? "" : v.ToString(); } catch { return ""; }
+    }
+
+    // имя файла с расширением (Проводник может прятать расширения)
+    static string FileName(object item) {
+        string n = Ext(item, "System.FileName");
+        if (n.Length == 0) n = Str(item, "Name");
+        if (Path.GetExtension(n).Length == 0) {
+            string t = Str(item, "Type").ToUpperInvariant();
+            if (t.Contains("JPG") || t.Contains("JPEG")) n += ".jpg";
+        }
+        return n;
+    }
+
+    static DateTime Date(object item, string name) {
+        try {
+            object d = Prop(item, "ModifyDate");
+            if (d is DateTime && ((DateTime)d).Year > 2000) return (DateTime)d;
+        } catch { }
+        return NameDate(name);
+    }
+
+    // время снимка по имени файла: IMG_20261016_143012.jpg, 20261016_143012.jpg
+    static DateTime NameDate(string name) {
+        Match m = Regex.Match(name, @"(20\d{6})[_-]?(\d{6})");
+        DateTime t;
+        if (m.Success && DateTime.TryParseExact(m.Groups[1].Value + m.Groups[2].Value, "yyyyMMddHHmmss", null, System.Globalization.DateTimeStyles.None, out t)) return t;
+        return DateTime.MinValue;
+    }
+
+    static object Named(List<object> items, string name) {
+        foreach (object it in items) if (string.Compare(Str(it, "Name"), name, StringComparison.OrdinalIgnoreCase) == 0 && Flag(it, "IsFolder")) return it;
+        return null;
+    }
+
+    // забрать с телефона: новые фото (снятые позже since) или, если last > 0, последние last фото
+    public static PhoneResult Take(string dir, DateTime since, int last, TextHandler progress) {
+        PhoneResult r = new PhoneResult();
+        try {
+            object shell = MakeShell();
+            object computer = Call(shell, "NameSpace", 17);       // «Компьютер»
+            List<object> devices = new List<object>();
+            foreach (object it in Items(computer))
+                if (!Flag(it, "IsFileSystem") && Flag(it, "IsFolder")) devices.Add(it);
+            if (devices.Count == 0) {
+                r.Error = "Телефон не найден. Подключите его кабелем, разблокируйте и на телефоне выберите «Передача файлов».";
+                return r;
+            }
+            List<Pic> pics = new List<Pic>();
+            int heic = 0;
+            bool dcim = false;
+            List<string> names = new List<string>();
+            foreach (object dev in devices) {
+                string devName = Str(dev, "Name");
+                names.Add("«" + devName + "»");
+                if (progress != null) progress("Телефон «" + devName + "»: ищу фото...");
+                // DCIM - на самом устройстве или в его памяти («Phone», «Внутренний общий накопитель», карта)
+                List<object> found = new List<object>();
+                List<object> top = Items(Sub(dev));
+                object d0 = Named(top, "DCIM");
+                if (d0 != null) found.Add(d0);
+                foreach (object st in top) {
+                    if (!Flag(st, "IsFolder") || st == d0) continue;
+                    object d1 = Named(Items(Sub(st)), "DCIM");
+                    if (d1 != null) found.Add(d1);
+                }
+                if (found.Count == 0) continue;
+                dcim = true;
+                r.Device = devName;
+                foreach (object d in found) {
+                    List<object> folders = new List<object>();
+                    folders.Add(d);
+                    foreach (object sub in Items(Sub(d)))
+                        if (Flag(sub, "IsFolder") && !Str(sub, "Name").StartsWith(".")) folders.Add(sub);
+                    foreach (object f in folders) {
+                        foreach (object it in Items(Sub(f))) {
+                            // фото за прошлые дни (видно по имени) пропускаем сразу: на телефоне их могут быть тысячи
+                            DateTime byName = NameDate(Str(it, "Name"));
+                            if (last == 0 && byName != DateTime.MinValue && byName.Date < since.Date) continue;
+                            if (Flag(it, "IsFolder")) continue;
+                            string n = FileName(it);
+                            string e = Path.GetExtension(n).ToLowerInvariant();
+                            if (e == ".heic" || e == ".heif") { heic++; continue; }
+                            if (e != ".jpg" && e != ".jpeg") continue;
+                            Pic p = new Pic();
+                            p.Item = it;
+                            p.Name = n;
+                            p.Date = Date(it, n);
+                            try { p.Size = Convert.ToInt64(Prop(it, "Size")); } catch { p.Size = 0; }
+                            pics.Add(p);
+                        }
+                    }
+                }
+            }
+            if (!dcim) {
+                r.Error = "Телефон " + string.Join(", ", names.ToArray()) + " виден, но фото на нём не открываются: разблокируйте телефон " +
+                    "и на вопросе «Разрешить доступ к данным?» нажмите «Разрешить» (или выберите «Передача файлов»).";
+                return r;
+            }
+            r.Total = pics.Count;
+            if (pics.Count == 0) {
+                r.Error = heic > 0 ? "На телефоне фото в формате HEIC - Windows 7 их не открывает. В настройках камеры телефона выключите «Фото в формате HEIF» и переснимите."
+                    : "На телефоне «" + r.Device + "» в папке DCIM нет фото.";
+                return r;
+            }
+            // по времени снимка (без времени - по имени), новые - в конце
+            pics.Sort(delegate(Pic a, Pic b) {
+                int c = a.Date.CompareTo(b.Date);
+                return c != 0 ? c : string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase);
+            });
+            List<Pic> take = new List<Pic>();
+            if (last > 0) for (int i = Math.Max(0, pics.Count - last); i < pics.Count; i++) take.Add(pics[i]);
+            else {
+                foreach (Pic p in pics) if (p.Date > since) take.Add(p);
+                if (take.Count > MaxNew) take.RemoveRange(0, take.Count - MaxNew);
+            }
+            if (take.Count == 0) { r.NoneNew = true; return r; }
+
+            Directory.CreateDirectory(dir);
+            object target = Call(shell, "NameSpace", dir);
+            if (target == null) { r.Error = "Не открывается папка для фото: " + dir; return r; }
+            for (int i = 0; i < take.Count; i++) {
+                Pic p = take[i];
+                if (p.Date > r.Newest) r.Newest = p.Date;
+                // уже забрано раньше в эту папку
+                if (File.Exists(Path.Combine(dir, p.Name))) continue;
+                if (progress != null) progress("Копирую с телефона фото " + (i + 1) + " из " + take.Count + "...");
+                Dictionary<string, bool> before = Snapshot(dir);
+                Call(target, "CopyHere", p.Item, 4 | 16 | 512 | 1024);   // без вопросов и окон
+                string got = WaitNew(dir, before, p.Size);
+                if (got != null) r.Copied.Add(got);
+                else r.Failed.Add(p.Name);
+            }
+        } catch (Exception ex) {
+            Exception e = ex is System.Reflection.TargetInvocationException && ex.InnerException != null ? ex.InnerException : ex;
+            r.Error = "Не получилось забрать фото с телефона: " + e.Message;
+        }
+        return r;
+    }
+
+    static Dictionary<string, bool> Snapshot(string dir) {
+        Dictionary<string, bool> d = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+        foreach (string f in Directory.GetFiles(dir)) d[f] = true;
+        return d;
+    }
+
+    // копирование с телефона идёт в фоне: ждём новый файл, пока он не допишется (размер не растёт и файл свободен)
+    static string WaitNew(string dir, Dictionary<string, bool> before, long size) {
+        DateTime end = DateTime.Now.AddSeconds(CopySeconds);
+        string cand = null;
+        long len = -1;
+        int same = 0;
+        while (DateTime.Now < end) {
+            System.Threading.Thread.Sleep(300);
+            if (cand == null)
+                foreach (string f in Directory.GetFiles(dir))
+                    if (!before.ContainsKey(f) && Photo.IsPhoto(f)) { cand = f; break; }
+            if (cand == null) continue;
+            long l;
+            try { l = new FileInfo(cand).Length; } catch { continue; }
+            if (l == len && l > 0 && (size <= 0 || l >= size)) same++;
+            else same = 0;
+            len = l;
+            if (same < 2) continue;
+            try { using (FileStream fs = new FileStream(cand, FileMode.Open, FileAccess.Read, FileShare.None)) { } }
+            catch (IOException) { same = 0; continue; }
+            return cand;
+        }
+        return null;
+    }
 }
 
 // Движок чтения базы FoxPro - из программы «Поиск абонента» (только чтение)
@@ -6664,6 +8799,18 @@ public class DogovorForm : Form {
     string lsChecked, lsError, lsSaved;              // для какого ЛС есть ответ базы; ошибка; другой сохранённый договор с этим ЛС
     List<string> lsInBase = new List<string>();      // записи базы с этим лицевым
     string autoInic = "", autoAdres = "";
+    // фото документов: у каждого договора своя папка (Договоры\фото\<договор>)
+    const string PhotoCard = "Фото документов";
+    readonly string photoRoot;
+    string photoDir;                                 // папка фото этого договора; null - фото ещё нет
+    readonly PhotoStrip strip = new PhotoStrip();
+    readonly Label photoNote = Ui.Note(""), lichnyNote = Ui.Note("");
+    Button phoneButton, photoAdd, photoFolder;
+    PhotoViewer viewer;
+    bool phoneBusy;
+    int photoGen;                                    // меняется с договором: ответы по фото прошлого договора не нужны
+    string mrzPersonal = "";                         // личный номер, прочитанный с фото паспорта
+    static readonly object mrzLock = new object();
 
     public DogovorForm(string here) {
         this.here = here;
@@ -6673,6 +8820,7 @@ public class DogovorForm : Form {
         outDir = memory.Get("ПапкаДоговоров", "");
         if (outDir.Length == 0) outDir = Path.Combine(here, "Договоры");
         dataDir = Path.Combine(outDir, "данные");
+        photoRoot = Path.Combine(outDir, "фото");
         autoFile = Path.Combine(here, "avtosohranenie.txt");
 
         Text = "Оформление договора электроснабжения";
@@ -6841,9 +8989,12 @@ public class DogovorForm : Form {
         Row(c, F("Должность подписанта (в лице кого)", T("podp_dolzh", 3, null), 3), F("Ф.И.О. подписанта (кого)", T("podp_fio", 3, null), 1));
         Row(c, F("Сообщать о неисправностях (п. 3.6): адрес", T("soob_adres", 1, null), 2), F("телефон", T("soob_tel", 1, null), 2));
 
+        BuildPhotos();
+
         c = NewCard("Потребитель", "гражданин(ка), с которым заключается договор", 4);
         Row(c, F("Фамилия, собственное имя, отчество", T("fio", 1, "Иванов Иван Иванович"), 2), F("Подпись (инициалы)", T("potr_inic", 1, "заполнится сама"), 1),
             F("Идентификационный номер", T("lichny", 1, "14 знаков"), 1));
+        Row(c, Cell.Empty(3), F(null, lichnyNote, 1));
         Button same = Ui.Button("= адрес объекта", false);
         same.Font = St.Small;
         same.Click += delegate { SetV("adres_prozh", V("adres")); };
@@ -7061,8 +9212,16 @@ public class DogovorForm : Form {
         p.Controls.Add(create);
         p.Controls.Add(status);
         p.Resize += delegate {
+            // узкое окно (рядом открыто фото) - короткие надписи
+            bool narrow = p.ClientSize.Width < 900;
+            nw.Text = narrow ? "Новый договор" : "Создать новый договор";
+            nw.Width = narrow ? 140 : 200;
+            open.Text = narrow ? "Открыть…" : "Открыть сохранённый…";
+            open.SetBounds(nw.Right + 10, 14, narrow ? 110 : 200, 38);
+            create.Width = narrow ? 190 : 210;
             create.Location = new Point(p.ClientSize.Width - 24 - create.Width, 13);
-            status.SetBounds(open.Right + 24, 14, Math.Max(10, create.Left - open.Right - 48), 38);
+            status.Font = narrow ? St.Small : St.Base;
+            status.SetBounds(open.Right + (narrow ? 14 : 24), 14, Math.Max(10, create.Left - open.Right - (narrow ? 28 : 48)), 38);
         };
         return p;
     }
@@ -7073,6 +9232,14 @@ public class DogovorForm : Form {
         int w = Math.Max(600, Math.Min(full - 48, 1240));
         int x = Math.Max(24, (full - w) / 2);
         int y = 4 + content.AutoScrollPosition.Y;
+        // узкая форма (рядом открыто фото) - кнопки фото короче
+        bool narrow = w < 900;
+        photoFolder.Text = narrow ? "Папка" : "Папка фото";
+        photoFolder.Width = narrow ? 76 : 120;
+        photoAdd.Text = narrow ? "Из папки…" : "Добавить из папки…";
+        photoAdd.Width = narrow ? 104 : 170;
+        phoneButton.Text = narrow ? "Забрать с телефона" : "Забрать фото с телефона";
+        phoneButton.Width = narrow ? 180 : 220;
         foreach (Card c in cards) {
             int h = c.Layout(w);
             c.Panel.Location = new Point(x + content.AutoScrollPosition.X, y);
@@ -7249,6 +9416,7 @@ public class DogovorForm : Form {
                 int pos = t.SelectionStart;
                 string up = t.Text.ToUpper().Replace(" ", "");
                 if (up != t.Text) { t.Text = up; t.SelectionStart = Math.Min(pos, up.Length); }
+                LichnyNote();
             }
         } finally { loading = false; }
         if (key == "ls") Recheck(true, false);
@@ -7589,7 +9757,7 @@ public class DogovorForm : Form {
             if (cardOf.TryGetValue(p.Key, out c)) per[c]++;
         }
         for (int i = 0; i < cards.Count && i < navs.Count; i++) {
-            int cnt = cards[i].Name == "Порядок и документы" ? -1 : per[cards[i]];
+            int cnt = cards[i].Name == "Порядок и документы" || cards[i].Name == PhotoCard ? -1 : per[cards[i]];
             if (navs[i].Count != cnt) { navs[i].Count = cnt; navs[i].Invalidate(); }
         }
         foreach (KeyValuePair<string, Control> kv in inp) {
@@ -7788,6 +9956,291 @@ public class DogovorForm : Form {
         return v;
     }
 
+    // ---------- фото документов ----------
+
+    void BuildPhotos() {
+        Card c = NewCard(PhotoCard, "с телефона или из папки", 4);
+        Button folder = photoFolder = Ui.Button("Папка фото", false);
+        folder.Size = new Size(120, 30);
+        folder.Click += delegate { OpenPhotoFolder(); };
+        tip.SetToolTip(folder, "Открыть папку с фото этого договора");
+        Button add = photoAdd = Ui.Button("Добавить из папки…", false);
+        add.Size = new Size(170, 30);
+        add.Click += delegate { AddFromFolder(); };
+        tip.SetToolTip(add, "Скопировать в договор фото, которые уже лежат на компьютере");
+        phoneButton = Ui.Button("Забрать фото с телефона", true);
+        phoneButton.Size = new Size(220, 30);
+        phoneButton.Click += delegate { TakeFromPhone(0); };
+        tip.SetToolTip(phoneButton, "Телефон подключён кабелем и разблокирован, на телефоне выбрано «Передача файлов».\nНовые фото с телефона попадут в папку этого договора");
+        foreach (Button b in new Button[] { folder, add, phoneButton }) { b.TabStop = false; c.AddExtra(b); }
+        strip.Hint = "Фото пока нет. Сфотографируйте телефоном паспорт (последнюю страницу - со строками «<<<», предпоследнюю, прописку) " +
+            "и свидетельство, подключите телефон кабелем и нажмите «Забрать фото с телефона». Личный номер программа прочитает с фото сама.";
+        strip.OpenPhoto += delegate(string f) { ShowPhoto(f); };
+        strip.RemovePhoto += delegate(string f) { RemovePhoto(f); };
+        strip.Resized += delegate { LayoutCards(); };
+        lichnyNote.Click += delegate { if (mrzPersonal.Length > 0 && V("lichny") != mrzPersonal) SetV("lichny", mrzPersonal); };
+        Row(c, F(null, photoNote, 4));
+        Row(c, F(null, strip, 4));
+    }
+
+    void PhotoNote(string text, Color color) { Note(photoNote, text, color, false); }
+
+    // в данных договора: имя папки в «Договоры\фото» (или полный путь, если папка где-то ещё)
+    string PhotoRef() {
+        if (photoDir == null) return "";
+        try {
+            if (string.Compare(Path.GetDirectoryName(Path.GetFullPath(photoDir)), Path.GetFullPath(photoRoot), StringComparison.OrdinalIgnoreCase) == 0) return Path.GetFileName(photoDir);
+        } catch { }
+        return photoDir;
+    }
+
+    // папка для фото: у договора уже есть - она; нет - по имени договора (пока не сохранён - «Договор дата время»)
+    string PhotoTarget() {
+        if (photoDir != null) return photoDir;
+        string n = FileName(), d = Path.Combine(photoRoot, n);
+        for (int i = 2; Directory.Exists(d); i++) d = Path.Combine(photoRoot, n + " (" + i + ")");
+        return d;
+    }
+
+    // при сохранении договора папка фото получает его имя
+    void MovePhotos(string name) {
+        if (photoDir == null || !Directory.Exists(photoDir)) return;
+        string want = Path.Combine(photoRoot, name);
+        try {
+            if (string.Compare(Path.GetFullPath(want), Path.GetFullPath(photoDir), StringComparison.OrdinalIgnoreCase) == 0 || Directory.Exists(want)) return;
+            Directory.Move(photoDir, want);
+            photoDir = want;
+        } catch { }
+        RefreshPhotos();
+    }
+
+    void RefreshPhotos() {
+        List<string> list = new List<string>();
+        try {
+            if (photoDir != null && Directory.Exists(photoDir))
+                foreach (string f in Directory.GetFiles(photoDir)) if (Photo.IsPhoto(f)) list.Add(f);
+        } catch { }
+        list.Sort(StringComparer.OrdinalIgnoreCase);
+        strip.SetFiles(list);
+        if (viewer != null && !viewer.IsDisposed && viewer.Visible) viewer.ShowFiles(list, viewer.Current);
+    }
+
+    void OpenPhotoFolder() {
+        string d = photoDir != null && Directory.Exists(photoDir) ? photoDir : photoRoot;
+        try { Directory.CreateDirectory(d); Process.Start(d); } catch (Exception ex) { MessageBox.Show(this, "Не открывается папка " + d + ":\n" + ex.Message, Text); }
+    }
+
+    void ShowPhoto(string f) {
+        if (viewer == null || viewer.IsDisposed) {
+            viewer = new PhotoViewer();
+            viewer.Owner = this;
+            SideBySide();
+        }
+        viewer.ShowFiles(strip.Files, f);
+        if (!viewer.Visible) viewer.Show();
+        viewer.Activate();
+    }
+
+    // фото - справа, форма - слева: печатать, глядя на фото; фото закрыли - форма на прежнее место
+    void SideBySide() {
+        Rectangle wa = Screen.FromControl(this).WorkingArea;
+        int vw = Math.Max(380, Math.Min(wa.Width * 45 / 100, wa.Width - MinimumSize.Width));
+        bool max = WindowState == FormWindowState.Maximized;
+        Rectangle before = max ? RestoreBounds : Bounds;
+        if (max || Bounds.Right > wa.Right - vw) {
+            if (max) WindowState = FormWindowState.Normal;
+            Bounds = new Rectangle(wa.Left, wa.Top, Math.Max(MinimumSize.Width, wa.Width - vw), wa.Height);
+            viewer.FormClosed += delegate {
+                if (IsDisposed || WindowState == FormWindowState.Minimized) return;
+                Bounds = before;
+                if (max) WindowState = FormWindowState.Maximized;
+            };
+        }
+        viewer.Bounds = new Rectangle(wa.Right - vw, wa.Top, vw, wa.Height);
+    }
+
+    void RemovePhoto(string f) {
+        if (MessageBox.Show(this, "Удалить фото «" + Path.GetFileName(f) + "» из папки договора?\n\nНа телефоне оно останется.", Text,
+                MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
+        try { File.Delete(f); }
+        catch (Exception ex) { MessageBox.Show(this, "Не удалось удалить фото:\n" + ex.Message, Text); return; }
+        strip.Mark(f, null, Color.Empty);
+        RefreshPhotos();
+    }
+
+    void AddFromFolder() {
+        string[] chosen;
+        using (OpenFileDialog d = new OpenFileDialog()) {
+            d.Title = "Добавить фото документов";
+            d.Filter = "Фото (*.jpg; *.jpeg; *.png; *.bmp)|*.jpg;*.jpeg;*.png;*.bmp|Все файлы|*.*";
+            d.Multiselect = true;
+            string from = memory.Get("ФотоИзПапки", "");
+            if (from.Length > 0 && Directory.Exists(from)) d.InitialDirectory = from;
+            if (d.ShowDialog(this) != DialogResult.OK) return;
+            chosen = d.FileNames;
+        }
+        AddPhotos(chosen);
+    }
+
+    // скопировать фото в папку договора (оригиналы остаются где были)
+    public void AddPhotos(string[] chosen) {
+        if (chosen.Length == 0) return;
+        memory.Values["ФотоИзПапки"] = Path.GetDirectoryName(chosen[0]);
+        memory.Save();
+        string dir = PhotoTarget();
+        List<string> added = new List<string>(), skipped = new List<string>();
+        string error = null;
+        try {
+            Directory.CreateDirectory(dir);
+            foreach (string f in chosen) {
+                if (!Photo.IsPhoto(f)) { skipped.Add(Path.GetFileName(f)); continue; }
+                if (string.Compare(Path.GetDirectoryName(Path.GetFullPath(f)), Path.GetFullPath(dir), StringComparison.OrdinalIgnoreCase) == 0) continue;
+                string to = Photo.Free(dir, Path.GetFileName(f));
+                File.Copy(f, to);
+                added.Add(to);
+            }
+        } catch (Exception ex) { error = ex.Message; }
+        if (Directory.Exists(dir)) photoDir = dir;
+        string note = error != null ? "Не все фото скопировались: " + error : "Добавлено фото: " + added.Count;
+        if (skipped.Count > 0) note += ". Не фото (пропущены): " + string.Join(", ", skipped.ToArray());
+        Added(added, note, error != null ? St.Bad : St.Good);
+    }
+
+    void Added(List<string> added, string note, Color color) {
+        if (added.Count > 0) { dirty = true; unsavedAuto = true; }
+        RefreshPhotos();
+        PhotoNote(note, color);
+        if (added.Count > 0) ReadPassport(added);
+    }
+
+    // с какого времени фото на телефоне считаются новыми: после последнего забранного (в первый раз - за последний час)
+    DateTime PhoneSince() {
+        DateTime t;
+        if (DateTime.TryParseExact(memory.Get("ТелефонФотоДо", ""), "yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture, DateTimeStyles.None, out t)) return t;
+        return DateTime.Now.AddHours(-1);
+    }
+
+    // last > 0 - забрать последние last фото, даже если они уже забирались раньше
+    public void TakeFromPhone(int last) {
+        if (phoneBusy) return;
+        phoneBusy = true;
+        phoneButton.Enabled = false;
+        PhotoNote("Ищу телефон...", St.Hint);
+        string dir = PhotoTarget();
+        DateTime since = PhoneSince();
+        int gen = photoGen;
+        System.Threading.Thread th = new System.Threading.Thread(delegate() {
+            PhoneResult r = Phone.Take(dir, since, last, delegate(string t) { Post(delegate { if (gen == photoGen) PhotoNote(t, St.Hint); }); });
+            Post(delegate { PhoneDone(r, dir, since, gen); });
+        });
+        // оболочка Windows (как Проводник) работает только в таком потоке
+        th.SetApartmentState(System.Threading.ApartmentState.STA);
+        th.IsBackground = true;
+        th.Start();
+    }
+
+    public bool Busy { get { return phoneBusy || mrzRunning > 0; } }
+    int mrzRunning;
+    public bool NoQuestions;                         // для проверки без окон: на вопросы - «нет»
+
+    // для проверки: открыть фото по номеру, что написано про фото
+    public void ShowPhotoAt(int i) { List<string> f = strip.Files; if (i < f.Count) ShowPhoto(f[i]); }
+    public string PhotoStatus { get { return photoNote.Text + " | " + lichnyNote.Text + " | папка: " + PhotoRef(); } }
+
+    void PhoneDone(PhoneResult r, string dir, DateTime since, int gen) {
+        phoneBusy = false;
+        phoneButton.Enabled = true;
+        if (r.Newest > since) {
+            memory.Values["ТелефонФотоДо"] = r.Newest.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
+            memory.Save();
+        }
+        if (gen != photoGen) {
+            if (r.Copied.Count > 0) PhotoNote("Фото с телефона попали в папку прошлого договора: " + dir, Warn);
+            return;
+        }
+        if (r.Error != null) { PhotoNote(r.Error, St.Bad); return; }
+        if (r.NoneNew) {
+            PhotoNote("На телефоне «" + r.Device + "» нет новых фото (снятых после " + since.ToString("dd.MM.yyyy HH:mm") + ").", St.Hint);
+            if (!NoQuestions && MessageBox.Show(this, "На телефоне нет новых фото - снятых после " + since.ToString("dd.MM.yyyy HH:mm") + ".\n\nЗабрать последние 3 фото с телефона?",
+                    Text, MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes) TakeFromPhone(3);
+            return;
+        }
+        if (Directory.Exists(dir)) photoDir = dir;
+        string note = r.Copied.Count > 0 ? "С телефона «" + r.Device + "» забрано фото: " + r.Copied.Count : "Эти фото уже есть в папке договора";
+        if (r.Failed.Count > 0) note += ". Не скопировались: " + string.Join(", ", r.Failed.ToArray()) + " - нажмите «Забрать фото с телефона» ещё раз";
+        Added(r.Copied, note, r.Failed.Count > 0 ? St.Bad : St.Good);
+    }
+
+    // личный номер - со строк «<<<» последней страницы паспорта (контрольные цифры должны сойтись)
+    void ReadPassport(List<string> files) {
+        int gen = photoGen;
+        List<string> list = new List<string>(files);
+        foreach (string f in list) strip.Mark(f, "ищу личный номер...", St.Hint);
+        mrzRunning++;
+        System.Threading.Thread th = new System.Threading.Thread(delegate() {
+            int found = 0, weak = 0, foreign = 0;
+            string where = "";
+            lock (mrzLock) {
+                foreach (string f in list) {
+                    MrzResult r = null;
+                    bool skip = found > 0;
+                    if (!skip) {
+                        try { r = Mrz.Read(f); }
+                        catch (Exception ex) { r = new MrzResult(); r.Info = "не открывается: " + ex.Message; }
+                    }
+                    if (r != null && r.Line2.Length > 0) {
+                        if (r.Valid && Blr(r)) { found++; where = Path.GetFileName(f); }
+                        else if (r.Valid) foreign++;
+                        else weak++;
+                    }
+                    string file = f;
+                    MrzResult res = r;
+                    Post(delegate { if (gen == photoGen) MrzDone(file, res); });
+                }
+            }
+            Post(delegate { mrzRunning--; if (gen == photoGen) MrzFinished(found, weak, foreign, where); });
+        });
+        th.IsBackground = true;
+        th.Priority = System.Threading.ThreadPriority.BelowNormal;
+        th.Start();
+    }
+
+    static bool Blr(MrzResult r) { return r.Line2.Length == 44 && r.Line2.Substring(10, 3) == "BLR"; }
+
+    void MrzDone(string f, MrzResult r) {
+        if (r != null && r.Info.StartsWith("не открывается")) { strip.Mark(f, "фото не открывается", St.Bad); return; }
+        if (r == null || r.Line2.Length == 0) { strip.Mark(f, null, Color.Empty); return; }
+        if (!r.Valid) { strip.Mark(f, "строки паспорта нечётко", Warn); return; }
+        if (!Blr(r)) { strip.Mark(f, "паспорт не РБ", St.Hint); return; }
+        strip.Mark(f, "личный номер прочитан", St.Good);
+        mrzPersonal = r.Personal;
+        if (V("lichny").Length == 0) SetV("lichny", r.Personal);
+        LichnyNote();
+    }
+
+    void MrzFinished(int found, int weak, int foreign, string where) {
+        string add = null;
+        Color color = photoNote.ForeColor;
+        if (found > 0) {
+            add = V("lichny") == mrzPersonal ? "Личный номер прочитан с фото «" + where + "» и подставлен - сверьте с паспортом" :
+                "Личный номер на фото «" + where + "» не такой, как в поле - проверьте";
+            color = V("lichny") == mrzPersonal ? St.Good : Warn;
+        } else if (weak > 0) {
+            add = "Строки паспорта «<<<» на фото видны, но прочитаны неуверенно - личный номер не подставлен. " +
+                "Переснимите последнюю страницу ближе, ровно и без бликов или введите номер вручную";
+            color = Warn;
+        } else if (foreign > 0) add = "Паспорт не РБ - личный номер не подставлен";
+        if (add != null) PhotoNote((photoNote.Text.Length > 0 ? photoNote.Text.TrimEnd('.') + ". " : "") + add + ".", color);
+    }
+
+    void LichnyNote() {
+        string v = V("lichny");
+        if (mrzPersonal.Length == 0) Note(lichnyNote, "", St.Hint, false);
+        else if (v == mrzPersonal) Note(lichnyNote, "как на фото паспорта - сверьте с паспортом", St.Good, false);
+        else Note(lichnyNote, "на фото паспорта: " + mrzPersonal + " (щёлкните, чтобы подставить)", Warn, true);
+        lichnyNote.Cursor = mrzPersonal.Length > 0 && v != mrzPersonal ? Cursors.Hand : Cursors.Default;
+    }
+
     // ---------- создать, открыть, новый ----------
 
     string FileName() {
@@ -7853,6 +10306,7 @@ public class DogovorForm : Form {
                 return null;
             }
             File.Move(tmp, docx);
+            MovePhotos(name);
             SaveData(data);
             Remember();
             dirty = false;
@@ -7896,6 +10350,7 @@ public class DogovorForm : Form {
         sb.Append("# Данные договора для программы «Оформление договора»\r\n");
         sb.Append("сохранён=").Append(DateTime.Now.ToString("dd.MM.yyyy HH:mm")).Append("\r\n");
         foreach (KeyValuePair<string, Control> kv in inp) sb.Append(kv.Key).Append('=').Append(Memory.Escape(V(kv.Key))).Append("\r\n");
+        sb.Append("фото=").Append(Memory.Escape(PhotoRef())).Append("\r\n");
         File.WriteAllText(file, sb.ToString(), new UTF8Encoding(true));
     }
 
@@ -7936,6 +10391,7 @@ public class DogovorForm : Form {
             sb.Append("автосохранение=").Append(DateTime.Now.ToString("dd.MM.yyyy HH:mm")).Append("\r\n");
             if (openedFile != null) sb.Append("открыт=").Append(Memory.Escape(openedFile)).Append("\r\n");
             foreach (KeyValuePair<string, Control> kv in inp) sb.Append(kv.Key).Append('=').Append(Memory.Escape(V(kv.Key))).Append("\r\n");
+            sb.Append("фото=").Append(Memory.Escape(PhotoRef())).Append("\r\n");
             // сначала во временный файл, потом подмена: свет погаснет посреди записи - старое автосохранение цело
             string tmp = autoFile + ".tmp";
             File.WriteAllText(tmp, sb.ToString(), new UTF8Encoding(true));
@@ -8010,6 +10466,14 @@ public class DogovorForm : Form {
         showMissing = false;
         dirty = false;
         openedFile = null;
+        photoGen++;
+        photoDir = null;
+        mrzPersonal = "";
+        if (viewer != null && !viewer.IsDisposed) viewer.Close();
+        strip.ClearMarks();
+        RefreshPhotos();
+        Note(photoNote, "", St.Hint, false);
+        LichnyNote();
         head.Text = "Новый договор";
         headSub.Text = "Заполните поля - программа подставит их в шаблон Word и сохранит договор в папку «Договоры»";
         headSub.ForeColor = St.Hint;
@@ -8036,6 +10500,9 @@ public class DogovorForm : Form {
                 autoModem[i] = MeterType.Modem(V(p + "modif"));
             }
         } finally { loading = false; }
+        string photos;
+        photoDir = d.TryGetValue("фото", out photos) && photos.Length > 0 ? (Path.IsPathRooted(photos) ? photos : Path.Combine(photoRoot, photos)) : null;
+        RefreshPhotos();
         dirty = false;
         openedFile = file;
         head.Text = Title();
