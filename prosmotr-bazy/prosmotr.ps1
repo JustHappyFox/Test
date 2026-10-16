@@ -1379,6 +1379,7 @@ public class SearchResult {
     public string Error;
     public bool Partial;        // частичное совпадение (иначе - только точное)
     public AddressMatch Address; // как понят адрес (точный поиск адреса)
+    public string NameText, AddressText;   // поиск по ФИО с адресом ("Иванов Боровляны"): что ФИО, что адрес
     public string Note = "";    // пояснение для строки состояния
     public string How = "";     // как искали - для отчёта
     public double Seconds;
@@ -1686,6 +1687,7 @@ public class LiveBase {
 
     public const int FetchLimit = 300;    // больше записей за один поиск не показываем (адрес - до 5000: потом отбор по дому)
     const int SeekLimit = 5000;
+    const int NameByAddressLimit = 30000;   // ФИО с адресом: сколько абонентов этого места читаем, чтобы найти среди них ФИО
 
     static readonly string[] AccountFields = { "NAB", "LS", "LIC", "LSCH", "LS_ERIP" };
 
@@ -2207,12 +2209,16 @@ public class LiveBase {
             switch (mode) {
                 case SearchMode.Account: ok = SeekAccount(text, s, res, partial); break;
                 case SearchMode.Meter: ok = SeekMeter(text, s, res, partial); break;
-                case SearchMode.Name: ok = SeekName(text, s, res, partial); break;
+                case SearchMode.Name:
+                    ok = SeekName(text, s, res, partial);
+                    if (!ok && res.Note.Length == 0) ok = SeekNameByAddress(text, s, res);
+                    break;
                 default: ok = partial || Dir == null ? SeekAddress(text, s, res) : SeekAddressExact(text, s, res); break;
             }
             if (!ok) { res.NoIndex = res.Error == null && res.Note.Length == 0; return Finish(res, null, selsovety, started); }
             List<int> recNos = new List<int>(s.Found.Keys);
             if (mode == SearchMode.Address) limit = Math.Max(limit, SeekLimit);
+            if (res.NameText != null) limit = Math.Max(limit, NameByAddressLimit);
             if (recNos.Count > limit || s.More) res.TooMany = true;
             int deleted;
             DbfTable part;
@@ -2275,7 +2281,13 @@ public class LiveBase {
         res.Query.Partial = res.Partial;
         res.Query.Address = res.Address;
         if (part.Count > 0 && res.Note.Length == 0) {
-            List<int> rows = res.Query.Find(res.Text, res.Mode);
+            List<int> rows = res.Query.Find(res.NameText ?? res.Text, res.Mode);
+            // ФИО с адресом: из найденных по ФИО - только по этому адресу (дом, квартира - если вписаны)
+            if (res.NameText != null && res.AddressText != null) {
+                Dictionary<int, bool> here = new Dictionary<int, bool>();
+                foreach (int row in res.Query.Find(res.AddressText, SearchMode.Address)) here[row] = true;
+                rows = rows.FindAll(delegate(int row) { return here.ContainsKey(row); });
+            }
             int ul = part.FieldIndex("UL");
             foreach (int row in rows) {
                 if (Dir != null && ul >= 0 && selsovety != null
@@ -2795,6 +2807,34 @@ public class LiveBase {
             foreach (string v in variants) s.Seek(t, WholeWord(KeyFor(t, new string[] { v }, true), t, whole));
             if (s.Found.Count > 0) { res.How = n == words.Length ? "начало ФИО" : "по фамилии"; return true; }
         }
+        return true;
+    }
+
+    // ФИО с адресом: "Иванов Боровляны", "Иванов Иван, Боровляны Заводская 18". Индекса по ФИО в базе нет,
+    // поэтому по индексу адреса берём абонентов этого места и среди них ищем ФИО (вся таблица не читается).
+    // Адрес - после запятой или последние слова, которые есть в справочнике улиц и населённых пунктов.
+    bool SeekNameByAddress(string text, Seeker s, SearchResult res) {
+        if (Dir == null || TagFor("UL", true) == null) return false;
+        string name = null, addr = null;
+        int comma = text.IndexOf(',');
+        if (comma > 0) {
+            name = text.Substring(0, comma).Trim();
+            addr = text.Substring(comma + 1).Trim();
+        } else {
+            string[] w = text.Split(new char[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
+            // ФИО - первые k слов, остальное - адрес (сначала пробуем адрес подлиннее)
+            for (int k = 1; k < w.Length && addr == null; k++) {
+                if (char.IsDigit(w[k][0])) continue;   // число - часть ФИО или дом, адрес с него не начинается
+                string a = string.Join(" ", w, k, w.Length - k);
+                AddressMatch m = Dir.Match(a);
+                if (m.Problem == null && m.Codes.Count > 0) { name = string.Join(" ", w, 0, k); addr = a; }
+            }
+        }
+        if (addr == null || name == null || name.Length == 0) return false;
+        if (!SeekAddressExact(addr, s, res)) return false;
+        res.NameText = name;
+        res.AddressText = addr;
+        res.How = "ФИО среди абонентов по адресу";
         return true;
     }
 
@@ -5670,7 +5710,7 @@ public class AbonentSearch : Form {
         "Номер целиком:  044060216   (нули впереди можно не писать)",
         "Населённый пункт, улица, дом, корпус, квартира:  Острошицкий Городок Заводская ул. 18 кв 5   или  заводская 18 кв 5",
         "Номер счётчика целиком:  50001  (\"№\", пробелы и нули впереди не важны)",
-        "С фамилии, словами целиком:  иванов   или   иванов иван" };
+        "С фамилии, словами целиком, и населённый пункт или улица:  иванов боровляны   или   иванов иван, боровляны заводская" };
 
     internal readonly TextBox queryBox = new TextBox();
     readonly DataGridView grid = new DataGridView();
@@ -6320,7 +6360,7 @@ public class AbonentSearch : Form {
         else if (r.Error != null)
             status.Text = "Ошибка при поиске: " + r.Error + "   Нажмите \"Отчёт\" и пришлите его.";
         else if (r.NoIndex && r.Mode == SearchMode.Name)
-            status.Text = "Индекса по ФИО у таблицы абонентов нет, поэтому по ФИО сразу не найти. Можно искать перебором - кнопка справа: просматривается вся таблица, это долго.";
+            status.Text = "Допишите населённый пункт или улицу: \"Иванов Боровляны\" - тогда найдётся сразу. По одной фамилии - только перебором всей базы (кнопка справа, это долго): индекса по ФИО в базе нет.";
         else if (r.NoIndex)
             status.Text = "Для поиска по полю \"" + Prompts[(int)r.Mode] + "\" в базе нет подходящего индекса. Можно искать перебором всей базы - это долго (минуты). Кнопка справа.";
         else if (r.Note.Length > 0 && r.Rows.Count == 0)
@@ -6945,7 +6985,9 @@ public class BatchSearch : Form {
                 SearchResult r = live.Search(lines[i], m, selected, partial);
                 List<Item> add = new List<Item>();
                 if (r.Rows.Count == 0) {
-                    string why = r.Error != null ? "ошибка: " + r.Error : r.NoIndex ? "нет индекса для поиска"
+                    string why = r.Error != null ? "ошибка: " + r.Error
+                        : r.NoIndex && m == SearchMode.Name ? "допишите населённый пункт или улицу (Иванов Боровляны)"
+                        : r.NoIndex ? "нет индекса для поиска"
                         : r.Hidden > 0 ? "в выбранных сельсоветах нет (в других: " + r.Hidden + ")"
                         : r.Note.Length > 0 ? "не найден: " + r.Note
                         : !r.TooMany && r.Query != null && r.Query.Miss.Length > 0 ? "не найден: " + r.Query.Miss : "не найден";
