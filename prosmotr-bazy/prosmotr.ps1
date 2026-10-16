@@ -1672,144 +1672,6 @@ public class ExtraRecord {
     public string Problem;     // не прочиталось, записи нет...
 }
 
-// ФИО всех абонентов - в памяти, пока программа открыта (на диск не пишется). Индекса по ФИО в базе нет,
-// поэтому первый поиск по ФИО один раз читает всю таблицу (в памяти остаётся только поле ФИО), а следующие
-// ищут здесь сразу и читают из базы только найденные записи. Новые абоненты (дописанные в конец таблицы)
-// дочитываются перед каждым поиском.
-public class NameIndex {
-    const int BlockShift = 22, BlockSize = 1 << BlockShift;   // ФИО лежат подряд в блоках по 4 МБ
-    readonly List<byte[]> blocks = new List<byte[]>();
-    int blockUsed = BlockSize;
-    int[] start = new int[1 << 16];     // где ФИО записи: номер блока и место в нём
-    byte[] length = new byte[1 << 16];
-    int[] recNo = new int[1 << 16];
-    public int Count;                   // сколько ФИО в памяти
-    public int Scanned;                 // сколько записей таблицы просмотрено
-    public double Seconds;
-    public long Bytes;
-    readonly int field, fieldLength, headerLength, recordLength;
-    readonly Encoding enc;
-    readonly byte[] fold = new byte[256];   // маленькие буквы, ё -> е
-
-    NameIndex(DbfTable h) {
-        int f = h.FieldIndex("FIO");
-        field = h.Fields[f].Offset;
-        fieldLength = h.Fields[f].Length;
-        headerLength = h.HeaderLength;
-        recordLength = h.RecordLength;
-        enc = h.Enc;
-        byte[] one = new byte[1];
-        for (int b = 0; b < 256; b++) {
-            fold[b] = (byte)b;
-            one[0] = (byte)b;
-            string s = enc.GetString(one);
-            string l = s.ToLowerInvariant().Replace('ё', 'е');
-            if (l == s) continue;
-            byte[] lb = enc.GetBytes(l);
-            if (lb.Length == 1 && enc.GetString(lb) == l) fold[b] = lb[0];
-        }
-    }
-
-    // progress может прервать чтение (исключением)
-    public static NameIndex Build(LiveBase b, LoadProgress progress) {
-        DateTime started = DateTime.Now;
-        NameIndex n = new NameIndex(b.Header);
-        using (FileStream fs = new FileStream(b.FilePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 1 << 16, FileOptions.SequentialScan))
-            n.Read(fs, 0, b.CurrentCount(fs), progress);
-        n.Seconds = (DateTime.Now - started).TotalSeconds;
-        return n;
-    }
-
-    // дочитать новые записи; false - таблица стала короче (её пересобрали) - память устарела
-    public bool Update(FileStream fs, LiveBase b, out int added) {
-        int count = b.CurrentCount(fs);
-        added = 0;
-        if (count < Scanned) return false;
-        if (count > Scanned) { int was = Count; Read(fs, Scanned, count, null); added = Count - was; }
-        return true;
-    }
-
-    void Read(FileStream fs, int from, int count, LoadProgress progress) {
-        const int chunkRecords = 4096;
-        byte[] buf = new byte[chunkRecords * recordLength];
-        fs.Seek(headerLength + (long)from * recordLength, SeekOrigin.Begin);
-        int index = from;
-        while (index < count) {
-            int want = Math.Min(chunkRecords, count - index);
-            int got = DbfTable.ReadUpTo(fs, buf, want * recordLength) / recordLength;
-            Bytes += (long)got * recordLength;
-            bool end = false;
-            for (int r = 0; r < got; r++) {
-                int p = r * recordLength;
-                if (buf[p] == 0x1A) { got = r; end = true; break; }   // конец файла
-                if (buf[p] != (byte)'*') Add(buf, p + field, index + r + 1);
-            }
-            index += got;
-            if (end || got < want) break;
-            if (progress != null) progress(index, count);
-        }
-        Scanned = index;
-    }
-
-    void Add(byte[] src, int from, int rec) {
-        int n = fieldLength;
-        while (n > 0 && (src[from + n - 1] == (byte)' ' || src[from + n - 1] == 0)) n--;
-        if (n > 255) n = 255;
-        if (blockUsed + n > BlockSize) { blocks.Add(new byte[BlockSize]); blockUsed = 0; }
-        byte[] block = blocks[blocks.Count - 1];
-        for (int k = 0; k < n; k++) block[blockUsed + k] = fold[src[from + k]];
-        if (Count == start.Length) {
-            Array.Resize(ref start, Count * 2);
-            Array.Resize(ref length, Count * 2);
-            Array.Resize(ref recNo, Count * 2);
-        }
-        start[Count] = ((blocks.Count - 1) << BlockShift) | blockUsed;
-        length[Count] = (byte)n;
-        recNo[Count] = rec;
-        Count++;
-        blockUsed += n;
-    }
-
-    // номера записей, где ФИО подходит: точно (с фамилии, словами целиком) или частично (все слова - части ФИО)
-    public List<int> Find(List<string> words, bool partial) {
-        List<int> found = new List<int>();
-        if (words.Count == 0) return found;
-        byte[] first = Encode(words[0]);
-        for (int i = 0; i < Count; i++) {
-            byte[] block = blocks[start[i] >> BlockShift];
-            int s = start[i] & (BlockSize - 1), n = length[i];
-            if (!Contains(block, s, n, first)) continue;
-            string fio = enc.GetString(block, s, n);
-            if (partial ? AbonentQuery.ContainsAll(fio, words) : AbonentQuery.NameMatches(fio, words)) found.Add(recNo[i]);
-        }
-        return found;
-    }
-
-    byte[] Encode(string word) {
-        byte[] b = enc.GetBytes(word);
-        for (int k = 0; k < b.Length; k++) b[k] = fold[b[k]];
-        return b;
-    }
-
-    static bool Contains(byte[] data, int from, int n, byte[] what) {
-        int last = from + n - what.Length;
-        for (int p = from; p <= last; p++) {
-            if (data[p] != what[0]) continue;
-            int k = 1;
-            while (k < what.Length && data[p + k] == what[k]) k++;
-            if (k == what.Length) return true;
-        }
-        return false;
-    }
-
-    public string Describe() {
-        long mb = 0;
-        foreach (byte[] b in blocks) mb += b.Length;
-        return "ФИО в памяти: " + Count + " из " + Scanned + " записей, " + (mb >> 20) + " МБ памяти, прочитано "
-            + (Bytes >> 20) + " МБ за " + Seconds.ToString("0") + " с";
-    }
-}
-
 // База абонентов "вживую": при запуске читаются только заголовок, начало таблицы и список индексов.
 // Каждый поиск идёт по индексу FoxPro прямо в файлах базы - данные всегда свежие.
 public class LiveBase {
@@ -2320,46 +2182,6 @@ public class LiveBase {
         return Search(text, mode, selsovety, FetchLimit, partial);
     }
 
-    // ---- ФИО без индекса: все ФИО в памяти (см. NameIndex) ----
-    NameIndex names;
-    readonly object namesLock = new object();
-
-    // индекса по ФИО в базе нет - для поиска по ФИО нужно сначала прочитать ФИО всех абонентов
-    public bool NamesNeeded { get { return Header.FieldIndex("FIO") >= 0 && TagFor("FIO") == null; } }
-    public bool NamesReady { get { return names != null; } }
-
-    public void LoadNames(LoadProgress progress) {
-        lock (namesLock) {
-            if (names != null) return;
-            names = NameIndex.Build(this, progress);
-            Report.Line(DateTime.Now.ToString("HH:mm:ss") + "  " + names.Describe());
-        }
-    }
-
-    SearchResult SearchNames(SearchResult res, Dictionary<string, bool> selsovety, int limit, DateTime started) {
-        List<string> words = res.Partial ? new List<string>(DbfTable.SplitWords(res.Text.Replace('ё', 'е').Replace('Ё', 'Е'))) : AbonentQuery.PersonWords(res.Text);
-        if (words.Count == 0) { res.Note = "Впишите фамилию."; return Finish(res, null, selsovety, started); }
-        using (FileStream fs = OpenTable()) {
-            List<int> recNos;
-            int added;
-            lock (namesLock) {
-                if (!names.Update(fs, this, out added)) {
-                    // таблицу пересобрали (стала короче) - ФИО нужно прочитать заново
-                    names = null;
-                    res.NoIndex = true;
-                    return Finish(res, null, selsovety, started);
-                }
-                recNos = names.Find(words, res.Partial);
-            }
-            if (recNos.Count > limit) res.TooMany = true;
-            int deleted;
-            DbfTable part = Fetch(fs, recNos, limit, out deleted);
-            res.How = names.Describe() + (added > 0 ? ", дочитано новых: " + added : "") + "; совпало " + recNos.Count
-                + ", прочитано записей " + part.Count + (deleted > 0 ? ", удалённых пропущено " + deleted : "");
-            return Finish(res, part, selsovety, started);
-        }
-    }
-
     // Ошибка чтения бывает, если программа базы как раз дописывает индекс - тогда пробуем ещё раз.
     // partial - частичное совпадение (начало номера, похожие слова); иначе - только точное
     public SearchResult Search(string text, SearchMode mode, Dictionary<string, bool> selsovety, int limit, bool partial) {
@@ -2379,14 +2201,6 @@ public class LiveBase {
         res.Text = text;
         res.Mode = mode;
         res.Partial = partial;
-        if (mode == SearchMode.Name && names != null) {
-            try { return SearchNames(res, selsovety, limit, started); }
-            catch (Exception ex) {
-                res.Error = ex.Message;
-                res.How += " ОШИБКА: " + ex.GetType().Name + ": " + ex.Message;
-                return Finish(res, null, selsovety, started);
-            }
-        }
         Seeker s = new Seeker();
         try {
             bool ok;
@@ -5539,13 +5353,6 @@ public class AbonentQuery {
         return w.Length == 1 && char.IsLetter(w[0]);
     }
 
-    // частичное совпадение: каждое слово - часть ФИО
-    public static bool ContainsAll(string fio, List<string> words) {
-        string f = fio.ToLowerInvariant().Replace('ё', 'е');
-        foreach (string w in words) if (f.IndexOf(w, StringComparison.Ordinal) < 0) return false;
-        return true;
-    }
-
     // ФИО: вписанные слова - это фамилия, имя, отчество по порядку, каждое целиком.
     // Одна буква - инициал ("иванов и"); если в базе записан инициал ("Иванов И.И.") - он подходит к имени.
     List<int> FindNameExact(string query) {
@@ -5844,11 +5651,6 @@ public class AbonentSearch : Form {
     SearchResult current;
     bool searching, again;               // идёт поиск; пока он шёл, запрос поменялся
     bool scanning;
-    bool loadingNames;          // идёт первое чтение ФИО всех абонентов (для поиска по ФИО)
-    bool namesStopped;          // чтение ФИО остановили кнопкой - само больше не начинаем
-    volatile bool cancelNames;
-    int namesPercent;
-    string namesLeft = "";
     volatile bool cancelScan;
     bool cardWhenDone;                   // Enter: нашёлся один - сразу карточка
     Dictionary<string, bool> selected;   // выбранные сельсоветы (null - все)
@@ -5984,12 +5786,7 @@ public class AbonentSearch : Form {
         scanButton.Dock = DockStyle.Right;
         scanButton.Width = 150;
         scanButton.Visible = false;
-        scanButton.Click += delegate {
-            if (scanning) cancelScan = true;
-            else if (mode == SearchMode.Name && loadingNames) { cancelNames = true; namesStopped = true; }
-            else if (mode == SearchMode.Name && live != null && live.NamesNeeded) { namesStopped = false; StartNames(); }
-            else StartScan();
-        };
+        scanButton.Click += delegate { if (scanning) cancelScan = true; else StartScan(); };
         bottom.Controls.Add(scanButton);
 
         timer.Interval = 400;
@@ -6002,7 +5799,7 @@ public class AbonentSearch : Form {
         Controls.Add(top);
 
         Shown += delegate { BringUp(); Start(); };
-        FormClosing += delegate { cancelScan = true; cancelNames = true; };
+        FormClosing += delegate { cancelScan = true; };
     }
 
     [System.Runtime.InteropServices.DllImport("user32.dll")]
@@ -6238,7 +6035,7 @@ public class AbonentSearch : Form {
                 Report.Line("Чем ищется: лицевой - " + TagName(b, "NAB", false) + ", Л/С ЕРИП - " + TagName(b, "LS_ERIP", false)
                     + ", счётчик - " + TagName(b, "NCH", false) + ", снятый счётчик - " + TagName(b, "NSC", false)
                     + ", ФИО - " + TagName(b, "FIO", false) + ", адрес - " + TagName(b, "UL", true));
-                if (b.NamesNeeded) ReportNameIndexes(dirFolder, b.Header.Enc);
+                if (b.Header.FieldIndex("FIO") >= 0 && b.TagFor("FIO") == null) ReportNameIndexes(dirFolder, b.Header.Enc);
                 Report.Line("--- поиски (сами слова не записываются) ---");
             } catch (Exception ex) {
                 Report.Line("Проверка индексов прервалась: " + ex.Message);
@@ -6405,8 +6202,6 @@ public class AbonentSearch : Form {
         if (live == null) return;
         if (scanning) { cancelScan = true; again = true; return; }
         if (searching) { again = true; return; }
-        // ФИО ещё читаются - по ФИО ищем, когда дочитаются (остальные поиски работают как обычно)
-        if (mode == SearchMode.Name && loadingNames) { Show(null); return; }
         string text = queryBox.Text;
         if (DbfTable.SplitWords(text).Length == 0) { Show(null); return; }
         if (!cardWhenDone && !EnoughTyped(text, mode)) { Show(null); status.Text = "Впишите дальше или нажмите Enter."; return; }
@@ -6443,8 +6238,6 @@ public class AbonentSearch : Form {
         if (b != live) return;
         if (again || r.Text != queryBox.Text || r.Mode != mode || r.Partial != partialBox.Checked) { again = false; StartSearch(); return; }
         Show(r);
-        // индекса по ФИО нет - сразу читаем ФИО всех абонентов (один раз за запуск), потом ищем в памяти
-        if (r.NoIndex && r.Mode == SearchMode.Name && !namesStopped && b.NamesNeeded) { StartNames(); return; }
         if (cardWhenDone) {
             cardWhenDone = false;
             LogSearch();
@@ -6502,58 +6295,12 @@ public class AbonentSearch : Form {
         Show(r);
     }
 
-    // Индекса по ФИО в базе нет: ФИО всех абонентов читаются один раз (в фоне - остальные поиски работают),
-    // потом по ФИО ищется сразу. Ход - внизу, пока выбран поиск по ФИО.
-    void StartNames() {
-        if (live == null || loadingNames || live.NamesReady) return;
-        loadingNames = true;
-        cancelNames = false;
-        namesPercent = 0;
-        namesLeft = "";
-        LiveBase b = live;
-        Show(null);
-        System.Threading.Thread th = new System.Threading.Thread(delegate() {
-            DateTime started = DateTime.Now;
-            int shown = -1;
-            string error = null;
-            try {
-                b.LoadNames(delegate(int done, int expected) {
-                    if (cancelNames || b != live) throw new OperationCanceledException();
-                    int pct = (int)(done * 100L / Math.Max(expected, 1));
-                    if (pct == shown) return;
-                    shown = pct;
-                    double spent = (DateTime.Now - started).TotalSeconds;
-                    string left = pct > 2 ? TimeLeft(spent * (100 - pct) / pct) : "";
-                    Post(delegate { namesPercent = pct; namesLeft = left; if (mode == SearchMode.Name && !searching) UpdateStatus(); });
-                });
-            } catch (OperationCanceledException) {
-            } catch (Exception ex) {
-                error = ex.Message;
-                Report.Line("ФИО не прочитались: " + ex.Message);
-            }
-            Post(delegate {
-                loadingNames = false;
-                if (b != live) return;
-                if (error != null && mode == SearchMode.Name) { Show(null); status.Text = "ФИО не прочитались: " + error; return; }
-                if (mode == SearchMode.Name) StartSearch(); else UpdateStatus();
-            });
-        });
-        th.IsBackground = true;
-        th.Start();
-    }
-
-    static string TimeLeft(double seconds) {
-        return seconds < 60 ? Math.Max(5, (int)(seconds / 5) * 5) + " с" : Math.Max(1, (int)Math.Round(seconds / 60)) + " мин";
-    }
-
     void Show(SearchResult r) {
         current = r;
         grid.RowCount = 0;
         grid.RowCount = r == null ? 0 : r.Rows.Count;
         grid.Invalidate();
-        bool names = mode == SearchMode.Name && live != null && live.NamesNeeded && !live.NamesReady;
-        scanButton.Visible = scanning || (r != null && r.NoIndex) || (names && (loadingNames || namesStopped));
-        if (!scanning) scanButton.Text = names ? (loadingNames ? "Остановить чтение ФИО" : "Прочитать ФИО из базы") : "Искать перебором";
+        scanButton.Visible = scanning || (r != null && r.NoIndex);
         logTimer.Stop();
         if (r != null) logTimer.Start();
         UpdateStatus();
@@ -6568,17 +6315,12 @@ public class AbonentSearch : Form {
         // как понят адрес: "аг. Боровляны -> Заводская ул. -> дом 18"
         if (r != null && r.Address != null && r.Address.Said.Length > 0) took = "   Искал: " + r.Address.Said + "." + took;
         string tip = r != null && !r.Partial && r.Mode != SearchMode.Address ? " Нужны и похожие номера - поставьте галочку \"Частичное совпадение\"." : "";
-        if (r == null && mode == SearchMode.Name && loadingNames)
-            status.Text = "Поиск по ФИО: индекса по ФИО в базе нет, поэтому один раз читаю ФИО всех абонентов - " + namesPercent + "%"
-                + (namesLeft.Length > 0 ? ", осталось примерно " + namesLeft : "") + ". Другие поиски (лицевой, адрес, счётчик) работают и сейчас.";
-        else if (r == null && mode == SearchMode.Name && namesStopped && live.NamesNeeded && !live.NamesReady)
-            status.Text = "Чтение ФИО остановлено. Без него по ФИО не найти - индекса по ФИО в базе нет. Продолжить - кнопка справа.   " + where;
-        else if (r == null)
+        if (r == null)
             status.Text = "Впишите " + Prompts[(int)mode] + ".   " + where;
         else if (r.Error != null)
             status.Text = "Ошибка при поиске: " + r.Error + "   Нажмите \"Отчёт\" и пришлите его.";
-        else if (r.NoIndex && r.Mode == SearchMode.Name && live.NamesNeeded)
-            status.Text = "Индекса по ФИО в базе нет. Чтобы искать по ФИО, программа один раз читает ФИО всех абонентов из базы (по сети это несколько минут) - кнопка справа.";
+        else if (r.NoIndex && r.Mode == SearchMode.Name)
+            status.Text = "Индекса по ФИО у таблицы абонентов нет, поэтому по ФИО сразу не найти. Можно искать перебором - кнопка справа: просматривается вся таблица, это долго.";
         else if (r.NoIndex)
             status.Text = "Для поиска по полю \"" + Prompts[(int)r.Mode] + "\" в базе нет подходящего индекса. Можно искать перебором всей базы - это долго (минуты). Кнопка справа.";
         else if (r.Note.Length > 0 && r.Rows.Count == 0)
@@ -7199,19 +6941,6 @@ public class BatchSearch : Form {
         System.Threading.Thread th = new System.Threading.Thread(delegate() {
             DateTime started = DateTime.Now;
             int single = 0, several = 0, none = 0, done = 0;
-            // индекса по ФИО нет - сначала один раз читаем ФИО всех абонентов
-            if (m == SearchMode.Name && live.NamesNeeded && !live.NamesReady) {
-                int shown = -1;
-                try {
-                    live.LoadNames(delegate(int read, int expected) {
-                        if (stop) throw new OperationCanceledException();
-                        int pct = (int)(read * 100L / Math.Max(expected, 1));
-                        if (pct == shown) return;
-                        shown = pct;
-                        Post(delegate { status.Text = "Читаю ФИО всех абонентов из базы (один раз за запуск программы): " + pct + "%...   (кнопка \"Стоп\" - прервать)"; });
-                    });
-                } catch (OperationCanceledException) { }
-            }
             for (int i = 0; i < lines.Count && !stop; i++) {
                 SearchResult r = live.Search(lines[i], m, selected, partial);
                 List<Item> add = new List<Item>();
