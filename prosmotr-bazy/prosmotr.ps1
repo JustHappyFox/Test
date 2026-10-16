@@ -6238,6 +6238,7 @@ public class AbonentSearch : Form {
                 Report.Line("Чем ищется: лицевой - " + TagName(b, "NAB", false) + ", Л/С ЕРИП - " + TagName(b, "LS_ERIP", false)
                     + ", счётчик - " + TagName(b, "NCH", false) + ", снятый счётчик - " + TagName(b, "NSC", false)
                     + ", ФИО - " + TagName(b, "FIO", false) + ", адрес - " + TagName(b, "UL", true));
+                if (b.NamesNeeded) ReportNameIndexes(dirFolder, b.Header.Enc);
                 Report.Line("--- поиски (сами слова не записываются) ---");
             } catch (Exception ex) {
                 Report.Line("Проверка индексов прервалась: " + ex.Message);
@@ -6326,6 +6327,43 @@ public class AbonentSearch : Form {
         status.Text = "База открыта за " + seconds.ToString("0.0") + " с.";
         if (DbfTable.SplitWords(queryBox.Text).Length > 0) StartSearch();
         else UpdateStatus();
+    }
+
+    // Индекса по ФИО у таблицы абонентов нет. Есть ли он где-то ещё в папке базы (у другой таблицы, в отдельном
+    // файле)? Программа базы может искать по ФИО через него - в отчёт, чтобы искать так же.
+    static void ReportNameIndexes(string folder, Encoding enc) {
+        List<string> found = new List<string>();
+        int files = 0;
+        try {
+            foreach (string f in Directory.GetFiles(folder)) {
+                string ext = Path.GetExtension(f).ToLowerInvariant();
+                if (ext != ".cdx" && ext != ".idx") continue;
+                files++;
+                try {
+                    foreach (IndexTag t in IndexReader.ReadTags(f, enc)) {
+                        string e = (t.Expr ?? "").ToUpperInvariant();
+                        if (e.Contains("FIO") || e.Contains("FAM") || e.Contains("NAME") || e.Contains("NAIM"))
+                            found.Add(Path.GetFileName(f) + ":" + t.Name + " (" + t.Expr + (t.ForText != null && t.ForText.Length > 0 ? " FOR " + t.ForText : "") + ")");
+                    }
+                } catch (Exception) { }
+            }
+            Report.Line("Индексы по ФИО во всех файлах папки базы (просмотрено " + files + "): " + (found.Count == 0 ? "нет" : string.Join("; ", found.ToArray())));
+            List<string> tables = new List<string>();
+            foreach (string f in Directory.GetFiles(folder)) {
+                if (string.Compare(Path.GetExtension(f), ".dbf", StringComparison.OrdinalIgnoreCase) != 0) continue;
+                try {
+                    DbfTable h = DbfTable.LoadHeader(f);
+                    int fio = h.FieldIndex("FIO");
+                    if (fio >= 0) tables.Add(Path.GetFileName(f) + " (" + h.Expected + " зап." + (h.FieldIndex("NAB") >= 0 ? ", есть NAB" : "") + ")");
+                } catch (Exception) { }
+            }
+            Report.Line("Таблицы с полем FIO: " + (tables.Count == 0 ? "нет" : string.Join(", ", tables.ToArray())));
+            List<string> subs = new List<string>();
+            foreach (string d in Directory.GetDirectories(folder)) subs.Add(Path.GetFileName(d));
+            Report.Line("Вложенные папки: " + (subs.Count == 0 ? "нет" : string.Join(", ", subs.ToArray())));
+        } catch (Exception ex) {
+            Report.Line("Поиск индексов по ФИО прервался: " + ex.Message);
+        }
     }
 
     // тарифы и доп. сведения дочитаны: появляются столбцы "Т" и "Мощность", найденное ищется заново
