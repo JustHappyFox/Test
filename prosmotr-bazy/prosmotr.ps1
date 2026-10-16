@@ -1804,6 +1804,46 @@ public class LiveBase {
         notes.Insert(0, "исходников программы базы (.PRG/.SPR/.MPR) найдено: " + files + (shown > 0 ? ", строки про поиск по ФИО:" : ", строк про поиск по ФИО нет"));
     }
 
+    // Программа базы собрана (Energ.exe, .APP, .FXP), но имена файлов и строки в ней остаются текстом: если она
+    // ищет по ФИО через свой индекс, его имя видно. В отчёт - строки с "FIO" и имена .IDX/.CDX (без данных абонентов).
+    public static void ReportProgramStrings(List<string> dirs, List<string> notes) {
+        int files = 0;
+        Dictionary<string, bool> seen = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+        List<string> found = new List<string>();
+        Encoding enc = Encoding.GetEncoding(866);
+        foreach (string dir in dirs) {
+            string[] list;
+            try { list = Directory.GetFiles(dir); } catch (Exception) { continue; }
+            foreach (string f in list) {
+                string name = Path.GetFileName(f).ToLowerInvariant(), ext = Path.GetExtension(f).ToLowerInvariant();
+                if (!(name == "energ.exe" || name == "en_vfp.exe" || ext == ".app" || ext == ".fxp")) continue;
+                byte[] data;
+                try {
+                    if (new FileInfo(f).Length > 20 << 20) continue;
+                    data = File.ReadAllBytes(f);
+                } catch (Exception) { continue; }
+                files++;
+                int start = -1;
+                for (int i = 0; i <= data.Length && found.Count < 120; i++) {
+                    byte c = i < data.Length ? data[i] : (byte)0;
+                    bool text = (c >= 0x20 && c < 0x7F) || (c >= 0x80 && c <= 0xAF) || (c >= 0xE0 && c <= 0xF1);
+                    if (text) { if (start < 0) start = i; continue; }
+                    if (start >= 0 && i - start >= 3) {
+                        string run = enc.GetString(data, start, Math.Min(i - start, 160)).Trim();
+                        string u = run.ToUpperInvariant();
+                        if ((u.Contains("FIO") || u.Contains(".IDX") || u.Contains(".CDX") || u.Contains("INDEX ON") || u.Contains("ORDER")) && !seen.ContainsKey(run)) {
+                            seen[run] = true;
+                            found.Add(Path.GetFileName(f) + ": " + run);
+                        }
+                    }
+                    start = -1;
+                }
+            }
+        }
+        notes.Add("строки в самой программе базы (просмотрено файлов " + files + ")" + (found.Count == 0 ? ": нет" : ":"));
+        notes.AddRange(found);
+    }
+
     public IndexTag FindNameIndexElsewhere(string baseFolder, List<string> notes) {
         List<string> dirs = ProgramDirs(baseFolder);
         int files = 0;
@@ -6261,7 +6301,9 @@ public class AbonentSearch : Form {
                     List<string> code = new List<string>();
                     try { LiveBase.ReportSources(LiveBase.ProgramDirs(dirFolder), code); }
                     catch (Exception ex) { code.Add("просмотр исходников прервался: " + ex.Message); }
-                    foreach (string n in code) Report.Line((n.StartsWith("исходников") ? "" : "    ") + n);
+                    try { LiveBase.ReportProgramStrings(LiveBase.ProgramDirs(dirFolder), code); }
+                    catch (Exception ex) { code.Add("просмотр программы базы прервался: " + ex.Message); }
+                    foreach (string n in code) Report.Line((n.StartsWith("исходников") || n.StartsWith("строки в самой") ? "" : "    ") + n);
                     if (fio != null) {
                         string where = fio.FilePath;
                         Post(delegate { if (b == live) { status.Text = "Найден индекс по ФИО программы базы (" + where + ") - теперь по ФИО ищется сразу."; } });
