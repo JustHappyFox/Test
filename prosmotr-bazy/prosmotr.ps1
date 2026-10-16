@@ -5965,7 +5965,7 @@ public class AbonentSearch : Form {
         status.Dock = DockStyle.Fill;
         status.TextAlign = ContentAlignment.MiddleLeft;
         bottom.Controls.Add(status);
-        bottom.Controls.Add(BottomButton("В Excel", delegate { ExportResult(); }));
+        bottom.Controls.Add(BottomButton("В Excel", delegate { ExportResult(null); }));
         bottom.Controls.Add(BottomButton("Отчёт", delegate { OpenReport(); }));
         bottom.Controls.Add(BottomButton("Все таблицы...", delegate { new DbfViewer(this.viewerSettings).Show(); }));
         bottom.Controls.Add(BottomButton("Где искать...", delegate { ChooseBase(); }));
@@ -6020,10 +6020,9 @@ public class AbonentSearch : Form {
         return b;
     }
 
-    internal static string ExportFolder;   // для проверки: выгрузить в папку, не открывая Excel
-
-    // найденное - в Excel: те же столбцы, что в списке, цвета строк и примечание, почему строка добавлена
-    internal void ExportResult() {
+    // найденное - в Excel: те же столбцы, что в списке, цвета строк и примечание, почему строка добавлена;
+    // folder - только сохранить файл туда, не открывая Excel (для проверки)
+    internal void ExportResult(string folder) {
         SearchResult r = current;
         if (r == null || r.Rows.Count == 0) { MessageBox.Show(this, "Сначала найдите что-нибудь.", Text); return; }
         string[] headers = new string[kinds.Count + 1];
@@ -6039,7 +6038,7 @@ public class AbonentSearch : Form {
             styles.Add(ResultColumns.ExcelStyle(r, row));
         }
         try {
-            if (ExportFolder != null) Spreadsheet.Write(ExportFolder, "Поиск_абонента", headers, rows, styles);
+            if (folder != null) Spreadsheet.Write(folder, "Поиск_абонента", headers, rows, styles);
             else Spreadsheet.Open("Поиск_абонента", headers, rows, styles);
         }
         catch (Exception ex) { MessageBox.Show(this, "Не удалось выгрузить в Excel:\n" + ex.Message, Text); }
@@ -7301,6 +7300,10 @@ foreach ($d in $cacheDirs) {
     }
 }
 
+# Предупреждения компилятора (не ошибки) не должны мешать запуску: -IgnoreWarnings, если PowerShell его знает
+$quiet = @{}
+try { if ((Get-Command Add-Type).Parameters.ContainsKey('IgnoreWarnings')) { $quiet['IgnoreWarnings'] = $true } } catch { }
+
 if (-not (Test-Ready)) {
     foreach ($d in $cacheDirs) {
         try {
@@ -7309,7 +7312,7 @@ if (-not (Test-Ready)) {
             Get-ChildItem -Path $d -Filter 'poisk_*.dll' -ErrorAction SilentlyContinue |
                 Where-Object { $_.Name -ne $name } | Remove-Item -ErrorAction SilentlyContinue
             $dll = Join-Path $d $name
-            Add-Type -ReferencedAssemblies $refs -TypeDefinition $code -OutputAssembly $dll -OutputType Library
+            Add-Type @quiet -ReferencedAssemblies $refs -TypeDefinition $code -OutputAssembly $dll -OutputType Library
             if (-not (Test-Ready)) { [void][Reflection.Assembly]::LoadFrom($dll) }
             if (Test-Ready) { break }
         } catch { }
@@ -7324,7 +7327,7 @@ if (-not (Test-Ready)) {
     $attempt = 0
     while ($true) {
         try {
-            Add-Type -ReferencedAssemblies $refs -TypeDefinition $code
+            Add-Type @quiet -ReferencedAssemblies $refs -TypeDefinition $code
             break
         } catch {
             if ($attempt -ge $tempDirs.Count) {
