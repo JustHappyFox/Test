@@ -133,11 +133,12 @@ public static class Zip {
     static uint U32(byte[] d, int p) { return (uint)(d[p] | (d[p + 1] << 8) | (d[p + 2] << 16) | (d[p + 3] << 24)); }
 }
 
-// Шаблон договора: поля «ИМЯ» заменяются текстом, «□ИМЯ» - флажком ☑ или ☐ (символы Wingdings, как в бланке).
+// Шаблон договора: поля «ИМЯ» заменяются текстом, «□ИМЯ» - флажком ☑ или ☐ (символы Wingdings, как в бланке),
+// «¶ИМЯ» - текстом, а если он пустой, абзац с полем убирается.
 // Поле может быть разбито Word-ом на несколько кусков текста - собираем его по всему абзацу.
 public static class DocxTemplate {
     const string W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
-    static readonly Regex Field = new Regex("«(□?)([A-ZА-ЯЁ0-9_]+)»");
+    static readonly Regex Field = new Regex("«([□¶]?)([A-ZА-ЯЁ0-9_]+)»");
 
     // values: имя поля -> текст ("\n" - перенос строки); для флажков "1" - отмечен. Возвращает поля, которых не было в values
     public static List<string> Fill(string template, string output, Dictionary<string, string> values) {
@@ -151,7 +152,9 @@ public static class DocxTemplate {
             XmlNamespaceManager ns = new XmlNamespaceManager(doc.NameTable);
             ns.AddNamespace("w", W);
             bool changed = false;
-            foreach (XmlNode p in doc.SelectNodes("//w:p", ns))
+            List<XmlNode> paras = new List<XmlNode>();
+            foreach (XmlNode p in doc.SelectNodes("//w:p", ns)) paras.Add(p);
+            foreach (XmlNode p in paras)
                 if (FillParagraph(doc, p, values, missing)) changed = true;
             if (!changed) continue;
             using (MemoryStream ms = new MemoryStream()) {
@@ -186,6 +189,7 @@ public static class DocxTemplate {
         foreach (XmlNode t in ts) sb.Append(t.InnerText);
         MatchCollection ms = Field.Matches(sb.ToString());
         if (ms.Count == 0) return false;
+        bool hasPara = false;
         // с конца: текст перед более ранними полями не меняется, их позиции те же
         for (int m = ms.Count - 1; m >= 0; m--) {
             Match match = ms[m];
@@ -206,10 +210,17 @@ public static class DocxTemplate {
                 } else SetText(t, s.Substring(0, ls) + s.Substring(le));
             }
             string name = match.Groups[2].Value;
-            bool box = match.Groups[1].Value.Length > 0;
+            bool box = match.Groups[1].Value == "□";
+            if (match.Groups[1].Value == "¶") hasPara = true;
             string value;
             if (!values.TryGetValue((box ? "□" : "") + name, out value)) { value = ""; if (!missing.Contains(name)) missing.Add(name); }
             Put(doc, first, firstOffset, match.Length, value, box);
+        }
+        // «¶ИМЯ» - поле в своём абзаце: пустое значение - абзаца нет совсем
+        if (hasPara && p.ParentNode != null) {
+            StringBuilder rest = new StringBuilder();
+            foreach (XmlNode t in Texts(p)) rest.Append(t.InnerText);
+            if (rest.ToString().Trim().Length == 0 && ((XmlElement)p).GetElementsByTagName("br", W).Count == 0) p.ParentNode.RemoveChild(p);
         }
         return true;
     }
@@ -290,7 +301,7 @@ public static class DocxTemplate {
                 sb.Length = 0;
                 foreach (XmlNode t in ((XmlElement)p).GetElementsByTagName("t", W)) if (OwnParagraph(t) == p) sb.Append(t.InnerText);
                 foreach (Match m in Field.Matches(sb.ToString())) {
-                    string n = m.Groups[1].Value + m.Groups[2].Value;
+                    string n = (m.Groups[1].Value == "□" ? "□" : "") + m.Groups[2].Value;
                     if (!names.Contains(n)) names.Add(n);
                 }
             }
@@ -1812,18 +1823,21 @@ public class DogovorForm : Form {
             string p = "pu" + i + "_", f = "ПУ" + i + "_";
             if (i == 2 && !two) {
                 string dash = Line(42, '-'), shortDash = Line(16, '-');
-                v[f + "НОМ"] = "";
+                // как в эталонном договоре с одним счётчиком
+                v[f + "НОМ"] = "_";
+                v[f + "НОМ_Т"] = "______" + shortDash;
                 v[f + "ЦЕЛЬ"] = shortDash;
                 foreach (string k in new string[] { "ТИП", "ЗАВ", "ПОВЕРКА", "ПЛОМБА_ГП", "ФАЗ", "МЕСТО", "ПРИНАДЛ", "МОДЕМ", "ПОКАЗ", "МОДУЛЬ" }) v[f + k] = dash;
                 foreach (string k in new string[] { "ВВОД_ТИП", "ВВОД_I", "ЗАЩ_ТИП", "ЗАЩ_I" }) v[f + k] = shortDash;
                 v["□" + f + "АСКУЭ_ДА"] = v["□" + f + "АСКУЭ_НЕТ"] = "0";
                 v["□" + f + "ОДНОСТ"] = v["□" + f + "ДИФФ"] = "0";
-                v[f + "ПЕРИОДЫ"] = shortDash;
-                v[f + "ТАРИФ"] = v[f + "ТАРИФ_Д"] = "";
-                v[f + "НАГРЕВ"] = "";
+                v[f + "ПЕРИОДЫ"] = "__" + shortDash + "_";
+                v[f + "ТАРИФ"] = v[f + "ТАРИФ_Д"] = v[f + "ЗПТ"] = v[f + "ЗПТ_Д"] = "";
+                v[f + "НАГРЕВ"] = v[f + "НАГРЕВ_Д"] = "";
                 continue;
             }
             v[f + "НОМ"] = i.ToString();
+            if (i == 2) v[f + "НОМ_Т"] = "_____2____";
             v[f + "ЦЕЛЬ"] = V(p + "cel");
             v[f + "ТИП"] = V(p + "tip");
             v[f + "ЗАВ"] = V(p + "zav");
@@ -1841,16 +1855,19 @@ public class DogovorForm : Form {
             v[f + "МОДУЛЬ"] = V(p + "modul").Length > 0 ? V(p + "modul") : Line(42, '-');
             v["□" + f + "АСКУЭ_ДА"] = V(p + "askue") == "да" ? "1" : "0";
             v["□" + f + "АСКУЭ_НЕТ"] = V(p + "askue") == "нет" ? "1" : "0";
-            string per = Periods(V(p + "tarif")), group = V(p + "gruppa").Length > 0 ? ", " + V(p + "gruppa") : "";
+            string per = Periods(V(p + "tarif")), group = V(p + "gruppa");
             bool diff = per.Length > 0;
             v["□" + f + "ОДНОСТ"] = V(p + "tarif") == Tarifs[0] ? "1" : "0";
             v["□" + f + "ДИФФ"] = diff ? "1" : "0";
             v[f + "ПЕРИОДЫ"] = diff ? per : Line(11, '_');
-            // тарифная группа и электронагреватели - под выбранным тарифом
-            string heat = V(p + "nagrev");
+            // тарифная группа (жирным, после запятой) и электронагреватели - под выбранным тарифом
+            string heat = V(p + "nagrev"), comma = group.Length > 0 ? ", " : "";
+            v[f + "ЗПТ"] = diff ? "" : comma;
             v[f + "ТАРИФ"] = diff ? "" : group;
-            v[f + "ТАРИФ_Д"] = !diff ? "" : heat.Length > 0 ? group + "\n" + heat : group;
-            v[f + "НАГРЕВ"] = diff ? "" : i == 2 && heat.Length > 0 ? "\n" + heat : heat;
+            v[f + "ЗПТ_Д"] = diff ? comma : "";
+            v[f + "ТАРИФ_Д"] = diff ? group : "";
+            v[f + "НАГРЕВ"] = diff ? "" : heat;
+            v[f + "НАГРЕВ_Д"] = diff ? heat : "";
         }
 
         v["ПЛОМБА_ВВОД"] = V("plomba_vvod").Length > 0 ? V("plomba_vvod") : Line(16, '-');
@@ -1860,7 +1877,7 @@ public class DogovorForm : Form {
             v["□" + q[1] + "_ДА"] = V(q[0]) == "да" ? "1" : "0";
             v["□" + q[1] + "_НЕТ"] = V(q[0]) == "нет" ? "1" : "0";
         }
-        v["ПЛИТА_ПРИМ"] = V("plita") == "да" && V("plita_prim").Length > 0 ? "\n" + V("plita_prim") : "";
+        v["ПЛИТА_ПРИМ"] = V("plita") == "да" ? V("plita_prim") : "";
         v["ДОП_ИНФО"] = V("dop_info").Length > 0 ? V("dop_info") : Line(94, '_');
         v["ЛЬГОТА"] = V("lgota").Length > 0 ? V("lgota") : Line(78, '_');
         string os = V("osobye");
