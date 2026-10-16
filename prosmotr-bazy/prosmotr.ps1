@@ -1973,199 +1973,6 @@ public class LiveBase {
         }
     }
 
-    // Индекс по ФИО программы базы может лежать не в папке базы: программа базы запускается с диска D:
-    // (d:\Energ, временные файлы - d:\temp), бывают и вложенные папки рядом с базой. Ищем там .IDX/.CDX
-    // с ФИО в выражении; подходящий к этой таблице (проверяется на её записях) - подключаем для поиска по ФИО.
-    // где может лежать что-то от программы базы: папка базы (с вложенными), папка над ней,
-    // на локальных дисках - корень, Energ, temp, fpd26 (с вложенными)
-    public static List<string> ProgramDirs(string baseFolder) {
-        List<string> dirs = new List<string>();
-        AddDir(dirs, baseFolder, 50);
-        try { DirectoryInfo up = Directory.GetParent(baseFolder.TrimEnd('\\', '/')); if (up != null) AddDir(dirs, up.FullName, 0); } catch (Exception) { }
-        foreach (string drive in new string[] { "C", "D", "E" }) {
-            try {
-                DriveInfo di = new DriveInfo(drive);
-                if (di.DriveType != DriveType.Fixed || !di.IsReady) continue;
-                string root = drive + ":\\";
-                AddDir(dirs, root, 0);
-                foreach (string name in new string[] { "Energ", "temp", "fpd26", "BASAFOX" }) AddDir(dirs, Path.Combine(root, name), 30);
-            } catch (Exception) { }
-        }
-        return dirs;
-    }
-
-    // Исходники программы базы (.PRG, .SPR, .MPR - обычный текст): строки, где поиск или индекс связан с ФИО.
-    // В отчёт - только эти строки кода (данных абонентов в них нет), чтобы искать по ФИО так же, как она.
-    public static void ReportSources(List<string> dirs, List<string> notes) {
-        int files = 0, shown = 0;
-        string[] verbs = { "INDE", "SEEK", "ORDER", "LOCATE", "SELECT", "FILTER", "FIND", ".IDX", ".CDX", "TAG", "LIKE", "SCAN" };
-        Encoding enc = Encoding.GetEncoding(866);
-        foreach (string dir in dirs) {
-            string[] list;
-            try { list = Directory.GetFiles(dir); } catch (Exception) { continue; }
-            foreach (string f in list) {
-                string ext = Path.GetExtension(f).ToLowerInvariant();
-                if (ext != ".prg" && ext != ".spr" && ext != ".mpr") continue;
-                files++;
-                string[] lines;
-                try {
-                    if (new FileInfo(f).Length > 4 << 20) continue;
-                    lines = File.ReadAllLines(f, enc);
-                } catch (Exception) { continue; }
-                for (int i = 0; i < lines.Length && shown < 80; i++) {
-                    string u = lines[i].ToUpperInvariant();
-                    if (u.IndexOf("FIO") < 0 && u.IndexOf("FAM") < 0) continue;
-                    bool verb = false;
-                    foreach (string v in verbs) if (u.IndexOf(v) >= 0) { verb = true; break; }
-                    if (!verb) continue;
-                    string line = lines[i].Trim();
-                    if (line.Length > 200) line = line.Substring(0, 200) + "...";
-                    notes.Add(Path.GetFileName(f) + ":" + (i + 1) + ": " + line);
-                    shown++;
-                }
-            }
-        }
-        notes.Insert(0, "исходников программы базы (.PRG/.SPR/.MPR) найдено: " + files + (shown > 0 ? ", строки про поиск по ФИО:" : ", строк про поиск по ФИО нет"));
-    }
-
-    // Программа базы собрана (Energ.exe, .APP, .FXP), но имена файлов и строки в ней остаются текстом: если она
-    // ищет по ФИО через свой индекс, его имя видно. В отчёт - строки с "FIO" и имена .IDX/.CDX (без данных абонентов).
-    public static void ReportProgramStrings(List<string> dirs, List<string> notes) {
-        int files = 0;
-        Dictionary<string, bool> seen = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
-        List<string> found = new List<string>();
-        Encoding enc = Encoding.GetEncoding(866);
-        foreach (string dir in dirs) {
-            string[] list;
-            try { list = Directory.GetFiles(dir); } catch (Exception) { continue; }
-            foreach (string f in list) {
-                string name = Path.GetFileName(f).ToLowerInvariant(), ext = Path.GetExtension(f).ToLowerInvariant();
-                if (!(name == "energ.exe" || name == "en_vfp.exe" || ext == ".app" || ext == ".fxp")) continue;
-                byte[] data;
-                try {
-                    if (new FileInfo(f).Length > 20 << 20) continue;
-                    data = File.ReadAllBytes(f);
-                } catch (Exception) { continue; }
-                files++;
-                int start = -1;
-                for (int i = 0; i <= data.Length && found.Count < 120; i++) {
-                    byte c = i < data.Length ? data[i] : (byte)0;
-                    bool text = (c >= 0x20 && c < 0x7F) || (c >= 0x80 && c <= 0xAF) || (c >= 0xE0 && c <= 0xF1);
-                    if (text) { if (start < 0) start = i; continue; }
-                    if (start >= 0 && i - start >= 3) {
-                        string run = enc.GetString(data, start, Math.Min(i - start, 160)).Trim();
-                        string u = run.ToUpperInvariant();
-                        if ((u.Contains("FIO") || u.Contains(".IDX") || u.Contains(".CDX") || u.Contains("INDEX ON") || u.Contains("ORDER")) && !seen.ContainsKey(run)) {
-                            seen[run] = true;
-                            found.Add(Path.GetFileName(f) + ": " + run);
-                        }
-                    }
-                    start = -1;
-                }
-            }
-        }
-        notes.Add("строки в самой программе базы (просмотрено файлов " + files + ")" + (found.Count == 0 ? ": нет" : ":"));
-        notes.AddRange(found);
-    }
-
-    public IndexTag FindNameIndexElsewhere(string baseFolder, List<string> notes) {
-        List<string> dirs = ProgramDirs(baseFolder);
-        int files = 0;
-        IndexTag found = null;
-        Dictionary<string, bool> known = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
-        foreach (IndexTag t in Tags) known[t.FilePath + "|" + t.Name] = true;
-        foreach (string dir in dirs) {
-            string[] list;
-            try { list = Directory.GetFiles(dir); } catch (Exception) { continue; }
-            foreach (string f in list) {
-                string ext = Path.GetExtension(f).ToLowerInvariant();
-                if (ext != ".idx" && ext != ".cdx" && ext != ".ndx" && ext != ".ntx" && ext != ".mdx" && ext != ".tmp") continue;
-                if (ext == ".tmp" && dir.TrimEnd('\\', '/').ToLowerInvariant().EndsWith("temp") == false) continue;
-                files++;
-                string upper = Path.GetFileNameWithoutExtension(f).ToUpperInvariant();
-                if (ext == ".tmp") { notes.Add(DescribeTemp(f)); continue; }
-                if (ext != ".idx" && ext != ".cdx") {
-                    if (upper.Contains("FIO") || upper.Contains("FAM")) notes.Add(f + " - индекс не FoxPro (не прочитать)");
-                    continue;
-                }
-                List<IndexTag> tags;
-                try { tags = IndexReader.ReadTags(f, Header.Enc); } catch (Exception) { continue; }
-                foreach (IndexTag t in tags) {
-                    string e = (t.Expr ?? "").ToUpperInvariant();
-                    if (!e.Contains("FIO") && !e.Contains("FAM")) continue;
-                    if (known.ContainsKey(t.FilePath + "|" + t.Name)) continue;
-                    string where = f + (t.Name != null && t.Name.Length > 0 && ext == ".cdx" ? ":" + t.Name : "") + " (" + t.Expr + ")";
-                    t.Structural = false;
-                    Prepare(t);
-                    if (t.Key == null || string.Compare(t.FirstField, "FIO", StringComparison.OrdinalIgnoreCase) != 0) { notes.Add(where + " - не от таблицы абонентов"); continue; }
-                    if (found != null) { notes.Add(where); continue; }
-                    if (Verify(t)) {
-                        List<IndexTag> l = new List<IndexTag>(Tags);
-                        l.Add(t);
-                        Tags = l;      // новый список, а не добавление: поиски в других потоках перебирают старый
-                        found = t;
-                        notes.Add(where + " - ПОДХОДИТ к таблице абонентов, поиск по ФИО идёт через него");
-                    } else notes.Add(where + " - не подходит: " + t.Check);
-                }
-            }
-        }
-        notes.Insert(0, "просмотрено индексных файлов: " + files + " в папках: " + string.Join(", ", dirs.ToArray()));
-        return found;
-    }
-
-    // Временный файл программы базы (d:\temp\*.TMP): что это - таблица (результат запроса) или индекс и по чему.
-    // Только описание для отчёта, без данных: размер, поля, выражение индекса.
-    string DescribeTemp(string f) {
-        string head = f;
-        try {
-            FileInfo fi = new FileInfo(f);
-            head += " (" + (fi.Length >= 1048576 ? (fi.Length / 1048576.0).ToString("0.0") + " МБ" : (fi.Length / 1024) + " КБ")
-                + ", изменён " + fi.LastWriteTime.ToString("dd.MM HH:mm") + ")";
-            byte[] h = new byte[32];
-            using (FileStream fs = new FileStream(f, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
-                if (DbfTable.ReadUpTo(fs, h, 32) < 32) return head + ": пустой";
-            int count = BitConverter.ToInt32(h, 4), hl = BitConverter.ToUInt16(h, 8), rl = BitConverter.ToUInt16(h, 10);
-            if (hl >= 65 && rl >= 2 && count >= 0 && (long)hl + (long)count * rl <= fi.Length + 1 && fi.Length - hl - (long)count * rl <= rl + 2) {
-                DbfTable t = DbfTable.LoadHeader(f);
-                List<string> names = new List<string>();
-                foreach (DbfField fld in t.Fields) names.Add(fld.Name);
-                return head + ": таблица, записей " + count + ", поля " + string.Join(", ", names.ToArray());
-            }
-            foreach (bool cdx in new bool[] { true, false }) {
-                try {
-                    List<string> exprs = new List<string>();
-                    foreach (IndexTag t in IndexReader.ReadTags(f, Header.Enc, cdx))
-                        if (t.Expr.Length > 0 && t.Expr.Length < 200 && FoxExprLooksValid(t.Expr)) exprs.Add((cdx ? t.Name + ": " : "") + t.Expr);
-                    if (exprs.Count > 0) return head + ": индекс" + (cdx ? " (как .CDX)" : " (как .IDX)") + " - " + string.Join("; ", exprs.ToArray());
-                } catch (Exception) { }
-            }
-            return head + ": не таблица и не индекс";
-        } catch (Exception ex) {
-            return head + ": не открылся - " + ex.Message;
-        }
-    }
-
-    // выражение индекса похоже на настоящее: печатные символы и хотя бы одна буква
-    static bool FoxExprLooksValid(string e) {
-        bool letter = false;
-        foreach (char c in e) {
-            if (c < ' ' || c == '\uFFFD') return false;
-            if (char.IsLetter(c)) letter = true;
-        }
-        return letter;
-    }
-
-    static void AddDir(List<string> dirs, string dir, int subdirs) {
-        try {
-            if (!Directory.Exists(dir)) return;
-            foreach (string d in dirs) if (string.Compare(d.TrimEnd('\\', '/'), dir.TrimEnd('\\', '/'), StringComparison.OrdinalIgnoreCase) == 0) return;
-            dirs.Add(dir);
-            if (subdirs <= 0) return;
-            string[] subs = Directory.GetDirectories(dir);
-            for (int i = 0; i < subs.Length && i < subdirs; i++) AddDir(dirs, subs[i], 0);
-        } catch (Exception) { }
-    }
-
     void Prepare(IndexTag t) {
         try {
             t.Key = FoxExpr.Parse(t.Expr, Header);
@@ -6238,6 +6045,7 @@ public class AbonentSearch : Form {
     bool scanning;
     volatile bool cancelScan;
     bool buildingNames;          // строится свой индекс по ФИО (в фоне)
+    readonly Label namesLabel = new Label();   // состояние своего индекса по ФИО - видно всегда
     volatile bool cancelNames;
     int namesPercent;
     string namesLeft = "";
@@ -6342,7 +6150,14 @@ public class AbonentSearch : Form {
         hint.ForeColor = SystemColors.GrayText;
         hint.AutoSize = true;
         hint.Location = new Point(12, 76);
+        namesLabel.AutoSize = false;
+        namesLabel.TextAlign = ContentAlignment.MiddleRight;
+        namesLabel.Size = new Size(460, 20);
+        namesLabel.Location = new Point(top.Width - 472, 74);
+        namesLabel.Anchor = AnchorStyles.Right | AnchorStyles.Top;
+        namesLabel.ForeColor = Color.FromArgb(0, 70, 140);
         top.Controls.Add(queryBox);
+        top.Controls.Add(namesLabel);
         top.Controls.Add(hint);
 
         grid.Dock = DockStyle.Fill;
@@ -6603,6 +6418,9 @@ public class AbonentSearch : Form {
             double seconds = (DateTime.Now - t0).TotalSeconds;
             Post(delegate { AfterOpen(b, sel, error, seconds); });
             if (error != null) return;
+            // индекса по ФИО в базе нет - свой (файл в папке программы): прочитать, дочитать новое или построить в фоне
+            try { if (b.NamesNeeded) Post(delegate { StartNames(b); }); }
+            catch (Exception ex) { Report.Line("Свой индекс ФИО: " + ex.Message); }
             // тарифы (T1, T2...) и доп. сведения - уже когда окно работает: искать можно сразу
             DateTime t2 = DateTime.Now;
             try { b.Extra = ExtraInfo.Open(dirFolder); }
@@ -6626,32 +6444,10 @@ public class AbonentSearch : Form {
                 Report.Line("Чем ищется: лицевой - " + TagName(b, "NAB", false) + ", Л/С ЕРИП - " + TagName(b, "LS_ERIP", false)
                     + ", счётчик - " + TagName(b, "NCH", false) + ", снятый счётчик - " + TagName(b, "NSC", false)
                     + ", ФИО - " + TagName(b, "FIO", false) + ", адрес - " + TagName(b, "UL", true));
-                if (b.Header.FieldIndex("FIO") >= 0 && b.TagFor("FIO") == null) {
-                    List<string> notes = new List<string>();
-                    IndexTag fio = null;
-                    try { fio = b.FindNameIndexElsewhere(dirFolder, notes); }
-                    catch (Exception ex) { notes.Add("поиск прервался: " + ex.Message); }
-                    Report.Line("Индекс по ФИО вне таблицы абонентов: " + (fio == null ? "не найден" : "найден " + fio.FilePath));
-                    foreach (string n in notes) Report.Line("    " + n);
-                    ReportNameIndexes(dirFolder, b.Header.Enc);
-                    List<string> code = new List<string>();
-                    try { LiveBase.ReportSources(LiveBase.ProgramDirs(dirFolder), code); }
-                    catch (Exception ex) { code.Add("просмотр исходников прервался: " + ex.Message); }
-                    try { LiveBase.ReportProgramStrings(LiveBase.ProgramDirs(dirFolder), code); }
-                    catch (Exception ex) { code.Add("просмотр программы базы прервался: " + ex.Message); }
-                    foreach (string n in code) Report.Line((n.StartsWith("исходников") || n.StartsWith("строки в самой") ? "" : "    ") + n);
-                    if (fio != null) {
-                        string where = fio.FilePath;
-                        Post(delegate { if (b == live) { status.Text = "Найден индекс по ФИО программы базы (" + where + ") - теперь по ФИО ищется сразу."; } });
-                    }
-                }
                 Report.Line("--- поиски (сами слова не записываются) ---");
             } catch (Exception ex) {
                 Report.Line("Проверка индексов прервалась: " + ex.Message);
             }
-            // индекса по ФИО нет - свой (файл в папке программы): прочитать, дочитать новое или построить в фоне
-            try { if (b.NamesNeeded) Post(delegate { StartNames(b); }); }
-            catch (Exception ex) { Report.Line("Свой индекс ФИО: " + ex.Message); }
         });
         th.IsBackground = true;
         th.Start();
@@ -6736,43 +6532,6 @@ public class AbonentSearch : Form {
         status.Text = "База открыта за " + seconds.ToString("0.0") + " с.";
         if (DbfTable.SplitWords(queryBox.Text).Length > 0) StartSearch();
         else UpdateStatus();
-    }
-
-    // Индекса по ФИО у таблицы абонентов нет. Есть ли он где-то ещё в папке базы (у другой таблицы, в отдельном
-    // файле)? Программа базы может искать по ФИО через него - в отчёт, чтобы искать так же.
-    static void ReportNameIndexes(string folder, Encoding enc) {
-        List<string> found = new List<string>();
-        int files = 0;
-        try {
-            foreach (string f in Directory.GetFiles(folder)) {
-                string ext = Path.GetExtension(f).ToLowerInvariant();
-                if (ext != ".cdx" && ext != ".idx") continue;
-                files++;
-                try {
-                    foreach (IndexTag t in IndexReader.ReadTags(f, enc)) {
-                        string e = (t.Expr ?? "").ToUpperInvariant();
-                        if (e.Contains("FIO") || e.Contains("FAM") || e.Contains("NAME") || e.Contains("NAIM"))
-                            found.Add(Path.GetFileName(f) + ":" + t.Name + " (" + t.Expr + (t.ForText != null && t.ForText.Length > 0 ? " FOR " + t.ForText : "") + ")");
-                    }
-                } catch (Exception) { }
-            }
-            Report.Line("Индексы по ФИО во всех файлах папки базы (просмотрено " + files + "): " + (found.Count == 0 ? "нет" : string.Join("; ", found.ToArray())));
-            List<string> tables = new List<string>();
-            foreach (string f in Directory.GetFiles(folder)) {
-                if (string.Compare(Path.GetExtension(f), ".dbf", StringComparison.OrdinalIgnoreCase) != 0) continue;
-                try {
-                    DbfTable h = DbfTable.LoadHeader(f);
-                    int fio = h.FieldIndex("FIO");
-                    if (fio >= 0) tables.Add(Path.GetFileName(f) + " (" + h.Expected + " зап." + (h.FieldIndex("NAB") >= 0 ? ", есть NAB" : "") + ")");
-                } catch (Exception) { }
-            }
-            Report.Line("Таблицы с полем FIO: " + (tables.Count == 0 ? "нет" : string.Join(", ", tables.ToArray())));
-            List<string> subs = new List<string>();
-            foreach (string d in Directory.GetDirectories(folder)) subs.Add(Path.GetFileName(d));
-            Report.Line("Вложенные папки: " + (subs.Count == 0 ? "нет" : string.Join(", ", subs.ToArray())));
-        } catch (Exception ex) {
-            Report.Line("Поиск индексов по ФИО прервался: " + ex.Message);
-        }
     }
 
     // тарифы и доп. сведения дочитаны: появляются столбцы "Т" и "Мощность", найденное ищется заново
@@ -6907,11 +6666,18 @@ public class AbonentSearch : Form {
         cancelNames = false;
         namesPercent = 0;
         namesLeft = "";
+        NamesLabel("Индекс ФИО: открываю...", false);
         System.Threading.Thread th = new System.Threading.Thread(delegate() {
+            string error = null;
             try {
                 NameIndex todo = b.OpenNames();
-                if (b.NamesReady) Post(delegate { if (b == live && mode == SearchMode.Name && DbfTable.SplitWords(queryBox.Text).Length > 0 && (current == null || current.NoIndex)) StartSearch(); });
+                if (b.NamesReady) Post(delegate {
+                    if (b != live) return;
+                    NamesLabel("Индекс ФИО: готов", false);
+                    if (mode == SearchMode.Name && DbfTable.SplitWords(queryBox.Text).Length > 0 && (current == null || current.NoIndex)) StartSearch();
+                });
                 if (todo != null) {
+                    bool update = b.NamesReady;
                     DateTime started = DateTime.Now;
                     int from = todo.Scanned, shown = -1;
                     b.BuildNames(todo, delegate(int done, int expected) {
@@ -6924,17 +6690,21 @@ public class AbonentSearch : Form {
                         Post(delegate {
                             namesPercent = pct;
                             namesLeft = left;
+                            NamesLabel((update ? "Индекс ФИО: готов, обновляется в фоне " : "Индекс ФИО: строится ") + pct + "%" + (left.Length > 0 ? ", осталось ~" + left : ""), false);
                             if (mode == SearchMode.Name && !searching && (current == null || current.NoIndex)) UpdateStatus();
                         });
                     }, !b.NamesReady);
                 }
             } catch (OperationCanceledException) {
             } catch (Exception ex) {
-                Report.Line("Свой индекс ФИО не построился: " + ex.Message);
+                error = ex.Message;
+                Report.Line("Свой индекс ФИО не построился: " + ex.GetType().Name + ": " + ex.Message);
             }
             Post(delegate {
                 buildingNames = false;
                 if (b != live) return;
+                if (error != null) NamesLabel("Индекс ФИО: ошибка - " + error, true);
+                else if (b.NamesReady) NamesLabel("Индекс ФИО: готов", false);
                 if (mode == SearchMode.Name && DbfTable.SplitWords(queryBox.Text).Length > 0 && !searching) StartSearch();
                 else UpdateStatus();
             });
@@ -6942,6 +6712,11 @@ public class AbonentSearch : Form {
         th.IsBackground = true;
         th.Priority = System.Threading.ThreadPriority.BelowNormal;
         th.Start();
+    }
+
+    void NamesLabel(string text, bool problem) {
+        namesLabel.Text = text;
+        namesLabel.ForeColor = problem ? Color.FromArgb(190, 0, 0) : Color.FromArgb(0, 70, 140);
     }
 
     static string TimeLeft(double seconds) {
