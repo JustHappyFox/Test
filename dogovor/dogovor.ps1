@@ -322,6 +322,28 @@ public class Lists {
         File = file;
         if (!System.IO.File.Exists(file)) System.IO.File.WriteAllText(file, Default, new UTF8Encoding(true));
         Load();
+        try { AddMissing(); } catch { }
+    }
+
+    // в справочник от прошлой версии дописываются списки, которых в нём ещё нет (правки пользователя не трогаются)
+    void AddMissing() {
+        StringBuilder add = new StringBuilder();
+        bool take = false;
+        foreach (string raw in Default.Replace("\r\n", "\n").Split('\n')) {
+            string s = raw.Trim();
+            if (s.StartsWith("[") && s.EndsWith("]")) take = !lists.ContainsKey(Key(s.Substring(1, s.Length - 2)));
+            if (take) add.Append(raw).Append("\r\n");
+        }
+        if (add.Length == 0) return;
+        System.IO.File.AppendAllText(File, "\r\n" + add.ToString().TrimEnd() + "\r\n", new UTF8Encoding(false));
+        Load();
+    }
+
+    // счётчики из справочника: "CE208BY S53 145.1 JA.UKVFLZ" -> модель CE208BY, корпус S53, модификация 145.1 JA.UKVFLZ
+    public List<MeterType> Meters() {
+        List<MeterType> r = new List<MeterType>();
+        foreach (string s in Get("Счётчики")) r.Add(MeterType.Parse(s));
+        return r;
     }
 
     public void Load() {
@@ -435,8 +457,20 @@ public class Lists {
 "[Цель использования]\r\n" +
 "Бытовое потребление\r\nОтопление и горячее водоснабжение\r\nБытовое потребление, отопление и горячее водоснабжение\r\n" +
 "\r\n" +
-"[Тип счётчика]\r\n" +
-"СЕ 318 R32.146.JR.UVFL\r\n" +
+"[Счётчики]\r\n" +
+"# Полное обозначение, как на счётчике. В программе выбирается по частям: модель, корпус, модификация.\r\n" +
+"# Однофазные СЕ 208\r\n" +
+"CE208BY S53 145.1 JA.UKVFLZ\r\nCE208BY S53 145.1 JR.UKVFLZ\r\nCE208BY S53 145.1 JP.UKVFLZ\r\nCE208BY S53 145.1 JPR.UKVFLZ\r\n" +
+"CE208BY S53 145.1 JR.QUKVFLZ\r\nCE208BY S53 145.1 JPR.QUKVFLZ\r\nCE208BY S53 146.1 JR.UKVFLZ\r\nCE208BY S53 146.1 JPR.UKVFLZ\r\n" +
+"CE208BY S53 146.1 JR.QUKVFLZ\r\nCE208BY S53 146.1 JPR.QUKVFLZ\r\nCE208BY S7 145.1 JPR.UKVFLZ\r\nCE208BY S7 146.1 JPR.UKVFLZ\r\n" +
+"CE208BY S7 149.1 JPR.QUKVFLZ\r\nCE208BY C1.145.2.JR.QUKVFZ\r\nCE208BY C1.146.2.JR.QUKVFZ\r\nCE208BY C1.145.2.JPR.QUKVFZ\r\n" +
+"CE208BY C1.146.2.JPR.QUKVFZ\r\nCE208BY C2 145.2.JPR.QUKVFZ\r\nCE208BY C2 146.2.JPR.QUKVFZ\r\n" +
+"# Трёхфазные СЕ 318\r\n" +
+"CE318BY R32 043 JA.UVFL\r\nCE318BY R32 043 JR.UVFL\r\nCE318BY R32 146 JA.UVFL\r\nCE318BY R32 146 JR.UVFL\r\n" +
+"CE318BY R32 146 JP.UVFL\r\nCE318BY R32 146 JPR.UVFL\r\nCE318BY S31 043 JPR.UVFL\r\nCE318BY S31 146 JA.UVFL\r\n" +
+"CE318BY S31 146 JR.UVFL\r\nCE318BY S31 146 JPR.UVFL\r\nCE318BY S31 146 JR.QUVFL\r\nCE318BY S31 146 JPR.QUVFL\r\n" +
+"CE318BY S34 146 JPR.UVFL\r\nCE318BY S34 146 JPR.QUVFL\r\nCE318BY S35 043 JPR.UVFL\r\nCE318BY S35 146 JPR.UVFL\r\n" +
+"CE318BY S35 149.JPR.QUVFL\r\nCE318BY S37 146 JPR.QUVFL\r\n" +
 "\r\n" +
 "[Место установки]\r\n" +
 "ЩУЭ на границе участка\r\nза границей земельного участка\r\nв доме\r\nв гараже\r\nна лестничной клетке\r\n" +
@@ -525,6 +559,45 @@ public class Memory {
             } else sb.Append(s[i]);
         }
         return sb.ToString();
+    }
+}
+
+// Тип счётчика по частям: модель, корпус, модификация (как в справочнике [Счётчики])
+public class MeterType {
+    public string Model = "", Case = "", Mod = "", Full = "";
+
+    public static MeterType Parse(string full) {
+        MeterType m = new MeterType();
+        m.Full = full.Trim();
+        int sp = m.Full.IndexOf(' ');
+        if (sp < 0) { m.Model = m.Full; return m; }
+        m.Model = m.Full.Substring(0, sp);
+        string rest = m.Full.Substring(sp + 1).Trim();
+        int k = rest.IndexOfAny(new char[] { ' ', '.' });
+        m.Case = k < 0 ? rest : rest.Substring(0, k);
+        m.Mod = k < 0 ? "" : rest.Substring(k + 1).Trim();
+        return m;
+    }
+
+    public static bool Same(string a, string b) { return string.Compare(a.Trim(), b.Trim(), StringComparison.OrdinalIgnoreCase) == 0; }
+
+    // СЕ 1xx, 2xx - однофазные, СЕ 3xx - трёхфазные
+    public static string Phase(string model) {
+        string m = model.Trim().ToUpper().Replace('С', 'C').Replace('Е', 'E');
+        if (!m.StartsWith("CE") || m.Length < 3) return "";
+        if (m[2] == '1' || m[2] == '2') return "1 ф";
+        if (m[2] == '3') return "3 ф";
+        return "";
+    }
+
+    // интерфейсы в модификации: P - PLC-модем, R - радиомодем ("JPR.UVFL" - оба)
+    public static string Modem(string mod) {
+        int j = mod.IndexOf('J');
+        if (j < 0) return "";
+        int e = mod.IndexOf('.', j);
+        string code = e < 0 ? mod.Substring(j + 1) : mod.Substring(j + 1, e - j - 1);
+        bool plc = code.IndexOf('P') >= 0, radio = code.IndexOf('R') >= 0;
+        return plc && radio ? "PLC и радио" : plc ? "PLC" : radio ? "радио" : "";
     }
 }
 
@@ -1090,6 +1163,10 @@ public class DogovorForm : Form {
     readonly ToolTip tip = new ToolTip();
     readonly Timer timer = new Timer();
     BoxPanel meter2;
+    readonly List<Control> cardOfLater = new List<Control>();
+    // выбор счётчика: что уже разобрано по спискам, что подставлено само
+    readonly string[] lastModel = new string[3], lastCase = new string[3], autoTip = new string[3], autoModem = new string[3];
+    const string Own = "свое";
     bool loading, showMissing, dirty;
     string autoInic = "", autoAdres = "";
 
@@ -1207,6 +1284,7 @@ public class DogovorForm : Form {
 
     public string V(string key) {
         Control c = inp[key];
+        if (c is Combo && c.Text.Trim() == Own) return "";
         if (c is Seg) return ((Seg)c).Value;
         if (c is CheckBox) return ((CheckBox)c).Checked ? "1" : "";
         if (c is DateBox) return ((DateBox)c).Text2;
@@ -1287,6 +1365,7 @@ public class DogovorForm : Form {
         c.Grid.Row(Cell.G(g1, 1), Cell.G(g2, 1));
         foreach (Grid g in new Grid[] { g1, g2 })
             foreach (Cell x in g.Cells()) if (x.Ctl != null && x.Ctl.Name.Length > 0) cardOf[x.Ctl.Name] = c;
+        foreach (Control x in cardOfLater) cardOf[x.Name] = c;
         cardOf["schetchikov"] = c;
 
         c = NewCard("Пломбы и оборудование", "", 4);
@@ -1330,7 +1409,16 @@ public class DogovorForm : Form {
         g.PadTop = 38;
         g.PadBottom = 16;
         g.RowGap = 10;
-        g.Row(F("Тип", C(p + "tip", true, false, "например СЕ 318"), 2));
+        // тип счётчика - по частям из справочника; в конце каждого списка «свое»
+        Grid parts = new Grid(new Panel(), 4);
+        parts.Host.BackColor = Color.Transparent;
+        parts.PadX = 0;
+        parts.PadBottom = 0;
+        parts.Row(F("Модель", C(p + "model", true, false, null), 1), F("Тип корпуса", C(p + "korpus", true, false, null), 1),
+            F("Модификация", C(p + "modif", true, false, null), 2));
+        g.Row(Cell.G(parts, 2));
+        foreach (Cell x in parts.Cells()) cardOfLater.Add(x.Ctl);
+        g.Row(F("Тип счётчика - так будет в договоре (собирается сам, можно поправить)", T(p + "tip", 1, null), 2));
         g.Row(F("Заводской номер", T(p + "zav", 1, null), 1), F("Дата поверки (год-квартал)", T(p + "poverka", 1, "например 2025-2"), 1));
         g.Row(F("Цель использования электроэнергии", C(p + "cel", true, false, null), 2));
         g.Row(F("Фазность", S(p + "faz", "1 ф", "3 ф"), 1), F("Пломба госповерителя", C(p + "plomba_gp", true, false, null), 1));
@@ -1530,7 +1618,7 @@ public class DogovorForm : Form {
         Items("prochie", lists.Get("Прочие условия"));
         for (int i = 1; i <= 2; i++) {
             string p = "pu" + i + "_";
-            Items(p + "tip", With(memory.Hist("тип счётчика"), lists.Get("Тип счётчика")));
+            MeterLists(i, false);
             Items(p + "cel", lists.Get("Цель использования"));
             Items(p + "plomba_gp", lists.Get("Пломба госповерителя"));
             Items(p + "mesto", With(lists.Get("Место установки"), memory.Hist("место")));
@@ -1611,6 +1699,12 @@ public class DogovorForm : Form {
                 if (site && build != null) SetV("prochie", build);
                 else if (!site && pr.Count > 0 && (V("prochie").Length == 0 || V("prochie") == build)) SetV("prochie", pr[0]);
             }
+            for (int i = 1; i <= 2; i++) {
+                string p = "pu" + i + "_";
+                if (key == p + "model") MeterPart(i, 0);
+                else if (key == p + "korpus") MeterPart(i, 1);
+                else if (key == p + "modif") MeterPart(i, 2);
+            }
             if (key == "lichny") {
                 TextBox t = (TextBox)inp["lichny"];
                 int pos = t.SelectionStart;
@@ -1630,6 +1724,79 @@ public class DogovorForm : Form {
         inp["sms_tel"].Enabled = V("sms") == "согласен(а)";
         inp["utratil_nom"].Enabled = inp["utratil_ot"].Enabled = V("utratil") == "1";
         inp["plita_prim"].Enabled = V("plita") == "да";
+    }
+
+    // ---------- выбор счётчика: модель -> корпус -> модификация ----------
+
+    List<string> Distinct(List<string> a) {
+        List<string> r = new List<string>();
+        foreach (string s in a) {
+            bool found = false;
+            foreach (string x in r) if (MeterType.Same(x, s)) found = true;
+            if (!found && s.Length > 0) r.Add(s);
+        }
+        return r;
+    }
+
+    // списки корпусов и модификаций - только для выбранной модели и корпуса; clear - очистить выбор ниже
+    void MeterLists(int i, bool clear) {
+        string p = "pu" + i + "_";
+        List<string> models = new List<string>(), cases = new List<string>(), mods = new List<string>();
+        foreach (MeterType m in lists.Meters()) {
+            models.Add(m.Model);
+            if (!MeterType.Same(m.Model, V(p + "model"))) continue;
+            cases.Add(m.Case);
+            if (MeterType.Same(m.Case, V(p + "korpus"))) mods.Add(m.Mod);
+        }
+        models = Distinct(models); cases = Distinct(cases); mods = Distinct(mods);
+        models.Add(Own); cases.Add(Own); mods.Add(Own);
+        Items(p + "model", models);
+        Items(p + "korpus", cases);
+        Items(p + "modif", mods);
+        if (clear) { SetV(p + "korpus", ""); SetV(p + "modif", ""); }
+    }
+
+    // полный тип: как в справочнике, если все части оттуда; иначе - части через пробел
+    string MeterTip(int i) {
+        string p = "pu" + i + "_", model = V(p + "model"), cs = V(p + "korpus"), mod = V(p + "modif");
+        foreach (MeterType m in lists.Meters())
+            if (MeterType.Same(m.Model, model) && MeterType.Same(m.Case, cs) && MeterType.Same(m.Mod, mod)) return m.Full;
+        List<string> parts = new List<string>();
+        foreach (string x in new string[] { model, cs, mod }) if (x.Length > 0) parts.Add(x);
+        return string.Join(" ", parts.ToArray());
+    }
+
+    void MeterPart(int i, int level) {
+        string p = "pu" + i + "_";
+        string key = p + (level == 0 ? "model" : level == 1 ? "korpus" : "modif");
+        Combo c = (Combo)inp[key];
+        bool own = c.Text.Trim() == Own;
+        // «свое» - пустое поле для своего значения; в списках ниже остаётся только «свое»
+        if (own) BeginInvoke((MethodInvoker)delegate { loading = true; try { c.Text = ""; } finally { loading = false; } c.Focus(); });
+        if (level == 0 && (own || !MeterType.Same(V(p + "model"), lastModel[i] ?? ""))) {
+            lastModel[i] = V(p + "model");
+            lastCase[i] = "";
+            MeterLists(i, true);
+            string phase = MeterType.Phase(V(p + "model"));
+            if (phase.Length > 0) SetV(p + "faz", phase);
+            // у модели один корпус - он и выбран
+            Combo k = (Combo)inp[p + "korpus"];
+            if (k.Items.Count == 2) { SetV(p + "korpus", k.Items[0].ToString()); level = 1; }
+        }
+        if (level == 1 && (own || !MeterType.Same(V(p + "korpus"), lastCase[i] ?? ""))) {
+            lastCase[i] = V(p + "korpus");
+            MeterLists(i, false);
+            SetV(p + "modif", "");
+            Combo m = (Combo)inp[p + "modif"];
+            if (m.Items.Count == 2) SetV(p + "modif", m.Items[0].ToString());
+        }
+        // тип для договора и модем по модификации (если их не правили руками)
+        string tip = MeterTip(i);
+        if (V(p + "tip") == (autoTip[i] ?? "") || V(p + "tip").Length == 0) SetV(p + "tip", tip);
+        autoTip[i] = tip;
+        string modem = MeterType.Modem(V(p + "modif"));
+        if (V(p + "modem") == (autoModem[i] ?? "") || V(p + "modem").Length == 0) SetV(p + "modem", modem);
+        autoModem[i] = modem;
     }
 
     // ---------- проверка ----------
@@ -1968,7 +2135,6 @@ public class DogovorForm : Form {
         memory.Remember("допуск", V("dopusk_kem"));
         for (int i = 1; i <= 2; i++) {
             if (i == 2 && V("schetchikov") == "1 счётчик") break;
-            memory.Remember("тип счётчика", V("pu" + i + "_tip"));
             memory.Remember("место", V("pu" + i + "_mesto"));
             memory.Remember("аппарат", V("pu" + i + "_vvod_tip"));
             memory.Remember("аппарат", V("pu" + i + "_zasch_tip"));
@@ -2040,6 +2206,10 @@ public class DogovorForm : Form {
             }
             autoInic = "";
             autoAdres = "";
+            for (int i = 1; i <= 2; i++) {
+                lastModel[i] = lastCase[i] = autoTip[i] = autoModem[i] = "";
+                MeterLists(i, false);
+            }
         } finally { loading = false; }
         showMissing = false;
         dirty = false;
@@ -2058,6 +2228,14 @@ public class DogovorForm : Form {
             foreach (KeyValuePair<string, string> kv in d) if (inp.ContainsKey(kv.Key)) SetV(kv.Key, kv.Value);
             autoInic = Initials(V("fio"));
             autoAdres = Address();
+            for (int i = 1; i <= 2; i++) {
+                string p = "pu" + i + "_";
+                lastModel[i] = V(p + "model");
+                lastCase[i] = V(p + "korpus");
+                MeterLists(i, false);
+                autoTip[i] = MeterTip(i);
+                autoModem[i] = MeterType.Modem(V(p + "modif"));
+            }
         } finally { loading = false; }
         dirty = false;
         head.Text = Title();
