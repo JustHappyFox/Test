@@ -1295,9 +1295,13 @@ public class IndexReader : IDisposable {
     // ---- заголовки: список тегов файла ----
 
     public static List<IndexTag> ReadTags(string path, Encoding enc) {
+        return ReadTags(path, enc, string.Compare(Path.GetExtension(path), ".cdx", StringComparison.OrdinalIgnoreCase) == 0);
+    }
+
+    // cdx - файл со списком тегов (.CDX); иначе - один индекс (.IDX). Для временных файлов (.TMP) пробуем оба
+    public static List<IndexTag> ReadTags(string path, Encoding enc, bool cdx) {
         List<IndexTag> tags = new List<IndexTag>();
         using (IndexReader r = new IndexReader(path)) {
-            bool cdx = string.Compare(Path.GetExtension(path), ".cdx", StringComparison.OrdinalIgnoreCase) == 0;
             if (r.Length < 1024) throw new InvalidDataException("файл слишком короткий для индекса");
             byte[] h = r.Read(0, 1024);
             if (cdx) {
@@ -1745,6 +1749,118 @@ public class LiveBase {
         }
     }
 
+    // Индекс по ФИО программы базы может лежать не в папке базы: программа базы запускается с диска D:
+    // (d:\Energ, временные файлы - d:\temp), бывают и вложенные папки рядом с базой. Ищем там .IDX/.CDX
+    // с ФИО в выражении; подходящий к этой таблице (проверяется на её записях) - подключаем для поиска по ФИО.
+    public IndexTag FindNameIndexElsewhere(string baseFolder, List<string> notes) {
+        List<string> dirs = new List<string>();
+        AddDir(dirs, baseFolder, 50);
+        try { DirectoryInfo up = Directory.GetParent(baseFolder.TrimEnd('\\', '/')); if (up != null) AddDir(dirs, up.FullName, 0); } catch (Exception) { }
+        foreach (string drive in new string[] { "C", "D", "E" }) {
+            try {
+                DriveInfo di = new DriveInfo(drive);
+                if (di.DriveType != DriveType.Fixed || !di.IsReady) continue;
+                string root = drive + ":\\";
+                AddDir(dirs, root, 0);
+                foreach (string name in new string[] { "Energ", "temp", "fpd26", "BASAFOX" }) AddDir(dirs, Path.Combine(root, name), 30);
+            } catch (Exception) { }
+        }
+        int files = 0;
+        IndexTag found = null;
+        Dictionary<string, bool> known = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+        foreach (IndexTag t in Tags) known[t.FilePath + "|" + t.Name] = true;
+        foreach (string dir in dirs) {
+            string[] list;
+            try { list = Directory.GetFiles(dir); } catch (Exception) { continue; }
+            foreach (string f in list) {
+                string ext = Path.GetExtension(f).ToLowerInvariant();
+                if (ext != ".idx" && ext != ".cdx" && ext != ".ndx" && ext != ".ntx" && ext != ".mdx" && ext != ".tmp") continue;
+                if (ext == ".tmp" && dir.TrimEnd('\\', '/').ToLowerInvariant().EndsWith("temp") == false) continue;
+                files++;
+                string upper = Path.GetFileNameWithoutExtension(f).ToUpperInvariant();
+                if (ext == ".tmp") { notes.Add(DescribeTemp(f)); continue; }
+                if (ext != ".idx" && ext != ".cdx") {
+                    if (upper.Contains("FIO") || upper.Contains("FAM")) notes.Add(f + " - индекс не FoxPro (не прочитать)");
+                    continue;
+                }
+                List<IndexTag> tags;
+                try { tags = IndexReader.ReadTags(f, Header.Enc); } catch (Exception) { continue; }
+                foreach (IndexTag t in tags) {
+                    string e = (t.Expr ?? "").ToUpperInvariant();
+                    if (!e.Contains("FIO") && !e.Contains("FAM")) continue;
+                    if (known.ContainsKey(t.FilePath + "|" + t.Name)) continue;
+                    string where = f + (t.Name != null && t.Name.Length > 0 && ext == ".cdx" ? ":" + t.Name : "") + " (" + t.Expr + ")";
+                    t.Structural = false;
+                    Prepare(t);
+                    if (t.Key == null || string.Compare(t.FirstField, "FIO", StringComparison.OrdinalIgnoreCase) != 0) { notes.Add(where + " - не от таблицы абонентов"); continue; }
+                    if (found != null) { notes.Add(where); continue; }
+                    if (Verify(t)) {
+                        List<IndexTag> l = new List<IndexTag>(Tags);
+                        l.Add(t);
+                        Tags = l;      // новый список, а не добавление: поиски в других потоках перебирают старый
+                        found = t;
+                        notes.Add(where + " - ПОДХОДИТ к таблице абонентов, поиск по ФИО идёт через него");
+                    } else notes.Add(where + " - не подходит: " + t.Check);
+                }
+            }
+        }
+        notes.Insert(0, "просмотрено индексных файлов: " + files + " в папках: " + string.Join(", ", dirs.ToArray()));
+        return found;
+    }
+
+    // Временный файл программы базы (d:\temp\*.TMP): что это - таблица (результат запроса) или индекс и по чему.
+    // Только описание для отчёта, без данных: размер, поля, выражение индекса.
+    string DescribeTemp(string f) {
+        string head = f;
+        try {
+            FileInfo fi = new FileInfo(f);
+            head += " (" + (fi.Length >= 1048576 ? (fi.Length / 1048576.0).ToString("0.0") + " МБ" : (fi.Length / 1024) + " КБ")
+                + ", изменён " + fi.LastWriteTime.ToString("dd.MM HH:mm") + ")";
+            byte[] h = new byte[32];
+            using (FileStream fs = new FileStream(f, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+                if (DbfTable.ReadUpTo(fs, h, 32) < 32) return head + ": пустой";
+            int count = BitConverter.ToInt32(h, 4), hl = BitConverter.ToUInt16(h, 8), rl = BitConverter.ToUInt16(h, 10);
+            if (hl >= 65 && rl >= 2 && count >= 0 && (long)hl + (long)count * rl <= fi.Length + 1 && fi.Length - hl - (long)count * rl <= rl + 2) {
+                DbfTable t = DbfTable.LoadHeader(f);
+                List<string> names = new List<string>();
+                foreach (DbfField fld in t.Fields) names.Add(fld.Name);
+                return head + ": таблица, записей " + count + ", поля " + string.Join(", ", names.ToArray());
+            }
+            foreach (bool cdx in new bool[] { true, false }) {
+                try {
+                    List<string> exprs = new List<string>();
+                    foreach (IndexTag t in IndexReader.ReadTags(f, Header.Enc, cdx))
+                        if (t.Expr.Length > 0 && t.Expr.Length < 200 && FoxExprLooksValid(t.Expr)) exprs.Add((cdx ? t.Name + ": " : "") + t.Expr);
+                    if (exprs.Count > 0) return head + ": индекс" + (cdx ? " (как .CDX)" : " (как .IDX)") + " - " + string.Join("; ", exprs.ToArray());
+                } catch (Exception) { }
+            }
+            return head + ": не таблица и не индекс";
+        } catch (Exception ex) {
+            return head + ": не открылся - " + ex.Message;
+        }
+    }
+
+    // выражение индекса похоже на настоящее: печатные символы и хотя бы одна буква
+    static bool FoxExprLooksValid(string e) {
+        bool letter = false;
+        foreach (char c in e) {
+            if (c < ' ' || c == '\uFFFD') return false;
+            if (char.IsLetter(c)) letter = true;
+        }
+        return letter;
+    }
+
+    static void AddDir(List<string> dirs, string dir, int subdirs) {
+        try {
+            if (!Directory.Exists(dir)) return;
+            foreach (string d in dirs) if (string.Compare(d.TrimEnd('\\', '/'), dir.TrimEnd('\\', '/'), StringComparison.OrdinalIgnoreCase) == 0) return;
+            dirs.Add(dir);
+            if (subdirs <= 0) return;
+            string[] subs = Directory.GetDirectories(dir);
+            for (int i = 0; i < subs.Length && i < subdirs; i++) AddDir(dirs, subs[i], 0);
+        } catch (Exception) { }
+    }
+
     void Prepare(IndexTag t) {
         try {
             t.Key = FoxExpr.Parse(t.Expr, Header);
@@ -2187,17 +2303,23 @@ public class LiveBase {
     // Ошибка чтения бывает, если программа базы как раз дописывает индекс - тогда пробуем ещё раз.
     // partial - частичное совпадение (начало номера, похожие слова); иначе - только точное
     public SearchResult Search(string text, SearchMode mode, Dictionary<string, bool> selsovety, int limit, bool partial) {
-        SearchResult r = SearchOnce(text, mode, selsovety, limit, partial);
+        SearchResult r = SearchOnce(text, mode, selsovety, limit, partial, false);
         if (r.Error != null) {
             System.Threading.Thread.Sleep(300);
-            SearchResult again = SearchOnce(text, mode, selsovety, limit, partial);
+            SearchResult again = SearchOnce(text, mode, selsovety, limit, partial, false);
             again.How += "; (со второй попытки, первая: " + r.Error + ")";
             return again;
+        }
+        // по индексу ФИО целиком не нашлось - может, в конце адрес ("Иванов Боровляны")
+        if (mode == SearchMode.Name && r.Rows.Count == 0 && r.Hidden == 0 && r.NameText == null && !r.NoIndex && TagFor("FIO") != null) {
+            SearchResult a = SearchOnce(text, mode, selsovety, limit, partial, true);
+            if (a.Error == null && (a.Rows.Count > 0 || a.Hidden > 0 || a.NameText != null)) return a;
         }
         return r;
     }
 
-    SearchResult SearchOnce(string text, SearchMode mode, Dictionary<string, bool> selsovety, int limit, bool partial) {
+    // withAddress - ФИО с адресом ("Иванов Боровляны"), даже если есть индекс по ФИО
+    SearchResult SearchOnce(string text, SearchMode mode, Dictionary<string, bool> selsovety, int limit, bool partial, bool withAddress) {
         DateTime started = DateTime.Now;
         SearchResult res = new SearchResult();
         res.Text = text;
@@ -2210,8 +2332,11 @@ public class LiveBase {
                 case SearchMode.Account: ok = SeekAccount(text, s, res, partial); break;
                 case SearchMode.Meter: ok = SeekMeter(text, s, res, partial); break;
                 case SearchMode.Name:
-                    ok = SeekName(text, s, res, partial);
-                    if (!ok && res.Note.Length == 0) ok = SeekNameByAddress(text, s, res);
+                    if (withAddress) ok = SeekNameByAddress(text, s, res, partial);
+                    else {
+                        ok = SeekName(text, s, res, partial);
+                        if (!ok && res.Note.Length == 0) ok = SeekNameByAddress(text, s, res, partial);
+                    }
                     break;
                 default: ok = partial || Dir == null ? SeekAddress(text, s, res) : SeekAddressExact(text, s, res); break;
             }
@@ -2813,8 +2938,8 @@ public class LiveBase {
     // ФИО с адресом: "Иванов Боровляны", "Иванов Иван, Боровляны Заводская 18". Индекса по ФИО в базе нет,
     // поэтому по индексу адреса берём абонентов этого места и среди них ищем ФИО (вся таблица не читается).
     // Адрес - после запятой или последние слова, которые есть в справочнике улиц и населённых пунктов.
-    bool SeekNameByAddress(string text, Seeker s, SearchResult res) {
-        if (Dir == null || TagFor("UL", true) == null) return false;
+    bool SeekNameByAddress(string text, Seeker s, SearchResult res, bool partial) {
+        if (Dir == null) return false;
         string name = null, addr = null;
         int comma = text.IndexOf(',');
         if (comma > 0) {
@@ -2831,10 +2956,19 @@ public class LiveBase {
             }
         }
         if (addr == null || name == null || name.Length == 0) return false;
-        if (!SeekAddressExact(addr, s, res)) return false;
+        if (TagFor("FIO") != null) {
+            // есть индекс по ФИО: ищем ФИО по нему, адрес сверяется в найденных
+            AddressMatch m = Dir.Match(addr);
+            res.Address = m;
+            if (m.Problem != null) { res.Note = m.Problem; return false; }
+            if (!SeekName(name, s, res, partial)) return false;
+            res.How = "ФИО по индексу, адрес сверяется";
+        } else {
+            if (!SeekAddressExact(addr, s, res)) return false;
+            res.How = "ФИО среди абонентов по адресу";
+        }
         res.NameText = name;
         res.AddressText = addr;
-        res.How = "ФИО среди абонентов по адресу";
         return true;
     }
 
@@ -6075,7 +6209,19 @@ public class AbonentSearch : Form {
                 Report.Line("Чем ищется: лицевой - " + TagName(b, "NAB", false) + ", Л/С ЕРИП - " + TagName(b, "LS_ERIP", false)
                     + ", счётчик - " + TagName(b, "NCH", false) + ", снятый счётчик - " + TagName(b, "NSC", false)
                     + ", ФИО - " + TagName(b, "FIO", false) + ", адрес - " + TagName(b, "UL", true));
-                if (b.Header.FieldIndex("FIO") >= 0 && b.TagFor("FIO") == null) ReportNameIndexes(dirFolder, b.Header.Enc);
+                if (b.Header.FieldIndex("FIO") >= 0 && b.TagFor("FIO") == null) {
+                    List<string> notes = new List<string>();
+                    IndexTag fio = null;
+                    try { fio = b.FindNameIndexElsewhere(dirFolder, notes); }
+                    catch (Exception ex) { notes.Add("поиск прервался: " + ex.Message); }
+                    Report.Line("Индекс по ФИО вне таблицы абонентов: " + (fio == null ? "не найден" : "найден " + fio.FilePath));
+                    foreach (string n in notes) Report.Line("    " + n);
+                    ReportNameIndexes(dirFolder, b.Header.Enc);
+                    if (fio != null) {
+                        string where = fio.FilePath;
+                        Post(delegate { if (b == live) { status.Text = "Найден индекс по ФИО программы базы (" + where + ") - теперь по ФИО ищется сразу."; } });
+                    }
+                }
                 Report.Line("--- поиски (сами слова не записываются) ---");
             } catch (Exception ex) {
                 Report.Line("Проверка индексов прервалась: " + ex.Message);
