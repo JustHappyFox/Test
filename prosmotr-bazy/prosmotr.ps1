@@ -5846,6 +5846,9 @@ public class AbonentSearch : Form {
     bool scanning;
     bool loadingNames;          // идёт первое чтение ФИО всех абонентов (для поиска по ФИО)
     bool namesStopped;          // чтение ФИО остановили кнопкой - само больше не начинаем
+    volatile bool cancelNames;
+    int namesPercent;
+    string namesLeft = "";
     volatile bool cancelScan;
     bool cardWhenDone;                   // Enter: нашёлся один - сразу карточка
     Dictionary<string, bool> selected;   // выбранные сельсоветы (null - все)
@@ -5875,9 +5878,17 @@ public class AbonentSearch : Form {
     readonly Timer logTimer = new Timer();   // поиск пишем в отчёт, когда ввод успокоился
 
     public static void Run(string dir) {
+        Run(dir, null);
+    }
+
+    // launch - как скрипт подготовил программу (готовая из кэша или собрана, за сколько секунд) - для отчёта
+    public static void Run(string dir, string launch) {
+        launchInfo = launch;
         Application.EnableVisualStyles();
         Application.Run(new AbonentSearch(Path.Combine(dir, "poisk.txt"), Path.Combine(dir, "nastroiki.txt")));
     }
+
+    static string launchInfo;
 
     public AbonentSearch(string settingsFile, string viewerSettings) {
         this.settingsFile = settingsFile;
@@ -5974,8 +5985,10 @@ public class AbonentSearch : Form {
         scanButton.Width = 150;
         scanButton.Visible = false;
         scanButton.Click += delegate {
-            if (scanning) { cancelScan = true; if (loadingNames) namesStopped = true; }
-            else { namesStopped = false; StartScan(); }
+            if (scanning) cancelScan = true;
+            else if (mode == SearchMode.Name && loadingNames) { cancelNames = true; namesStopped = true; }
+            else if (mode == SearchMode.Name && live != null && live.NamesNeeded) { namesStopped = false; StartNames(); }
+            else StartScan();
         };
         bottom.Controls.Add(scanButton);
 
@@ -5989,7 +6002,7 @@ public class AbonentSearch : Form {
         Controls.Add(top);
 
         Shown += delegate { BringUp(); Start(); };
-        FormClosing += delegate { cancelScan = true; };
+        FormClosing += delegate { cancelScan = true; cancelNames = true; };
     }
 
     [System.Runtime.InteropServices.DllImport("user32.dll")]
@@ -6116,6 +6129,7 @@ public class AbonentSearch : Form {
 
     void Start() {
         Report.Start(Path.Combine(Dir, "otchet.txt"));
+        if (launchInfo != null) Report.Line("Подготовка программы: " + launchInfo);
         // выборка абонентов прошлой версии больше не нужна (в ней были данные абонентов)
         foreach (string old in new string[] { "kesh_abonenty.dbf", "kesh_abonenty.txt", "kesh_abonenty.dbf.tmp" }) {
             try { if (File.Exists(Path.Combine(Dir, old))) File.Delete(Path.Combine(Dir, old)); } catch (Exception) { }
@@ -6192,12 +6206,7 @@ public class AbonentSearch : Form {
                 DateTime t1 = DateTime.Now;
                 b.Dir = PrepareDirectory(b, dirFolder, table, dirTable, dirKey, links);
                 double dirs = (DateTime.Now - t1).TotalSeconds;
-                PostStatus("Читаю тарифы и доп. сведения...");
-                DateTime t2 = DateTime.Now;
-                try { b.Extra = ExtraInfo.Open(dirFolder); }
-                catch (Exception ex) { Report.Line("Тарифы и доп. сведения не прочитались: " + ex.Message); }
-                Report.Line("Время открытия: таблица и индексы - " + opened.ToString("0.0") + " с, справочники - "
-                    + dirs.ToString("0.0") + " с, тарифы и доп. сведения - " + (DateTime.Now - t2).TotalSeconds.ToString("0.0") + " с");
+                Report.Line("Время открытия: таблица и индексы - " + opened.ToString("0.0") + " с, справочники - " + dirs.ToString("0.0") + " с");
                 sel = LoadSelection(b);
             } catch (Exception ex) {
                 error = ex.Message;
@@ -6206,6 +6215,12 @@ public class AbonentSearch : Form {
             double seconds = (DateTime.Now - t0).TotalSeconds;
             Post(delegate { AfterOpen(b, sel, error, seconds); });
             if (error != null) return;
+            // тарифы (T1, T2...) и доп. сведения - уже когда окно работает: искать можно сразу
+            DateTime t2 = DateTime.Now;
+            try { b.Extra = ExtraInfo.Open(dirFolder); }
+            catch (Exception ex) { Report.Line("Тарифы и доп. сведения не прочитались: " + ex.Message); }
+            Report.Line("Тарифы и доп. сведения прочитаны в фоне за " + (DateTime.Now - t2).TotalSeconds.ToString("0.0") + " с");
+            Post(delegate { ExtraReady(b); });
             // заранее проверяем индексы по нужным полям - итог в отчёт
             try {
                 b.VerifyMain();
@@ -6313,6 +6328,14 @@ public class AbonentSearch : Form {
         else UpdateStatus();
     }
 
+    // тарифы и доп. сведения дочитаны: появляются столбцы "Т" и "Мощность", найденное ищется заново
+    void ExtraReady(LiveBase b) {
+        if (b != live || b.Extra == null) return;
+        BuildColumns();
+        if (current != null && DbfTable.SplitWords(queryBox.Text).Length > 0) StartSearch();
+        else Show(current);
+    }
+
     void SetBusy(bool busy, string text) {
         foreach (Control c in bottom.Controls) if (c is Button && c != scanButton) c.Enabled = !busy;
         Cursor = busy ? Cursors.AppStarting : Cursors.Default;
@@ -6342,8 +6365,10 @@ public class AbonentSearch : Form {
     internal void StartSearch() {
         timer.Stop();
         if (live == null) return;
-        if (scanning) { if (!loadingNames) cancelScan = true; again = true; return; }
+        if (scanning) { cancelScan = true; again = true; return; }
         if (searching) { again = true; return; }
+        // ФИО ещё читаются - по ФИО ищем, когда дочитаются (остальные поиски работают как обычно)
+        if (mode == SearchMode.Name && loadingNames) { Show(null); return; }
         string text = queryBox.Text;
         if (DbfTable.SplitWords(text).Length == 0) { Show(null); return; }
         if (!cardWhenDone && !EnoughTyped(text, mode)) { Show(null); status.Text = "Впишите дальше или нажмите Enter."; return; }
@@ -6381,7 +6406,7 @@ public class AbonentSearch : Form {
         if (again || r.Text != queryBox.Text || r.Mode != mode || r.Partial != partialBox.Checked) { again = false; StartSearch(); return; }
         Show(r);
         // индекса по ФИО нет - сразу читаем ФИО всех абонентов (один раз за запуск), потом ищем в памяти
-        if (r.NoIndex && r.Mode == SearchMode.Name && !scanning && !namesStopped && b.NamesNeeded) { StartScan(); return; }
+        if (r.NoIndex && r.Mode == SearchMode.Name && !namesStopped && b.NamesNeeded) { StartNames(); return; }
         if (cardWhenDone) {
             cardWhenDone = false;
             LogSearch();
@@ -6397,33 +6422,16 @@ public class AbonentSearch : Form {
         if (DbfTable.SplitWords(text).Length == 0) return;
         scanning = true;
         cancelScan = false;
+        scanButton.Text = "Остановить перебор";
         SearchMode m = mode;
         Dictionary<string, bool> ss = selected;
         LiveBase b = live;
         bool partial = partialBox.Checked;
-        bool names = m == SearchMode.Name && b.NamesNeeded;
-        loadingNames = names;
-        scanButton.Text = names ? "Остановить чтение ФИО" : "Остановить перебор";
-        scanButton.Visible = true;
-        if (names) status.Text = "Первый поиск по ФИО: читаю ФИО всех абонентов из базы...";
         System.Threading.Thread th = new System.Threading.Thread(delegate() {
             SearchResult r = null;
             DateTime started = DateTime.Now;
             int shown = -1;
             try {
-                if (names) {
-                    b.LoadNames(delegate(int done, int expected) {
-                        if (cancelScan) throw new OperationCanceledException();
-                        int pct = (int)(done * 100L / Math.Max(expected, 1));
-                        if (pct == shown) return;
-                        shown = pct;
-                        double spent = (DateTime.Now - started).TotalSeconds;
-                        string left = pct > 2 ? ", осталось примерно " + TimeLeft(spent * (100 - pct) / pct) : "";
-                        PostStatus("Первый поиск по ФИО: читаю ФИО всех абонентов из базы - " + pct + "%" + left
-                            + ". Это один раз за запуск программы, дальше по ФИО ищется сразу.");
-                    });
-                    r = b.Search(text, m, ss, partial);
-                } else
                 r = b.Scan(text, m, ss, delegate(int done, int expected) {
                     if (cancelScan) throw new OperationCanceledException();
                     int pct = (int)(done * 100L / Math.Max(expected, 1));
@@ -6448,18 +6456,52 @@ public class AbonentSearch : Form {
     }
 
     void ScanDone(SearchResult r, LiveBase b) {
-        bool names = loadingNames;
         scanning = false;
-        loadingNames = false;
         scanButton.Text = "Искать перебором";
         if (b != live) return;
-        if (again || (names && r != null && (r.Text != queryBox.Text || r.Mode != mode || r.Partial != partialBox.Checked))) {
-            again = false;
-            StartSearch();
-            return;
-        }
+        if (again) { again = false; StartSearch(); return; }
         if (r == null) { UpdateStatus(); return; }
         Show(r);
+    }
+
+    // Индекса по ФИО в базе нет: ФИО всех абонентов читаются один раз (в фоне - остальные поиски работают),
+    // потом по ФИО ищется сразу. Ход - внизу, пока выбран поиск по ФИО.
+    void StartNames() {
+        if (live == null || loadingNames || live.NamesReady) return;
+        loadingNames = true;
+        cancelNames = false;
+        namesPercent = 0;
+        namesLeft = "";
+        LiveBase b = live;
+        Show(null);
+        System.Threading.Thread th = new System.Threading.Thread(delegate() {
+            DateTime started = DateTime.Now;
+            int shown = -1;
+            string error = null;
+            try {
+                b.LoadNames(delegate(int done, int expected) {
+                    if (cancelNames || b != live) throw new OperationCanceledException();
+                    int pct = (int)(done * 100L / Math.Max(expected, 1));
+                    if (pct == shown) return;
+                    shown = pct;
+                    double spent = (DateTime.Now - started).TotalSeconds;
+                    string left = pct > 2 ? TimeLeft(spent * (100 - pct) / pct) : "";
+                    Post(delegate { namesPercent = pct; namesLeft = left; if (mode == SearchMode.Name && !searching) UpdateStatus(); });
+                });
+            } catch (OperationCanceledException) {
+            } catch (Exception ex) {
+                error = ex.Message;
+                Report.Line("ФИО не прочитались: " + ex.Message);
+            }
+            Post(delegate {
+                loadingNames = false;
+                if (b != live) return;
+                if (error != null && mode == SearchMode.Name) { Show(null); status.Text = "ФИО не прочитались: " + error; return; }
+                if (mode == SearchMode.Name) StartSearch(); else UpdateStatus();
+            });
+        });
+        th.IsBackground = true;
+        th.Start();
     }
 
     static string TimeLeft(double seconds) {
@@ -6471,8 +6513,9 @@ public class AbonentSearch : Form {
         grid.RowCount = 0;
         grid.RowCount = r == null ? 0 : r.Rows.Count;
         grid.Invalidate();
-        scanButton.Visible = scanning || (r != null && r.NoIndex);
-        if (!scanning) scanButton.Text = r != null && r.Mode == SearchMode.Name && live.NamesNeeded ? "Прочитать ФИО из базы" : "Искать перебором";
+        bool names = mode == SearchMode.Name && live != null && live.NamesNeeded && !live.NamesReady;
+        scanButton.Visible = scanning || (r != null && r.NoIndex) || (names && (loadingNames || namesStopped));
+        if (!scanning) scanButton.Text = names ? (loadingNames ? "Остановить чтение ФИО" : "Прочитать ФИО из базы") : "Искать перебором";
         logTimer.Stop();
         if (r != null) logTimer.Start();
         UpdateStatus();
@@ -6487,12 +6530,17 @@ public class AbonentSearch : Form {
         // как понят адрес: "аг. Боровляны -> Заводская ул. -> дом 18"
         if (r != null && r.Address != null && r.Address.Said.Length > 0) took = "   Искал: " + r.Address.Said + "." + took;
         string tip = r != null && !r.Partial && r.Mode != SearchMode.Address ? " Нужны и похожие номера - поставьте галочку \"Частичное совпадение\"." : "";
-        if (r == null)
+        if (r == null && mode == SearchMode.Name && loadingNames)
+            status.Text = "Поиск по ФИО: индекса по ФИО в базе нет, поэтому один раз читаю ФИО всех абонентов - " + namesPercent + "%"
+                + (namesLeft.Length > 0 ? ", осталось примерно " + namesLeft : "") + ". Другие поиски (лицевой, адрес, счётчик) работают и сейчас.";
+        else if (r == null && mode == SearchMode.Name && namesStopped && live.NamesNeeded && !live.NamesReady)
+            status.Text = "Чтение ФИО остановлено. Без него по ФИО не найти - индекса по ФИО в базе нет. Продолжить - кнопка справа.   " + where;
+        else if (r == null)
             status.Text = "Впишите " + Prompts[(int)mode] + ".   " + where;
         else if (r.Error != null)
             status.Text = "Ошибка при поиске: " + r.Error + "   Нажмите \"Отчёт\" и пришлите его.";
         else if (r.NoIndex && r.Mode == SearchMode.Name && live.NamesNeeded)
-            status.Text = "Индекса по ФИО в базе нет. Чтобы искать по ФИО, программа один раз читает ФИО всех абонентов из базы (это может занять минуту-другую) - кнопка справа.";
+            status.Text = "Индекса по ФИО в базе нет. Чтобы искать по ФИО, программа один раз читает ФИО всех абонентов из базы (по сети это несколько минут) - кнопка справа.";
         else if (r.NoIndex)
             status.Text = "Для поиска по полю \"" + Prompts[(int)r.Mode] + "\" в базе нет подходящего индекса. Можно искать перебором всей базы - это долго (минуты). Кнопка справа.";
         else if (r.Note.Length > 0 && r.Rows.Count == 0)
@@ -7275,10 +7323,10 @@ public class BatchSearch : Form {
     }
 }
 '@
-
-# Программа собирается из этого скрипта один раз и сохраняется готовой (файл poisk_*.dll на этом компьютере,
-# в папке профиля пользователя) - следующие запуски не тратят время на сборку.
+# Программа собирается из этого скрипта ОДИН раз после обновления и сохраняется готовой (файл poisk_*.dll
+# в папке профиля пользователя). Следующие запуски берут готовую - без сборки, за секунды.
 # Изменился скрипт - у файла другое имя, программа соберётся заново.
+$t0 = Get-Date
 $stamp = '' + $code.Length
 try {
     $sha = New-Object System.Security.Cryptography.SHA1CryptoServiceProvider
@@ -7289,14 +7337,19 @@ try {
 $name = "poisk_$stamp.dll"
 $cacheDirs = @()
 if ($env:LOCALAPPDATA) { $cacheDirs += (Join-Path $env:LOCALAPPDATA 'poisk-abonenta') }
-if ($env:TEMP) { $cacheDirs += (Join-Path $env:TEMP 'poisk-abonenta') }
+if ($env:PUBLIC) { $cacheDirs += (Join-Path $env:PUBLIC 'poisk-abonenta') }
+$cacheDirs += (Join-Path $here 'kesh-programmy')
 
 function Test-Ready { return ($null -ne ('AbonentSearch' -as [type])) }
 
+$launch = $null
 foreach ($d in $cacheDirs) {
     $dll = Join-Path $d $name
     if ((-not (Test-Ready)) -and (Test-Path $dll)) {
-        try { [void][Reflection.Assembly]::LoadFrom($dll) } catch { }
+        try {
+            [void][Reflection.Assembly]::LoadFrom($dll)
+            if (Test-Ready) { $launch = 'готовая программа ' + $dll + ', ' + ((Get-Date) - $t0).TotalSeconds.ToString('0.0') + ' с' }
+        } catch { }
     }
 }
 
@@ -7304,7 +7357,78 @@ foreach ($d in $cacheDirs) {
 $quiet = @{}
 try { if ((Get-Command Add-Type).Parameters.ContainsKey('IgnoreWarnings')) { $quiet['IgnoreWarnings'] = $true } } catch { }
 
+# Окошко на время сборки: иначе несколько минут ничего не видно
+$splash = $null
+$splashText = $null
+function Show-Splash {
+    try {
+        $script:splash = New-Object System.Windows.Forms.Form
+        $splash.Text = 'Поиск абонента'
+        $splash.FormBorderStyle = 'FixedDialog'
+        $splash.ControlBox = $false
+        $splash.StartPosition = 'CenterScreen'
+        $splash.ClientSize = New-Object System.Drawing.Size(460, 110)
+        $splash.TopMost = $true
+        $script:splashText = New-Object System.Windows.Forms.Label
+        $splashText.Dock = 'Fill'
+        $splashText.TextAlign = 'MiddleCenter'
+        $splashText.Font = New-Object System.Drawing.Font('Microsoft Sans Serif', 10)
+        $splash.Controls.Add($splashText)
+        Update-Splash 0
+        $splash.Show()
+        [System.Windows.Forms.Application]::DoEvents()
+    } catch { $script:splash = $null }
+}
+function Update-Splash($seconds) {
+    if ($splashText -eq $null) { return }
+    $splashText.Text = "Программа обновилась - Windows собирает её.`nЭто только один раз после обновления.`n`nПрошло: " + [int]$seconds + ' с'
+}
+
+# Сборка. Временные файлы компилятора - в своей папке: папку TEMP Windows компилятор на некоторых
+# компьютерах открыть не может ("cannot open ...\Temp\RES....tmp for writing").
+# Собираем в фоне, а окошко тем временем показывает, сколько прошло.
+function Build-Program($dll, $tmp) {
+    if (Test-Path $tmp) { Get-ChildItem -Path $tmp -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue }
+    else { [void](New-Item -ItemType Directory -Path $tmp) }
+    $oldTmp = $env:TMP
+    $oldTemp = $env:TEMP
+    $env:TMP = $tmp
+    $env:TEMP = $tmp
+    $ps = $null
+    try {
+        $ps = [PowerShell]::Create()
+        [void]$ps.AddScript({
+            param($code, $refs, $dll, $quiet)
+            $ErrorActionPreference = 'Stop'
+            if ($dll) { Add-Type @quiet -ReferencedAssemblies $refs -TypeDefinition $code -OutputAssembly $dll -OutputType Library }
+            else { Add-Type @quiet -ReferencedAssemblies $refs -TypeDefinition $code }
+        }).AddArgument($code).AddArgument($refs).AddArgument($dll).AddArgument($quiet)
+        $h = $ps.BeginInvoke()
+        while (-not $h.IsCompleted) {
+            if ($splash -ne $null) {
+                Update-Splash ((Get-Date) - $t0).TotalSeconds
+                [System.Windows.Forms.Application]::DoEvents()
+            }
+            Start-Sleep -Milliseconds 200
+        }
+        try { [void]$ps.EndInvoke($h) } catch {
+            $ex = $_.Exception
+            if ($ex.InnerException -ne $null) { $ex = $ex.InnerException }
+            throw $ex
+        }
+        if ($ps.Streams.Error.Count -gt 0) { throw $ps.Streams.Error[0].Exception }
+    } finally {
+        if ($ps -ne $null) { $ps.Dispose() }
+        $env:TMP = $oldTmp
+        $env:TEMP = $oldTemp
+        Get-ChildItem -Path $tmp -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    if ($dll -and -not (Test-Ready)) { [void][Reflection.Assembly]::LoadFrom($dll) }
+}
+
+$errors = @()
 if (-not (Test-Ready)) {
+    Show-Splash
     foreach ($d in $cacheDirs) {
         try {
             if (-not (Test-Path $d)) { [void](New-Item -ItemType Directory -Path $d) }
@@ -7312,42 +7436,34 @@ if (-not (Test-Ready)) {
             Get-ChildItem -Path $d -Filter 'poisk_*.dll' -ErrorAction SilentlyContinue |
                 Where-Object { $_.Name -ne $name } | Remove-Item -ErrorAction SilentlyContinue
             $dll = Join-Path $d $name
-            Add-Type @quiet -ReferencedAssemblies $refs -TypeDefinition $code -OutputAssembly $dll -OutputType Library
-            if (-not (Test-Ready)) { [void][Reflection.Assembly]::LoadFrom($dll) }
-            if (Test-Ready) { break }
-        } catch { }
-    }
-}
-
-# Сохранить не получилось - собираем как раньше, только в памяти.
-# Если Windows не может записать временные файлы в папку TEMP (антивирус, переполненная папка), пробуем другие папки.
-if (-not (Test-Ready)) {
-    $tempDirs = @((Join-Path $here 'tmp'), 'D:\temp')
-    if ($env:PUBLIC) { $tempDirs += (Join-Path $env:PUBLIC 'prosmotr-tmp') }
-    $attempt = 0
-    while ($true) {
-        try {
-            Add-Type @quiet -ReferencedAssemblies $refs -TypeDefinition $code
-            break
+            # файл есть, но не загрузился (прошлая сборка прервалась) - собираем заново
+            if (Test-Path $dll) { Remove-Item $dll -Force -ErrorAction SilentlyContinue }
+            Build-Program $dll (Join-Path $d 'tmp')
+            if (Test-Ready) { $launch = 'собрана и сохранена (' + $dll + ') за ' + ((Get-Date) - $t0).TotalSeconds.ToString('0') + ' с'; break }
         } catch {
-            if ($attempt -ge $tempDirs.Count) {
-                [void][System.Windows.Forms.MessageBox]::Show("Не удалось подготовить программу к запуску:`n`n$_`n`nПопробуйте запустить ещё раз.", 'Поиск абонента - ошибка')
-                exit
-            }
-            $dir = $tempDirs[$attempt]
-            $attempt++
-            try {
-                if (-not (Test-Path $dir)) { [void](New-Item -ItemType Directory -Path $dir) }
-                $env:TMP = $dir
-                $env:TEMP = $dir
-            } catch { }
-            Start-Sleep -Seconds 1
+            $errors += "$d : $_"
+            if ($dll -and (Test-Path $dll)) { Remove-Item $dll -Force -ErrorAction SilentlyContinue }
+            # ошибка в самом коде - другая папка не поможет
+            if ("$_" -match 'error CS\d+') { break }
         }
     }
+    # сохранить не получилось нигде - собираем в памяти (временные файлы - рядом со скриптом)
+    if ((-not (Test-Ready)) -and -not ("$errors" -match 'error CS\d+')) {
+        try {
+            Build-Program $null (Join-Path $here 'tmp')
+            if (Test-Ready) { $launch = 'собрана в памяти (сохранить не удалось) за ' + ((Get-Date) - $t0).TotalSeconds.ToString('0') + ' с; ' + ($errors -join '; ') }
+        } catch { $errors += "в памяти: $_" }
+    }
+    if ($splash -ne $null) { $splash.Close(); $splash.Dispose() }
+}
+
+if (-not (Test-Ready)) {
+    [void][System.Windows.Forms.MessageBox]::Show("Не удалось подготовить программу к запуску:`n`n" + ($errors -join "`n`n") + "`n`nСфотографируйте это окно и пришлите.", 'Поиск абонента - ошибка')
+    exit
 }
 
 try {
-    [AbonentSearch]::Run($here)
+    [AbonentSearch]::Run($here, $launch)
 } catch {
     [void][System.Windows.Forms.MessageBox]::Show("$_", 'Поиск абонента - ошибка')
 }
