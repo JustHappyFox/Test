@@ -484,9 +484,15 @@ public class Lists {
 "[Пломба госповерителя]\r\n" +
 "леска\r\nпроволока\r\n" +
 "\r\n" +
-"[Аппарат]\r\n" +
-"# вводной аппарат и аппарат защиты\r\n" +
-"ВА\r\nВыключатель автоматический\r\nВыключатель нагрузки\r\nРубильник\r\nОтсутствует\r\n";
+"[Вводной аппарат]\r\n" +
+"отсутствует\r\nВА\r\nВН\r\n" +
+"\r\n" +
+"[Аппарат защиты]\r\n" +
+"ВА\r\nВН\r\nдиф. автомат\r\nУЗО\r\n" +
+"\r\n" +
+"[Ток аппарата, А]\r\n" +
+"# номиналы автоматов\r\n" +
+"6\r\n10\r\n16\r\n20\r\n25\r\n32\r\n40\r\n50\r\n63\r\n80\r\n100\r\n120\r\n";
 }
 
 // Запомненные значения (последний подписант, кто оформил и т.п.) и ранее введённые варианты для подсказок
@@ -1425,8 +1431,8 @@ public class DogovorForm : Form {
         g.Row(F("Место установки", C(p + "mesto", true, false, null), 2));
         g.Row(F("Принадлежность", C(p + "prinadl", true, false, null), 1), F("Тип модема", C(p + "modem", true, false, null), 1));
         g.Row(F("Включение в АСКУЭ", S(p + "askue", "да", "нет"), 1), F("Показания, кВт·ч", T(p + "pokaz", 1, null), 1));
-        g.Row(F("Вводной аппарат: тип", C(p + "vvod_tip", true, false, null), 1), F("ток, А", T(p + "vvod_i", 1, null), 1));
-        g.Row(F("Аппарат защиты: тип", C(p + "zasch_tip", true, false, null), 1), F("ток, А", T(p + "zasch_i", 1, null), 1));
+        g.Row(F("Вводной аппарат: тип", C(p + "vvod_tip", true, false, null), 1), F("ток, А", C(p + "vvod_i", true, false, null), 1));
+        g.Row(F("Аппарат защиты: тип", C(p + "zasch_tip", true, false, null), 1), F("ток, А", C(p + "zasch_i", true, false, null), 1));
         g.Row(F("Модуль отображения (сплит-счётчик), зав. №", T(p + "modul", 1, "нет модуля - прочерк"), 2));
         g.Row(F("Тариф", S(p + "tarif", Tarifs), 2));
         g.Row(F("Тарифная группа", C(p + "gruppa", true, true, null), 2));
@@ -1624,11 +1630,26 @@ public class DogovorForm : Form {
             Items(p + "mesto", With(lists.Get("Место установки"), memory.Hist("место")));
             Items(p + "prinadl", lists.Get("Принадлежность"));
             Items(p + "modem", lists.Get("Тип модема"));
-            Items(p + "vvod_tip", With(lists.Get("Аппарат"), memory.Hist("аппарат")));
-            Items(p + "zasch_tip", With(lists.Get("Аппарат"), memory.Hist("аппарат")));
+            Items(p + "vvod_tip", WithOwn(lists.Get("Вводной аппарат")));
+            Items(p + "zasch_tip", WithOwn(lists.Get("Аппарат защиты")));
+            Items(p + "vvod_i", WithOwn(lists.Get("Ток аппарата, А")));
+            Items(p + "zasch_i", WithOwn(lists.Get("Ток аппарата, А")));
             Items(p + "gruppa", lists.Get("Тарифная группа"));
         }
     }
+
+    static List<string> WithOwn(List<string> a) {
+        List<string> r = new List<string>(a);
+        r.Add(Own);
+        return r;
+    }
+
+    // списки с «свое» в конце: выбрали «свое» - поле очищается для своего значения
+    static bool OwnList(string key) {
+        return key.EndsWith("_vvod_tip") || key.EndsWith("_zasch_tip") || key.EndsWith("_vvod_i") || key.EndsWith("_zasch_i");
+    }
+
+    static bool NoInput(string tip) { return tip.Trim().ToLower() == "отсутствует"; }
 
     void OpenLists() {
         try { Process.Start("notepad.exe", "\"" + lists.File + "\""); }
@@ -1705,6 +1726,13 @@ public class DogovorForm : Form {
                 else if (key == p + "korpus") MeterPart(i, 1);
                 else if (key == p + "modif") MeterPart(i, 2);
             }
+            if (OwnList(key) && inp[key].Text.Trim() == Own) {
+                Control c = inp[key];
+                BeginInvoke((MethodInvoker)delegate { loading = true; try { c.Text = ""; } finally { loading = false; } c.Focus(); });
+            }
+            // вводного аппарата нет - нет и тока
+            for (int i = 1; i <= 2; i++)
+                if (key == "pu" + i + "_vvod_tip" && NoInput(V(key))) SetV("pu" + i + "_vvod_i", "");
             if (key == "lichny") {
                 TextBox t = (TextBox)inp["lichny"];
                 int pos = t.SelectionStart;
@@ -1712,7 +1740,7 @@ public class DogovorForm : Form {
                 if (up != t.Text) { t.Text = up; t.SelectionStart = Math.Min(pos, up.Length); }
             }
         } finally { loading = false; }
-        if (key.EndsWith("tarif") || key == "schetchikov" || key == "sms" || key == "utratil" || key == "plita") Enable();
+        if (key.EndsWith("tarif") || key.EndsWith("vvod_tip") || key == "schetchikov" || key == "sms" || key == "utratil" || key == "plita") Enable();
         RefreshState();
     }
 
@@ -1724,6 +1752,7 @@ public class DogovorForm : Form {
         inp["sms_tel"].Enabled = V("sms") == "согласен(а)";
         inp["utratil_nom"].Enabled = inp["utratil_ot"].Enabled = V("utratil") == "1";
         inp["plita_prim"].Enabled = V("plita") == "да";
+        for (int i = 1; i <= 2; i++) inp["pu" + i + "_vvod_i"].Enabled = !NoInput(V("pu" + i + "_vvod_tip"));
     }
 
     // ---------- выбор счётчика: модель -> корпус -> модификация ----------
@@ -2016,7 +2045,7 @@ public class DogovorForm : Form {
             v[f + "МОДЕМ"] = V(p + "modem");
             v[f + "ПОКАЗ"] = V(p + "pokaz");
             v[f + "ВВОД_ТИП"] = V(p + "vvod_tip");
-            v[f + "ВВОД_I"] = V(p + "vvod_i");
+            v[f + "ВВОД_I"] = NoInput(V(p + "vvod_tip")) ? Line(16, '-') : V(p + "vvod_i");
             v[f + "ЗАЩ_ТИП"] = V(p + "zasch_tip");
             v[f + "ЗАЩ_I"] = V(p + "zasch_i");
             v[f + "МОДУЛЬ"] = V(p + "modul").Length > 0 ? V(p + "modul") : Line(42, '-');
@@ -2136,8 +2165,6 @@ public class DogovorForm : Form {
         for (int i = 1; i <= 2; i++) {
             if (i == 2 && V("schetchikov") == "1 счётчик") break;
             memory.Remember("место", V("pu" + i + "_mesto"));
-            memory.Remember("аппарат", V("pu" + i + "_vvod_tip"));
-            memory.Remember("аппарат", V("pu" + i + "_zasch_tip"));
         }
         foreach (string k in Sticky) memory.Values[k] = V(k);
         memory.Save();
