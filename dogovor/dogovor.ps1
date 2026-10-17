@@ -1211,6 +1211,7 @@ public class Cell {
     public Control Ctl;
     public Grid Sub;
     public int Span = 1;
+    public int W;              // ширина поля в знаках (по длине значения); 0 - на всю оставшуюся ширину
 
     public static Cell F(string caption, Control c, int span) {
         Cell x = new Cell();
@@ -1253,11 +1254,67 @@ public class Grid {
         foreach (Cell[] r in rows) foreach (Cell c in r) yield return c;
     }
 
+    static double charW;
+    // ширина одного знака основного шрифта (цифры), точки
+    public static double CharW {
+        get {
+            if (charW == 0) charW = TextRenderer.MeasureText("0000000000", St.Base).Width / 10.0;
+            return charW;
+        }
+    }
+
+    // строка, где у полей своя ширина: поля друг за другом слева направо, не влезло - на следующую линию;
+    // поля без ширины делят остаток линии
+    int Flow(Cell[] row, int width, int y) {
+        int capH = St.Small.Height + 2, avail = width - 2 * PadX;
+        int[] w = new int[row.Length];
+        bool[] fill = new bool[row.Length];
+        for (int i = 0; i < row.Length; i++) {
+            Cell c = row[i];
+            int cap = c.Caption != null && c.Caption.Trim().Length > 0 ? TextRenderer.MeasureText(c.Caption, St.Small).Width + 4 : 0;
+            fill[i] = c.W <= 0;
+            w[i] = fill[i] ? Math.Max(cap, (int)(15 * CharW)) : Math.Max(cap, (int)(c.W * CharW + 10));
+            w[i] = Math.Min(w[i], avail);
+        }
+        int start = 0;
+        while (start < row.Length) {
+            // линия: сколько полей влезает
+            int end = start, used = 0;
+            while (end < row.Length && (end == start || used + Gap + w[end] <= avail)) { used += (end > start ? Gap : 0) + w[end]; end++; }
+            int fills = 0;
+            for (int i = start; i < end; i++) if (fill[i]) fills++;
+            int extra = avail - used;
+            bool anyCap = false;
+            for (int i = start; i < end; i++) if (row[i].Caption != null) anyCap = true;
+            int x = PadX, lineH = 0;
+            for (int i = start; i < end; i++) {
+                Cell c = row[i];
+                int cw = w[i] + (fill[i] && fills > 0 ? extra / fills : 0);
+                int cy = y;
+                if (c.Cap != null) c.Cap.SetBounds(x, cy, cw, capH);
+                if (anyCap && c.Sub == null) cy += capH + 1;
+                int h = 0;
+                // подпись длиннее поля - поле всё равно своей ширины (короткое значение - короткое поле)
+                int fw = fill[i] ? cw : Math.Min(cw, (int)(c.W * CharW + 10));
+                if (c.Sub != null) { h = c.Sub.Layout(cw); c.Sub.Host.SetBounds(x, cy, cw, h); }
+                else if (c.Ctl != null) { h = Ui.HeightOf(c.Ctl, fw); c.Ctl.SetBounds(x, cy, fw, h); }
+                lineH = Math.Max(lineH, cy + h - y);
+                x += cw + Gap;
+            }
+            y += lineH + RowGap;
+            start = end;
+        }
+        return y;
+    }
+
     public int Layout(int width) {
         int capH = St.Small.Height + 2;
         int y = PadTop;
         float colW = (width - 2 * PadX - Gap * (Cols - 1)) / (float)Cols;
         foreach (Cell[] row in rows) {
+            bool flow = false;
+            foreach (Cell c in row) if (c.W > 0) flow = true;
+            if (flow) { y = Flow(row, width, y); continue; }
             int col = 0, rowH = 0;
             bool anyCap = false;
             foreach (Cell c in row) if (c.Caption != null) anyCap = true;
@@ -12264,7 +12321,30 @@ public class DogovorForm : Form {
         RefreshState();
     }
 
-    static Cell F(string caption, Control c, int span) { return Cell.F(caption, c, span); }
+    static Cell F(string caption, Control c, int span) {
+        Cell x = Cell.F(caption, c, span);
+        x.W = WidthOf(c.Name);
+        return x;
+    }
+
+    // ширина поля в знаках - по длине значения (у списков - со стрелкой); нет в списке - на всю оставшуюся ширину
+    static readonly string[] Widths = {
+        "data=14", "ls=16", "oformil=22", "podp=20", "podp_inic=16", "podp_dov=26", "podp_fio=30", "soob_adres=30", "soob_tel=16",
+        "fio=42", "potr_inic=18", "lichny=17", "telefon=18",
+        "obekt=34", "moshn=8", "moshn_otopl=8", "np_tip=7", "np=28", "selsovet=18", "kadastr=22", "ulica_tip=7", "ulica=28",
+        "dom=8", "korp=6", "kv=6", "dopusk_nom=12", "dopusk_data=14",
+        "plomba_vvod=16", "plomba_klemm=16", "plomba_drugoe=24", "plita=12", "gaz=12", "teplo=12", "gvs=12",
+        "sms=22", "sms_tel=18", "utratil_nom=10", "utratil_ot=14",
+        "pu_model=12", "pu_korpus=9", "pu_modif=24", "pu_zav=16", "pu_poverka=11", "pu_pokaz=14", "pu_faz=12", "pu_askue=12",
+        "pu_plomba_gp=14", "pu_prinadl=22", "pu_modem=14", "pu_vvod_tip=16", "pu_vvod_i=8", "pu_zasch_tip=16", "pu_zasch_i=8",
+        "pu_modul=24" };
+
+    static int WidthOf(string key) {
+        if (key == null || key.Length == 0) return 0;
+        if (key.StartsWith("pu1_") || key.StartsWith("pu2_")) key = "pu_" + key.Substring(4);
+        foreach (string s in Widths) if (s.StartsWith(key + "=")) return int.Parse(s.Substring(key.Length + 1));
+        return 0;
+    }
 
     void BuildCards() {
         Card c = NewCard("Договор", "дата, номер и кто оформляет", 4);
@@ -12276,7 +12356,7 @@ public class DogovorForm : Form {
         tip.SetToolTip(remember, "Записать должность, доверенность и подпись в справочник,\nчтобы в следующий раз выбрать подписанта из списка");
         c.AddExtra(remember);
         Row(c, F("Дата договора", D("data"), 1), F("Лицевой счёт №", T("ls", 1, "номер лицевого счёта"), 1), F("Договор оформил(а)", C("oformil", true, false, "фамилия И.О."), 2));
-        Row(c, Cell.Empty(1), F(null, lsNote, 3));
+        Row(c, F(null, lsNote, 4));
         Row(c, F("Исполнитель в лице (подписывает)", C("podp", true, false, "выберите из списка"), 1), F("Подпись подписанта", T("podp_inic", 1, "И.О.Фамилия"), 1),
             F("Доверенность", T("podp_dov", 1, "№ ... от ..."), 2));
         Row(c, F("Должность подписанта (в лице кого)", T("podp_dolzh", 3, null), 3), F("Ф.И.О. подписанта (кого)", T("podp_fio", 3, null), 1));
@@ -12287,17 +12367,20 @@ public class DogovorForm : Form {
         c = NewCard("Потребитель", "гражданин(ка), с которым заключается договор", 4);
         Row(c, F("Фамилия, собственное имя, отчество", T("fio", 1, "Иванов Иван Иванович"), 2), F("Подпись (инициалы)", T("potr_inic", 1, "заполнится сама"), 1),
             F("Идентификационный номер", T("lichny", 1, "14 знаков"), 1));
-        Row(c, F(null, fioNote, 2), Cell.Empty(1), F(null, lichnyNote, 1));
+        Row(c, F(null, fioNote, 4));
+        Row(c, F(null, lichnyNote, 4));
         Button same = Ui.Button("= адрес объекта", false);
         same.Font = St.Small;
         same.Click += delegate { SetV("adres_prozh", V("adres")); };
         same.TabStop = false;
         tip.SetToolTip(same, "Потребитель проживает по адресу объекта");
-        Row(c, F("Адрес проживания (регистрации)", T("adres_prozh", 1, "г.Минск, ул. ..., д. ..., кв. ..."), 2), F(" ", same, 1), F("Телефон", T("telefon", 1, "необязательно"), 1));
+        Cell sameCell = F(" ", same, 1);
+        sameCell.W = 16;
+        Row(c, F("Адрес проживания (регистрации)", T("adres_prozh", 1, "г.Минск, ул. ..., д. ..., кв. ..."), 2), sameCell, F("Телефон", T("telefon", 1, "необязательно"), 1));
 
         c = NewCard("Объект", "что подключаем и где", 8);
-        Row(c, F("Объект электроснабжения", C("obekt", true, false, null), 4), F("Разрешённая мощность, кВт", T("moshn", 1, "например 10"), 2),
-            F("из неё на отопление и ГВС, кВт", T("moshn_otopl", 1, "0,0"), 2));
+        Row(c, F("Объект электроснабжения", C("obekt", true, false, null), 4), F("Мощность, кВт", T("moshn", 1, "например 10"), 2),
+            F("из неё отопление и ГВС, кВт", T("moshn_otopl", 1, "0,0"), 2));
         Row(c, F("Тип н.п.", C("np_tip", true, false, null), 1), F("Населённый пункт / садоводческое товарищество", C("np", true, false, "Боровляны"), 3),
             F("Сельсовет", C("selsovet", true, false, null), 2), F("Кадастровый номер", T("kadastr", 1, "цифры или № по свидетельству"), 2));
         Row(c, F("Улица", C("ulica_tip", true, false, null), 1), F(" ", C("ulica", true, false, "Дружная"), 3), F("Дом / участок", T("dom", 1, null), 2),
@@ -12330,7 +12413,9 @@ public class DogovorForm : Form {
         c = NewCard("Дополнительно", "льгота, особые условия, СМС", 4);
         Row(c, F("СМС-оповещение", S("sms", "согласен(а)", "отказ"), 1), F("Номер для СМС", T("sms_tel", 1, "+375 ..."), 1), F("Оформлена льгота", T("lgota", 1, "пусто - прочерк"), 2));
         Row(c, F("Особые условия", T("osobye", 2, null), 4));
-        Row(c, F(" ", X("utratil", "Считать утратившим силу приложение к договору"), 2), F("№", T("utratil_nom", 1, null), 1), F("от", D("utratil_ot"), 1));
+        Cell utr = F(" ", X("utratil", "Считать утратившим силу приложение к договору"), 2);
+        utr.W = 46;
+        Row(c, utr, F("№", T("utratil_nom", 1, null), 1), F("от", D("utratil_ot"), 1));
         Row(c, F("Дополнительная информация", T("dop_info", 2, null), 4));
 
         c = NewCard("Порядок и документы", "для себя - в договор не попадает", 2);
@@ -12371,19 +12456,19 @@ public class DogovorForm : Form {
             F("Модификация", C(p + "modif", true, false, null), 2));
         g.Row(Cell.G(parts, 2));
         foreach (Cell x in parts.Cells()) cardOfLater.Add(x.Ctl);
-        g.Row(F("Тип счётчика - так будет в договоре (собирается сам, можно поправить)", T(p + "tip", 1, null), 2));
+        g.Row(F("Тип счётчика в договоре (собирается сам, можно поправить)", T(p + "tip", 1, null), 2));
         Label mn = meterNotes[i - 1];
         int mi = i;
         mn.Click += delegate { if (photoMeter[mi - 1] != null) { PutMeter(mi, true); MeterNote(mi); } };
         g.Row(F(null, mn, 2));
-        g.Row(F("Заводской номер", T(p + "zav", 1, null), 1), F("Дата поверки (год-квартал)", T(p + "poverka", 1, "например 2025-2"), 1));
+        g.Row(F("Заводской номер", T(p + "zav", 1, null), 1), F("Поверка (год-квартал)", T(p + "poverka", 1, "2025-2"), 1),
+            F("Показания, кВт·ч", T(p + "pokaz", 1, null), 1));
         g.Row(F("Цель использования электроэнергии", C(p + "cel", true, false, null), 2));
-        g.Row(F("Фазность", S(p + "faz", "1 ф", "3 ф"), 1), F("Пломба госповерителя", C(p + "plomba_gp", true, false, null), 1));
+        g.Row(F("Фазность", S(p + "faz", "1 ф", "3 ф"), 1), F("АСКУЭ", S(p + "askue", "да", "нет"), 1), F("Пломба госповерителя", C(p + "plomba_gp", true, false, null), 1));
         g.Row(F("Место установки", C(p + "mesto", true, false, null), 2));
         g.Row(F("Принадлежность", C(p + "prinadl", true, false, null), 1), F("Тип модема", C(p + "modem", true, false, null), 1));
-        g.Row(F("Включение в АСКУЭ", S(p + "askue", "да", "нет"), 1), F("Показания, кВт·ч", T(p + "pokaz", 1, null), 1));
-        g.Row(F("Вводной аппарат: тип", C(p + "vvod_tip", true, false, null), 1), F("ток, А", C(p + "vvod_i", true, false, null), 1));
-        g.Row(F("Аппарат защиты: тип", C(p + "zasch_tip", true, false, null), 1), F("ток, А", C(p + "zasch_i", true, false, null), 1));
+        g.Row(F("Вводной аппарат", C(p + "vvod_tip", true, false, null), 1), F("ток, А", C(p + "vvod_i", true, false, null), 1),
+            F("Аппарат защиты", C(p + "zasch_tip", true, false, null), 1), F("ток, А", C(p + "zasch_i", true, false, null), 1));
         g.Row(F("Модуль отображения (сплит-счётчик), зав. №", T(p + "modul", 1, "нет модуля - прочерк"), 2));
         g.Row(F("Тариф", S(p + "tarif", Tarifs), 2));
         g.Row(F("Тарифная группа", C(p + "gruppa", true, true, null), 2));
