@@ -12198,7 +12198,70 @@ public class DogovorForm : Form {
 
     void Row(Card card, params Cell[] cells) {
         card.Grid.Row(cells);
-        foreach (Cell c in cells) if (c.Ctl != null && c.Ctl.Name.Length > 0) cardOf[c.Ctl.Name] = card;
+        foreach (Cell c in cells) if (c.Ctl != null && c.Ctl.Name.Length > 0) { cardOf[c.Ctl.Name] = card; Field(c.Ctl.Name, c.Caption, card.Name); }
+    }
+
+    // ---------- обязательные поля (выбирает пользователь) ----------
+
+    // поля, которые можно сделать обязательными: ключ (у счётчиков - «pu_tip», для обоих), подпись, раздел - в порядке формы
+    readonly List<string[]> fieldList = new List<string[]>();
+    Dictionary<string, bool> requiredSet;
+
+    // подписи понятнее, чем над полем в форме («ток, А», «№»)
+    static readonly string[] FieldNames = {
+        "np_tip=Тип населённого пункта", "ulica_tip=Тип улицы", "ulica=Улица (название)", "korp=Корпус", "kv=Квартира",
+        "soob_tel=Сообщать о неисправностях: телефон", "telefon=Телефон потребителя", "dopusk_kem=Допуск: кем выдан",
+        "plomba_klemm=Пломба на клеммной крышке", "plomba_drugoe=Другие пломбы", "utratil_nom=№ приложения, утратившего силу",
+        "pu_vvod_i=Вводной аппарат: ток, А", "pu_zasch_i=Аппарат защиты: ток, А", "pu_model=Модель счётчика",
+        "pu_korpus=Тип корпуса счётчика", "pu_modif=Модификация счётчика", "adres=Адрес объекта (строка в договоре)",
+        "pu_tip=Тип счётчика (строка в договоре)", "moshn_otopl=Мощность на отопление и ГВС, кВт",
+        "pu_nagrev=Электронагревательные приборы", "pu_modul=Модуль отображения (сплит-счётчик)" };
+
+    // обязательные сначала - как было до настройки
+    static readonly string[] DefaultRequired = {
+        "ls", "oformil", "podp_dolzh", "podp_fio", "podp_dov", "podp_inic", "soob_adres", "soob_tel", "fio", "potr_inic", "lichny",
+        "adres_prozh", "obekt", "moshn", "np", "adres", "prochie", "plita", "gaz", "teplo", "gvs", "sms", "sms_tel", "utratil_nom",
+        "pu_tip", "pu_zav", "pu_cel", "pu_faz", "pu_askue", "pu_tarif", "pu_gruppa" };
+
+    void Field(string key, string caption, string card) {
+        Control c;
+        if (!inp.TryGetValue(key, out c) || c is CheckBox || c is DateBox) return;
+        if (key.StartsWith("pu2_")) return;
+        if (key.StartsWith("pu1_")) key = "pu_" + key.Substring(4);
+        foreach (string[] f in fieldList) if (f[0] == key) return;
+        string name = (caption ?? "").Trim();
+        foreach (string n in FieldNames) if (n.StartsWith(key + "=")) name = n.Substring(key.Length + 1);
+        if (name.Length == 0) name = key;
+        fieldList.Add(new string[] { key, name, card });
+    }
+
+    // для проверки без окон
+    public void ShowRequired() {
+        if (requiredSet == null) LoadRequired();
+        RequiredDialog d = new RequiredDialog(fieldList, requiredSet, DefaultRequired);
+        d.StartPosition = FormStartPosition.Manual;
+        d.Location = new Point(120, 40);
+        d.Show(this);
+    }
+    public void SetRequired(string csv) { memory.Values["ОбязательныеПоля"] = csv; memory.Save(); LoadRequired(); RefreshState(); }
+    public string StatusText { get { return status.Text; } }
+
+    void LoadRequired() {
+        requiredSet = new Dictionary<string, bool>();
+        string v = memory.Get("ОбязательныеПоля", null);
+        string[] keys = v == null ? DefaultRequired : v.Split(new char[] { ',' }, StringSplitOptions.RemoveEmptyEntries);
+        foreach (string k in keys) requiredSet[k.Trim()] = true;
+    }
+
+    void SetupRequired() {
+        RequiredDialog d = new RequiredDialog(fieldList, requiredSet, DefaultRequired);
+        if (d.ShowDialog(this) != DialogResult.OK) return;
+        requiredSet = d.Result;
+        List<string> keys = new List<string>();
+        foreach (string[] f in fieldList) if (requiredSet.ContainsKey(f[0])) keys.Add(f[0]);
+        memory.Values["ОбязательныеПоля"] = string.Join(",", keys.ToArray());
+        memory.Save();
+        RefreshState();
     }
 
     static Cell F(string caption, Control c, int span) { return Cell.F(caption, c, span); }
@@ -12327,6 +12390,10 @@ public class DogovorForm : Form {
         Heaters heat = new Heaters();
         Reg(p + "nagrev", heat);
         g.Row(F("Электронагревательные приборы: вид, шт., кВт одного (+ ещё прибор)", heat, 2));
+        if (i == 1) {
+            foreach (Cell x in parts.Cells()) if (x.Ctl != null && x.Ctl.Name.Length > 0) Field(x.Ctl.Name, x.Caption, "Счётчики");
+            foreach (Cell x in g.Cells()) if (x.Ctl != null && x.Ctl.Name.Length > 0) Field(x.Ctl.Name, x.Caption, "Счётчики");
+        }
         return g;
     }
 
@@ -12382,7 +12449,9 @@ public class DogovorForm : Form {
         folder.Click += delegate { OpenFolder(); };
         NavItem dirs = new NavItem("Справочники (списки)", true);
         dirs.Click += delegate { OpenLists(); };
-        foreach (NavItem n in new NavItem[] { folder, dirs }) {
+        NavItem reqs = new NavItem("Обязательные поля", true);
+        reqs.Click += delegate { SetupRequired(); };
+        foreach (NavItem n in new NavItem[] { reqs, folder, dirs }) {
             n.Anchor = AnchorStyles.Left | AnchorStyles.Bottom | AnchorStyles.Right;
             nav.Controls.Add(n);
         }
@@ -12394,7 +12463,8 @@ public class DogovorForm : Form {
         nav.Resize += delegate {
             dirs.SetBounds(0, nav.ClientSize.Height - 20 - dirs.Height, nav.Width, dirs.Height);
             folder.SetBounds(0, dirs.Top - folder.Height, nav.Width, folder.Height);
-            baseLabel.SetBounds(22, folder.Top - 58, nav.Width - 34, 52);
+            reqs.SetBounds(0, folder.Top - reqs.Height, nav.Width, reqs.Height);
+            baseLabel.SetBounds(22, reqs.Top - 58, nav.Width - 34, 52);
         };
         return nav;
     }
@@ -12944,35 +13014,28 @@ public class DogovorForm : Form {
 
     List<Problem> Check() {
         List<Problem> r = new List<Problem>();
-        string[][] req = new string[][] {
-            new string[] { "ls", "лицевой счёт" }, new string[] { "oformil", "кто оформил договор" },
-            new string[] { "podp_dolzh", "должность подписанта" }, new string[] { "podp_fio", "Ф.И.О. подписанта" },
-            new string[] { "podp_dov", "доверенность подписанта" }, new string[] { "podp_inic", "подпись подписанта" },
-            new string[] { "soob_adres", "адрес для сообщений (п. 3.6)" }, new string[] { "soob_tel", "телефон для сообщений (п. 3.6)" },
-            new string[] { "fio", "Ф.И.О. потребителя" }, new string[] { "potr_inic", "подпись потребителя" },
-            new string[] { "lichny", "идентификационный номер" }, new string[] { "adres_prozh", "адрес проживания" },
-            new string[] { "obekt", "объект электроснабжения" }, new string[] { "moshn", "разрешённая мощность" },
-            new string[] { "np", "населённый пункт" }, new string[] { "adres", "адрес объекта" },
-            new string[] { "prochie", "прочие условия (28.1)" },
-            new string[] { "plita", "электроплита да/нет" }, new string[] { "gaz", "газоснабжение да/нет" },
-            new string[] { "teplo", "теплоснабжение да/нет" }, new string[] { "gvs", "горячее водоснабжение да/нет" },
-            new string[] { "sms", "СМС-оповещение: согласие или отказ" } };
-        foreach (string[] q in req) if (V(q[0]).Length == 0) r.Add(new Problem(q[0], q[1], true));
+        if (requiredSet == null) LoadRequired();
+        int n = V("schetchikov") == "1 счётчик" ? 1 : 2;
+        // обязательные - по настройке; недоступное поле (СМС при отказе, ток без вводного аппарата) не в счёт
+        foreach (string[] f in fieldList) {
+            if (!requiredSet.ContainsKey(f[0])) continue;
+            List<string[]> ks = new List<string[]>();
+            if (f[0].StartsWith("pu_")) { for (int i = 1; i <= n; i++) ks.Add(new string[] { "pu" + i + "_" + f[0].Substring(3), " (счётчик " + i + ")" }); }
+            else ks.Add(new string[] { f[0], "" });
+            foreach (string[] k in ks) {
+                Control c;
+                if (!inp.TryGetValue(k[0], out c) || !c.Enabled) continue;
+                if (V(k[0]).Length == 0) r.Add(new Problem(k[0], f[1] + k[1], true));
+            }
+        }
         string block = LsBlockText();
         if (block != null) { Problem b = new Problem("ls", block, true); b.Blocker = true; r.Add(b); }
-        if (V("sms") == "согласен(а)" && Digits(V("sms_tel")).Length < 9)
-            r.Add(new Problem("sms_tel", V("sms_tel").Length == 0 ? "номер для СМС" : "номер для СМС не полный (в договоре будет линия)", true));
-        if (V("utratil") == "1" && V("utratil_nom").Length == 0) r.Add(new Problem("utratil_nom", "номер приложения, утратившего силу", true));
-        int n = V("schetchikov") == "1 счётчик" ? 1 : 2;
-        for (int i = 1; i <= n; i++) {
-            string p = "pu" + i + "_", w = " (счётчик " + i + ")";
-            string[][] mq = new string[][] {
-                new string[] { "tip", "тип" }, new string[] { "zav", "заводской номер" }, new string[] { "cel", "цель использования" },
-                new string[] { "faz", "фазность" }, new string[] { "askue", "АСКУЭ да/нет" }, new string[] { "tarif", "тариф" },
-                new string[] { "gruppa", "тарифная группа" } };
-            foreach (string[] q in mq) if (V(p + q[0]).Length == 0) r.Add(new Problem(p + q[0], q[1] + w, true));
-            if (V(p + "poverka").EndsWith("-")) r.Add(new Problem(p + "poverka", "дата поверки: допишите квартал" + w, true));
-        }
+        if (requiredSet.ContainsKey("sms_tel") && V("sms") == "согласен(а)" && V("sms_tel").Length > 0 && Digits(V("sms_tel")).Length < 9)
+            r.Add(new Problem("sms_tel", "номер для СМС не полный (в договоре будет линия)", true));
+        for (int i = 1; i <= n; i++)
+            if (V("pu" + i + "_poverka").EndsWith("-"))
+                r.Add(new Problem("pu" + i + "_poverka", "дата поверки: допишите квартал (счётчик " + i + ")", requiredSet.ContainsKey("pu_poverka")));
+
         // не обязательно, но стоит проверить
         string id = V("lichny");
         if (id.Length > 0 && id.Length != 14) r.Add(new Problem("lichny", "в идентификационном номере " + id.Length + " знаков, обычно 14", false));
@@ -14042,6 +14105,110 @@ public class DogovorForm : Form {
 }
 
 // Список сохранённых договоров с поиском
+// Какие поля обязательны: галочки по разделам формы (у счётчиков - для обоих)
+public class RequiredDialog : Form {
+    public Dictionary<string, bool> Result;
+    readonly Dictionary<string, CheckBox> boxes = new Dictionary<string, CheckBox>();
+
+    public RequiredDialog(List<string[]> fields, Dictionary<string, bool> current, string[] defaults) {
+        Text = "Обязательные поля";
+        Font = St.Base;
+        BackColor = St.Back;
+        StartPosition = FormStartPosition.CenterParent;
+        Size = new Size(820, Math.Min(760, Screen.PrimaryScreen.WorkingArea.Height - 40));
+        MinimumSize = new Size(600, 420);
+        ShowInTaskbar = false;
+        MinimizeBox = false;
+        Label top = new Label();
+        top.Dock = DockStyle.Top;
+        top.Height = 78;
+        top.Padding = new Padding(14, 10, 14, 6);
+        top.Font = St.Base;
+        top.ForeColor = St.Text;
+        top.Text = "Отметьте поля, без которых договор не готов. Пустое обязательное поле считается в «Не заполнено полей» внизу " +
+            "и в красных цифрах у разделов слева. Сохранить договор можно и с пустыми - программа предупредит.";
+        Panel list = new Panel();
+        list.Dock = DockStyle.Fill;
+        list.AutoScroll = true;
+        list.BackColor = St.Back;
+        Panel bottom = new Panel();
+        bottom.Dock = DockStyle.Bottom;
+        bottom.Height = 56;
+        bottom.BackColor = Color.White;
+        Button ok = Ui.Button("Сохранить", true), cancel = Ui.Button("Отмена", false), reset = Ui.Button("Как было сначала", false);
+        ok.Size = new Size(140, 34); cancel.Size = new Size(110, 34); reset.Size = new Size(170, 34);
+        bottom.Controls.Add(ok); bottom.Controls.Add(cancel); bottom.Controls.Add(reset);
+        bottom.Resize += delegate {
+            ok.Location = new Point(bottom.Width - ok.Width - 14, 11);
+            cancel.Location = new Point(ok.Left - cancel.Width - 10, 11);
+            reset.Location = new Point(14, 11);
+        };
+        ok.Click += delegate {
+            Result = new Dictionary<string, bool>();
+            foreach (KeyValuePair<string, CheckBox> kv in boxes) if (kv.Value.Checked) Result[kv.Key] = true;
+            DialogResult = DialogResult.OK;
+        };
+        cancel.Click += delegate { DialogResult = DialogResult.Cancel; };
+        reset.Click += delegate {
+            foreach (KeyValuePair<string, CheckBox> kv in boxes) kv.Value.Checked = Array.IndexOf(defaults, kv.Key) >= 0;
+        };
+        AcceptButton = ok;
+        CancelButton = cancel;
+        // разделы - полосами своего цвета, под ними галочки в две колонки
+        List<Control> heads = new List<Control>();
+        string card = null;
+        int col = 0;
+        foreach (string[] f in fields) {
+            if (f[2] != card) {
+                card = f[2];
+                Label h = new Label();
+                h.Text = card + (card == "Счётчики" ? " (для обоих счётчиков)" : "");
+                h.Font = St.Bold;
+                Tint t = St.TintOf(card);
+                h.BackColor = t.Head;
+                h.ForeColor = t.Dark;
+                h.TextAlign = ContentAlignment.MiddleLeft;
+                h.Padding = new Padding(8, 0, 0, 0);
+                h.Tag = "head";
+                list.Controls.Add(h);
+                heads.Add(h);
+                col = 0;
+            }
+            CheckBox cb = new CheckBox();
+            cb.Text = f[1];
+            cb.Checked = current.ContainsKey(f[0]);
+            cb.Font = St.Base;
+            cb.ForeColor = St.Text;
+            cb.AutoEllipsis = true;
+            cb.Tag = col++ % 2;
+            boxes[f[0]] = cb;
+            list.Controls.Add(cb);
+        }
+        list.Resize += delegate { Relayout(list); };
+        Controls.Add(list);
+        Controls.Add(top);
+        Controls.Add(bottom);
+        Shown += delegate { Relayout(list); };
+    }
+
+    static void Relayout(Panel list) {
+        int w = list.ClientSize.Width - 30, y = 6 + list.AutoScrollPosition.Y, x0 = 14, half = w / 2;
+        bool open = false;        // в строке уже стоит левая галочка
+        foreach (Control c in list.Controls) {
+            if ("head".Equals(c.Tag)) {
+                if (open) { y += 25; open = false; }
+                y += 8;
+                c.SetBounds(x0, y, w, 26);
+                y += 30;
+                continue;
+            }
+            int k = (int)c.Tag;
+            c.SetBounds(x0 + 8 + k * half, y, half - 12, 24);
+            if (k == 1) { y += 25; open = false; } else open = true;
+        }
+    }
+}
+
 public class SavedDialog : Form {
     public string Chosen;
     readonly ListView list = new ListView();
