@@ -4762,6 +4762,488 @@ public static class PassportPage {
     }
 }
 
+// Свидетельство (удостоверение) о государственной регистрации: адрес объекта, кадастровый номер участка,
+// правообладатель. Своё распознавание обычного текста (шрифт с засечками, как Times New Roman).
+// Адрес читается прямо с листа (не по справочнику улиц): бывают новые дома и улицы.
+
+public class CertResult {
+    public bool Found;                                // это свидетельство и в нём нашёлся адрес
+    public string Address = "";                       // как в свидетельстве
+    public string NpTip = "", Np = "", Selsovet = "", UlicaTip = "", Ulica = "", Dom = "", Korp = "", Kv = "";
+    public bool Ok;                                   // всё прочитано уверенно
+    // уверенно ли прочитаны названия (программа может подтвердить их своими списками: сельсоветы, н.п., улицы)
+    public bool NpSure = true, SelsovetSure = true, UlicaSure = true;
+    public bool Rest;                                 // номера и разбор адреса - уверенно
+    public string Kadastr = "";
+    public bool KadastrOk;
+    public string Owner = "";                         // правообладатель (Ф.И.О.)
+    public string Info = "";
+    public List<string> Lines = new List<string>();
+
+    // коротко, как в договоре: «д. Боровляны, ул. Лесная, д.7 (Боровлянский с/с)»
+    public string Short {
+        get {
+            List<string> p = new List<string>();
+            if (Np.Length > 0) p.Add(NpTip == "СТ" ? "СТ «" + Np + "»" : (NpTip + " " + Np).Trim());
+            if (Ulica.Length > 0) p.Add((UlicaTip + " " + Ulica).Trim());
+            string h = (Dom.Length > 0 ? (NpTip == "СТ" ? "уч." : "д.") + Dom : "") + (Korp.Length > 0 ? " корп." + Korp : "") + (Kv.Length > 0 ? " кв." + Kv : "");
+            if (h.Trim().Length > 0) p.Add(h.Trim());
+            string s = string.Join(", ", p.ToArray());
+            if (Selsovet.Length > 0) s += " (" + Selsovet + " с/с)";
+            return s;
+        }
+    }
+}
+
+public static class CertPage {
+    public static string[] Families = { "Times New Roman" };
+    // ı - палочка без точки: правая часть «ы» (ь + палочка), отдельно не встречается
+    public const string Chars = "АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯабвгдеёжзийклмнопрстуфхцчшщъыьэюяı0123456789.,-/:;()\"№";
+    const string Letters = "АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯабвгдеёжзийклмнопрстуфхцчшщъыьэюя";
+    const string Digits = "0123456789";
+    static GlyphSet serif;
+    public static double[] Blurs = { 0, 0.045, 0.09, 0.14 };
+    public static int GridW = 24, GridH = 30;      // сетка сравнения мельче, чем для паспорта: строчные буквы похожи
+    static readonly object sync = new object();
+
+    public static void Init() {
+        lock (sync) {
+            if (serif == null) serif = GlyphSet.FromFonts(Chars, Families, new FontStyle[] { FontStyle.Regular, FontStyle.Bold }, GridW, GridH, Blurs);
+        }
+    }
+
+    public static CertResult Read(string path) {
+        Init();
+        GrayImage full, small;
+        Mrz.LoadPair(path, out full, out small);
+        List<PassportPage.Line> l0 = PassportPage.FindLines(small, true);
+        GrayImage sr = small.Rotate90();
+        List<PassportPage.Line> l1 = PassportPage.FindLines(sr, true);
+        if (PassportPage.Weight(l1) > PassportPage.Weight(l0)) { small = sr; l0 = l1; full = full.Rotate90(); }
+        double f = (double)full.W / small.W;
+        CertResult r = ReadPage(full, PassportPage.Scale(l0, f));
+        if (!r.Found) {
+            GrayImage ff = PassportPage.Rotate180(full), sf = PassportPage.Rotate180(small);
+            CertResult o = ReadPage(ff, PassportPage.Scale(PassportPage.FindLines(sf, true), f));
+            if (o.Found || o.Lines.Count > r.Lines.Count) r = o;
+        }
+        return r;
+    }
+
+    // ---------- текст страницы ----------
+
+    static CertResult ReadPage(GrayImage g, List<PassportPage.Line> lines) {
+        CertResult r = new CertResult();
+        // строки по ширине бывают разорваны большими пробелами - куски одной строки собираем по высоте
+        lines.Sort(delegate(PassportPage.Line a, PassportPage.Line b) {
+            if (Math.Abs(a.Y - b.Y) < 0.4 * Math.Min(a.Cap, b.Cap)) return a.X0.CompareTo(b.X0);
+            return a.Y.CompareTo(b.Y);
+        });
+        List<Glyph> all = new List<Glyph>();      // знаки по порядку; null - пробел или конец строки
+        StringBuilder text = new StringBuilder();
+        double prevY = double.MinValue, prevCap = 0;
+        int read = 0;
+        foreach (PassportPage.Line l in lines) {
+            PassportPage.Strip st = PassportPage.ReadLine(g, l, serif);
+            if (st == null || st.G.Count == 0) continue;
+            bool newRow = Math.Abs(l.Y - prevY) >= 0.4 * Math.Min(l.Cap, prevCap > 0 ? prevCap : l.Cap);
+            if (text.Length > 0) { text.Append(newRow ? '\n' : ' '); all.Add(null); }
+            foreach (Glyph gl in st.G) {
+                if (gl.Space) { text.Append(' '); all.Add(null); }
+                text.Append(gl.C);
+                all.Add(gl);
+            }
+            if (newRow) r.Lines.Add(PassportPage.Text(st.G));
+            else if (r.Lines.Count > 0) r.Lines[r.Lines.Count - 1] += "  " + PassportPage.Text(st.G);
+            prevY = l.Y;
+            prevCap = l.Cap;
+            read++;
+            // первые строки - не свидетельство (или вверх ногами) - дальше не читаем
+            if (read == 10 && !LooksLikeCert(text.ToString())) return r;
+        }
+        string t = text.ToString().Replace('\n', ' ');
+        if (!LooksLikeCert(t)) return r;
+        int s = Find(t, "по адресу", 0, 2);
+        if (s < 0) { r.Info = "не найдено «по адресу»"; return r; }
+        while (s < t.Length && (t[s] == ':' || t[s] == ' ' || t[s] == ';' || t[s] == '.')) s++;
+        int e = t.Length;
+        foreach (string stop in new string[] { "площадь", "назначение", "наименование", "произведена" }) {
+            int k = FindStart(t, stop, s, 2);
+            if (k >= 0 && k < e) e = k;
+        }
+        e = Math.Min(e, s + 200);
+        while (e > s && (t[e - 1] == ' ' || t[e - 1] == ',')) e--;
+        if (e <= s) return r;
+        Parse(r, all, s, e);
+        // кадастровый номер (у земельного участка)
+        int kd = Find(t, "кадастровым номером", 0, 3);
+        if (kd >= 0) {
+            List<Glyph> num = Token(all, kd);
+            string digits = "";
+            bool ok = num.Count >= 10;
+            foreach (Glyph gl in num) {
+                char c = BestOf(gl, Digits);
+                digits += c;
+                if (Margin(gl, Digits) < 0.08) ok = false;
+            }
+            if (digits.Length >= 10) { r.Kadastr = digits; r.KadastrOk = ok; }
+        }
+        // правообладатель: после «гражданин(ка) Республики Беларусь» - три слова
+        int ow = Find(t, "правообладатель", 0, 3);
+        if (ow >= 0) {
+            int rb = Find(t, "Беларусь", ow, 2);
+            if (rb >= 0 && rb - ow < 80) {
+                List<string> words = new List<string>();
+                int at = rb;
+                for (int w = 0; w < 6 && words.Count < 3; w++) {
+                    List<Glyph> tok = Token(all, at);
+                    if (tok.Count == 0) break;
+                    at = Skip(all, at);
+                    if (tok.Count < 2) continue;              // соринка, а не слово
+                    StringBuilder sb = new StringBuilder();
+                    foreach (Glyph gl in tok) sb.Append(BestOf(gl, Letters + "-"));
+                    words.Add(PageResult.Title(sb.ToString()));
+                }
+                if (words.Count == 3) r.Owner = string.Join(" ", words.ToArray());
+            }
+        }
+        return r;
+    }
+
+    static bool LooksLikeCert(string t) {
+        foreach (string w in new string[] { "РЕСПУБЛИКА", "РЕГИСТР", "СВИДЕТЕЛЬСТВО", "РЕГИСТРАЦИИ", "заявлению", "недвижимого" })
+            if (Find(t, w, 0, 2) >= 0) return true;
+        return false;
+    }
+
+    static char Up(char c) { c = char.ToUpperInvariant(c); return c == 'Ё' ? 'Е' : c; }
+
+    // нечёткий поиск (до maxErr ошибок, без учёта регистра): индекс сразу после найденного или -1
+    public static int Find(string text, string pat, int from, int maxErr) {
+        int m = pat.Length;
+        int[] prev = new int[m + 1], cur = new int[m + 1];
+        for (int j = 0; j <= m; j++) prev[j] = j;
+        int bestEnd = -1, bestErr = maxErr + 1;
+        for (int i = from; i < text.Length; i++) {
+            cur[0] = 0;
+            for (int j = 1; j <= m; j++)
+                cur[j] = Math.Min(Math.Min(cur[j - 1] + 1, prev[j] + 1), prev[j - 1] + (Up(text[i]) == Up(pat[j - 1]) ? 0 : 1));
+            if (cur[m] < bestErr) { bestErr = cur[m]; bestEnd = i + 1; }
+            else if (bestEnd >= 0 && i + 1 - bestEnd > m) break;   // первое хорошее совпадение уже позади
+            int[] tmp = prev; prev = cur; cur = tmp;
+        }
+        return bestErr <= maxErr ? bestEnd : -1;
+    }
+
+    // то же, но начало найденного
+    static int FindStart(string text, string pat, int from, int maxErr) {
+        int e = Find(text, pat, from, maxErr);
+        if (e < 0) return -1;
+        int best = -1, be = maxErr + 1;
+        for (int st = Math.Max(from, e - pat.Length - maxErr); st <= e - pat.Length + maxErr && st < e; st++) {
+            int d = PassportPage.Distance(text.Substring(st, e - st).ToUpperInvariant().Replace('Ё', 'Е'), pat.ToUpperInvariant().Replace('Ё', 'Е'));
+            if (d < be) { be = d; best = st; }
+        }
+        return best;
+    }
+
+    // знаки следующего слова начиная с позиции at (в тексте пробелы и концы строк - null)
+    static List<Glyph> Token(List<Glyph> all, int at) {
+        // позиции текста и списка знаков совпадают
+        List<Glyph> r = new List<Glyph>();
+        int i = at;
+        while (i < all.Count && (all[i] == null || all[i].C == ':' || all[i].C == '-' || all[i].C == ',')) i++;
+        for (; i < all.Count && all[i] != null && all[i].C != ','; i++) r.Add(all[i]);
+        return r;
+    }
+
+    static int Skip(List<Glyph> all, int at) {
+        int i = at;
+        while (i < all.Count && (all[i] == null || all[i].C == ',')) i++;
+        while (i < all.Count && all[i] != null && all[i].C != ',') i++;
+        return i;
+    }
+
+    static char BestOf(Glyph g, string allowed) {
+        char best = g.C;
+        double bs = double.MinValue;
+        foreach (char c in allowed) {
+            int k = Chars.IndexOf(c);
+            if (k >= 0 && g.Sc[k] > bs) { bs = g.Sc[k]; best = c; }
+        }
+        return best;
+    }
+
+    // насколько лучший из разрешённых знаков лучше следующего (заглавная и строчная одной буквы - не соперники)
+    static double Margin(Glyph g, string allowed) {
+        char best = BestOf(g, allowed);
+        double b1 = g.Sc[Chars.IndexOf(best)], b2 = double.MinValue;
+        foreach (char c in allowed) {
+            if (char.ToUpperInvariant(c) == char.ToUpperInvariant(best)) continue;
+            int k = Chars.IndexOf(c);
+            if (k >= 0 && g.Sc[k] > b2) b2 = g.Sc[k];
+        }
+        return b2 == double.MinValue ? 9 : b1 - b2;
+    }
+
+    // ---------- адрес -> поля ----------
+
+    class Word {
+        public string Text = "";
+        public List<Glyph> G = new List<Glyph>();
+    }
+
+    static void Parse(CertResult r, List<Glyph> all, int s, int e) {
+        // слова адреса (запятая - граница частей)
+        List<List<Word>> parts = new List<List<Word>>();
+        List<Word> part = new List<Word>();
+        Word w = null;
+        StringBuilder raw = new StringBuilder();
+        for (int i = s; i < e; i++) {
+            Glyph gl = all[i];
+            raw.Append(gl == null ? ' ' : gl.C);
+            if (gl == null) { if (w != null) { part.Add(w); w = null; } continue; }
+            bool sep = gl.C == ',' || gl.C == ';';
+            if (gl.C == '.' && w != null) {
+                // точка вместо запятой: после слова, которое не сокращение (или вторая точка подряд)
+                string prev = Clean(w.G).ToLowerInvariant().TrimEnd('.');
+                bool abbr = Array.IndexOf(DotAbbr, prev) >= 0;
+                bool before = i + 1 < e && all[i + 1] == null;
+                if (before && !abbr) sep = true;
+                if (w.G.Count > 0 && w.G[w.G.Count - 1].C == '.') sep = true;
+            }
+            if (sep) {
+                if (w != null) { part.Add(w); w = null; }
+                if (part.Count > 0) { parts.Add(part); part = new List<Word>(); }
+                continue;
+            }
+            if (w == null) w = new Word();
+            w.G.Add(gl);
+        }
+        if (w != null) part.Add(w);
+        if (part.Count > 0) parts.Add(part);
+        r.Address = Regex.Replace(raw.ToString(), " +", " ").Trim();
+        // слова: цифры - цифрами, буквы - буквами; сокращения («г.», «аг.», «ул.», «кв») - перечитать по списку
+        foreach (List<Word> p in parts)
+            for (int i = 0; i < p.Count; i++) {
+                p[i].Text = Clean(p[i].G);
+                string ab = Abbreviation(p[i]);
+                if (ab != null) p[i].Text = ab;
+            }
+        bool ok = true;
+        // «пр т.» - дефис не прочитался: это «пр-т»
+        foreach (List<Word> p in parts)
+            if (p.Count >= 2 && p[0].Text.ToLowerInvariant().TrimEnd('.') == "пр" && p[1].Text.ToLowerInvariant().TrimEnd('.') == "т") {
+                p[0].Text = "пр-т";
+                p[0].G.AddRange(p[1].G);
+                p.RemoveAt(1);
+            }
+        foreach (List<Word> p in parts) {
+            string first = p[0].Text, low = first.ToLowerInvariant().TrimEnd('.');
+            string joined = Join(p, 0);
+            if (Has(p, "обл") || Has(p, "р-н") || Has(p, "район") || Has(p, "область")) continue;
+            if (p.Count >= 2 && (Like(p[p.Count - 1].Text, "с/с") || Like(p[p.Count - 1].Text, "сельсовет"))) {
+                r.Selsovet = Title(Join(p, 0, p.Count - 1));
+                r.SelsovetSure = Sure(p, 0, p.Count - 1, false);
+                continue;
+            }
+            // садоводческое товарищество
+            if (Like(first, "СТ") || Like(first, "с/т") || low.StartsWith("садовод")) {
+                int k = 1;
+                while (k < p.Count && p[k].Text.ToLowerInvariant().StartsWith("товарищ")) k++;
+                r.NpTip = "СТ";
+                r.Np = Join(p, k).Trim('"', '«', '»', ' ', '.', ',');
+                r.NpSure = Sure(p, k, p.Count, false);
+                continue;
+            }
+            // населённый пункт: «г. Минск», «д. Боровляны», «аг. Ждановичи», «г.п. Мачулищи»
+            string np = NpType(first);
+            if (np != null && p.Count >= 2 && !char.IsDigit(p[1].Text[0])) {
+                r.NpTip = np;
+                int k = 1;
+                // улица в той же части без запятой: «г. Минск ул. Ленина 5» - редко; берём до типа улицы
+                int end = p.Count;
+                for (int q = 2; q < p.Count; q++) if (StreetType(p[q].Text) != null) { end = q; break; }
+                r.Np = Title(Join(p, k, end));
+                r.NpSure = Sure(p, k, end, false);
+                if (end < p.Count) Street(r, p.GetRange(end, p.Count - end), ref ok);
+                continue;
+            }
+            if (StreetType(first) != null) { Street(r, p, ref ok); continue; }
+            // квартира, корпус, дом, участок
+            if (low == "кв" || low == "квартира") { r.Kv = Num(p, 1, ref ok); continue; }
+            if (low == "корп" || low == "корпус" || low == "к") { r.Korp = Num(p, 1, ref ok); continue; }
+            if (low == "участок" || low == "уч" || low == "д" || low == "дом") { r.Dom = Num(p, 1, ref ok); continue; }
+            if (char.IsDigit(first[0])) { r.Dom = Num(p, 0, ref ok); continue; }
+            r.Info += "непонятная часть адреса: " + joined + "; ";
+            ok = false;
+        }
+        r.Found = r.Np.Length > 0 || r.Ulica.Length > 0;
+        if (r.Dom.Length == 0 && r.Kv.Length == 0) ok = false;
+        r.Rest = ok;
+        r.Ok = r.Found && ok && r.NpSure && r.SelsovetSure && r.UlicaSure;
+    }
+
+    // «ул. Лесная, 7» / «пр-т. Партизанский 88» - тип, название, может быть сразу и номер дома
+    static void Street(CertResult r, List<Word> p, ref bool ok) {
+        r.UlicaTip = StreetType(p[0].Text);
+        int end = p.Count;
+        while (end > 1 && char.IsDigit(p[end - 1].Text[0])) end--;
+        r.Ulica = Title(Join(p, 1, end));
+        r.UlicaSure = Sure(p, 1, end, false);
+        if (end < p.Count) r.Dom = Num(p, end, ref ok);
+    }
+
+    static string Num(List<Word> p, int from, ref bool ok) {
+        if (from >= p.Count) { ok = false; return ""; }
+        string s = "";
+        for (int i = from; i < p.Count; i++) s += p[i].Text;
+        ok &= Sure(p, from, p.Count, true);
+        return s;
+    }
+
+    // сокращения с точкой: точка после них - не конец части адреса
+    static readonly string[] DotAbbr = { "г", "д", "аг", "п", "гп", "г.п", "пос", "ул", "пер", "пр-т", "пр", "просп", "туп", "мкр", "корп", "к", "уч", "обл", "кв" };
+
+    static readonly string[] Abbr = { "г.", "д.", "аг.", "п.", "г.п.", "гп.", "пос.", "ул.", "пер.", "пр-т.", "пр-т", "пр.", "просп.", "туп.",
+        "мкр.", "б-р", "кв", "кв.", "корп.", "к.", "уч.", "участок", "СТ", "с/т", "с/с", "обл.", "р-н", "д" };
+
+    // похоже на сокращение - перечитать участок строки ровно по каждому варианту и взять лучший
+    static string Abbreviation(Word w) {
+        if (w.G.Count == 0 || w.G.Count > 8 || w.Text.Length > 8) return null;
+        bool near = false;
+        foreach (string a in Abbr) if (PassportPage.Distance(w.Text.ToLowerInvariant(), a.ToLowerInvariant()) <= 2) near = true;
+        if (!near) return null;
+        Glyph g0 = w.G[0], g1 = w.G[w.G.Count - 1];
+        PassportPage.Strip st = g0.Src as PassportPage.Strip;
+        if (st == null || g1.Src != g0.Src) return null;
+        int from = g0.CutA, to = g1.CutB;
+        // захватить и точку сразу после слова (если отдельной точкой не прочиталась)
+        while (to + 1 < st.Cuts.Count && !st.Gap[to] && st.Cuts[to + 1] - st.Cuts[to] < 0.3 * st.Cap) to++;
+        double ink;
+        double free = PassportPage.Free(st, from, to, null, out ink);
+        ink = Math.Max(ink, 0.3);
+        string best = null;
+        double b1 = double.MinValue, b2 = double.MinValue;
+        foreach (string a in Abbr) {
+            string[] sets = new string[a.Length];
+            for (int i = 0; i < a.Length; i++) sets[i] = a[i].ToString();
+            string text;
+            double v = PassportPage.Constrained(st, from, to, sets, out text);
+            if (v > b1) { b2 = b1; b1 = v; best = a; }
+            else if (v > b2) b2 = v;
+        }
+        if (best == null || (free - b1) / ink > 0.15) return null;
+        return best;
+    }
+
+    // слово: если в нём цифры - читать как номер (цифры, в конце буква: 7а, 40Б, 7/1), иначе - буквами
+    static string Clean(List<Glyph> gs) {
+        int dig = 0, let = 0;
+        foreach (Glyph g in gs) { if (char.IsDigit(g.C)) dig++; else if (char.IsLetter(g.C)) let++; }
+        StringBuilder sb = new StringBuilder();
+        if (dig > 0 && dig >= let) {
+            for (int i = 0; i < gs.Count; i++) {
+                char c = gs[i].C;
+                if (c == '/' || c == '-') { sb.Append(c); continue; }
+                if (".,:;\"".IndexOf(c) >= 0) continue;
+                bool tail = i == gs.Count - 1 && i > 0 && char.IsLetter(c) && gs[i].S - gs[i].Sc[Chars.IndexOf(BestOf(gs[i], Digits))] > 0.15;
+                sb.Append(tail ? char.ToLowerInvariant(c) : BestOf(gs[i], Digits));
+            }
+        } else {
+            bool afterHyphen = false;
+            for (int i = 0; i < gs.Count; i++) {
+                Glyph g = gs[i];
+                if (g.C == 'ı') {
+                    // «ь» + палочка = «ы»
+                    if (sb.Length > 0 && (sb[sb.Length - 1] == 'ь' || sb[sb.Length - 1] == 'Ь')) { sb[sb.Length - 1] = sb[sb.Length - 1] == 'ь' ? 'ы' : 'Ы'; continue; }
+                    sb.Append(BestOf(g, Letters));
+                    continue;
+                }
+                if (char.IsDigit(g.C) && afterHyphen) { sb.Append(g.C); continue; }   // «Строитель-2»
+                afterHyphen = g.C == '-' || afterHyphen && char.IsDigit(g.C);
+                char ch = char.IsLetter(g.C) || ".-/\"".IndexOf(g.C) >= 0 ? g.C : BestOf(g, Letters);
+                // русское письмо: й - только после гласной; ь, ъ - не после гласной и не в начале слова
+                char before = sb.Length > 0 ? char.ToLowerInvariant(sb[sb.Length - 1]) : ' ';
+                bool vowel = "аеёиоуыэюя".IndexOf(before) >= 0;
+                char lo = char.ToLowerInvariant(ch);
+                if (lo == 'й' && !vowel || (lo == 'ь' || lo == 'ъ') && (vowel || !char.IsLetter(before))) {
+                    string other = Letters.Replace("й", "").Replace("Й", "").Replace("ь", "").Replace("Ь", "").Replace("ъ", "").Replace("Ъ", "");
+                    ch = BestOf(g, other);
+                    g.S = -1;                                   // и такое слово - под сомнением
+                }
+                sb.Append(ch);
+            }
+        }
+        return sb.ToString();
+    }
+
+    // прочитано уверенно: у каждого знака заметный отрыв от следующего варианта
+    static bool Sure(List<Word> p, int from, int to, bool number) {
+        for (int i = from; i < to && i < p.Count; i++)
+            foreach (Glyph g in p[i].G) {
+                if (".-/\"«»".IndexOf(g.C) >= 0) continue;
+                bool d = number && char.IsDigit(BestOf(g, Digits + Letters)) || number && char.IsDigit(g.C);
+                if (g.S < 0.5) return false;
+                if (Margin(g, d ? Digits : Letters) < (d ? 0.08 : 0.05)) return false;
+            }
+        return true;
+    }
+
+    static string Join(List<Word> p, int from) { return Join(p, from, p.Count); }
+
+    static string Join(List<Word> p, int from, int to) {
+        List<string> l = new List<string>();
+        for (int i = from; i < to && i < p.Count; i++) l.Add(p[i].Text);
+        return string.Join(" ", l.ToArray());
+    }
+
+    static bool Has(List<Word> p, string w) {
+        foreach (Word x in p) if (Like(x.Text, w)) return true;
+        return false;
+    }
+
+    // одно и то же слово с точностью до одной ошибки распознавания (и точки в конце)
+    static bool Like(string a, string b) {
+        string x = a.ToLowerInvariant().TrimEnd('.'), y = b.ToLowerInvariant().TrimEnd('.');
+        if (x == y) return true;
+        return y.Length >= 3 && PassportPage.Distance(x, y) <= 1;
+    }
+
+    static string NpType(string w) {
+        string x = w.ToLowerInvariant().Replace(" ", "");
+        if (x == "г." || x == "г") return "г.";
+        if (x == "д." || x == "д") return "д.";
+        if (x == "аг." || x == "аг") return "аг.";
+        if (x == "п." || x == "пос." || x == "п") return "п.";
+        if (x == "г.п." || x == "гп." || x == "г.п" || x == "гп") return "г.п.";
+        return null;
+    }
+
+    static string StreetType(string w) {
+        string x = w.ToLowerInvariant().TrimEnd('.');
+        if (x == "ул" || x == "улица") return "ул.";
+        if (x == "пер" || x == "переулок") return "пер.";
+        if (x == "пр-т" || x == "просп" || x == "проспект" || x == "пр-кт") return "пр-т";
+        if (x == "пр" || x == "проезд") return "пр.";
+        if (x == "туп" || x == "тупик") return "туп.";
+        if (x == "мкр" || x == "микрорайон") return "мкр.";
+        if (x == "б-р" || x == "бульвар") return "б-р";
+        return null;
+    }
+
+    // «боровляны» -> «Боровляны», «новая боровая» -> «Новая Боровая», «Строитель-2» как есть
+    static string Title(string s) {
+        StringBuilder sb = new StringBuilder();
+        bool start = true;
+        foreach (char c in s) {
+            sb.Append(start ? char.ToUpperInvariant(c) : char.ToLowerInvariant(c));
+            start = c == ' ' || c == '-' || c == '"';
+        }
+        return sb.ToString();
+    }
+}
+
 // Фото документов абонента (паспорт, свидетельство): у каждого договора своя папка с фото,
 // миниатюры в форме, окно просмотра рядом с формой, перенос фото с телефона по кабелю.
 
@@ -10543,7 +11025,10 @@ public class DogovorForm : Form {
     readonly string photoRoot;
     string photoDir;                                 // папка фото этого договора; null - фото ещё нет
     readonly PhotoStrip strip = new PhotoStrip();
-    readonly Label photoNote = Ui.Note(""), lichnyNote = Ui.Note(""), fioNote = Ui.Note("");
+    readonly Label photoNote = Ui.Note(""), lichnyNote = Ui.Note(""), fioNote = Ui.Note(""), certNote = Ui.Note("");
+    CertResult lastCert;                            // прочитанное со свидетельства о госрегистрации
+    string certWhere = "";
+    bool certSure;
     Button phoneButton, photoAdd, photoFolder;
     PhotoViewer viewer;
     bool phoneBusy;
@@ -10774,6 +11259,7 @@ public class DogovorForm : Form {
             F("Корпус", T("korp", 1, null), 1), F("Квартира", T("kv", 1, null), 1));
         Row(c, F("Адрес объекта - так будет в договоре (собирается сам из полей выше, можно поправить)", T("adres", 1, null), 8));
         Row(c, F(null, adresNote, 8));
+        Row(c, F(null, certNote, 8));
         Row(c, F("Допуск: акт осмотра №", T("dopusk_nom", 1, "например 407-Ф"), 2), F("от", D("dopusk_data"), 2),
             F("кем выдан", C("dopusk_kem", true, false, null), 4));
         Row(c, F("Прочие условия (пункт 28.1)", C("prochie", true, true, null), 8));
@@ -11187,6 +11673,7 @@ public class DogovorForm : Form {
             }
         } finally { loading = false; }
         if (key == "ls") Recheck(true, false);
+        if (lastCert != null && (Array.IndexOf(CertKeys, key) >= 0 || key == "fio" || key == "kadastr")) CertNote();
         if (key == "adres" || key == "np_tip" || key == "np" || key == "ulica_tip" || key == "ulica" || key == "dom" || key == "korp" || key == "kv") Recheck(false, true);
         if (key.EndsWith("tarif") || key.EndsWith("vvod_tip") || key == "schetchikov" || key == "sms" || key == "utratil" || key == "plita") Enable();
         RefreshState();
@@ -11766,12 +12253,13 @@ public class DogovorForm : Form {
         tip.SetToolTip(phoneButton, "Телефон подключён кабелем и разблокирован, на телефоне выбрано «Передача файлов».\nНовые фото с телефона попадут в папку этого договора");
         foreach (Button b in new Button[] { folder, add, phoneButton }) { b.TabStop = false; c.AddExtra(b); }
         strip.Hint = "Фото пока нет. Сфотографируйте телефоном паспорт (последнюю страницу - со строками «<<<», предпоследнюю, прописку) " +
-            "и свидетельство, подключите телефон кабелем и нажмите «Забрать фото с телефона». Личный номер программа прочитает с фото сама.";
+            "и свидетельство, подключите телефон кабелем и нажмите «Забрать фото с телефона». Личный номер, Ф.И.О. и адрес объекта программа прочитает с фото сама.";
         strip.OpenPhoto += delegate(string f) { ShowPhoto(f); };
         strip.RemovePhoto += delegate(string f) { RemovePhoto(f); };
         strip.Resized += delegate { LayoutCards(); };
         lichnyNote.Click += delegate { if (photoPersonal.Length > 0 && V("lichny") != photoPersonal) SetV("lichny", photoPersonal); };
         fioNote.Click += delegate { if (photoFio.Length > 0 && Same(V("fio")) != Same(photoFio)) SetV("fio", photoFio); };
+        certNote.Click += delegate { if (lastCert != null && !CertSame()) { PutCert(); CertNote(); } };
         Row(c, F(null, photoNote, 4));
         Row(c, F(null, strip, 4));
     }
@@ -11939,7 +12427,7 @@ public class DogovorForm : Form {
 
     // для проверки: открыть фото по номеру, что написано про фото
     public void ShowPhotoAt(int i) { List<string> f = strip.Files; if (i < f.Count) ShowPhoto(f[i]); }
-    public string PhotoStatus { get { return photoNote.Text + " | " + lichnyNote.Text + " | " + fioNote.Text + " | папка: " + PhotoRef(); } }
+    public string PhotoStatus { get { return photoNote.Text + " | " + lichnyNote.Text + " | " + fioNote.Text + " | " + certNote.Text + " | папка: " + PhotoRef(); } }
 
     void PhoneDone(PhoneResult r, string dir, DateTime since, int gen) {
         phoneBusy = false;
@@ -11976,15 +12464,19 @@ public class DogovorForm : Form {
                 foreach (string f in list) {
                     MrzResult r = null;
                     PageResult pg = null;
+                    CertResult ce = null;
                     try {
                         r = Mrz.Read(f);
                         // строк «<<<» нет (или нашлось что-то похожее, но не они) - может, это страница с Ф.И.О.
                         if (!r.Valid) pg = PassportPage.Read(f);
-                    } catch (Exception ex) { r = new MrzResult(); r.Info = "не открывается: " + ex.Message; pg = null; }
+                        // и не она - может, свидетельство о госрегистрации (адрес)
+                        if (!r.Valid && (pg == null || !pg.Found)) ce = CertPage.Read(f);
+                    } catch (Exception ex) { r = new MrzResult(); r.Info = "не открывается: " + ex.Message; pg = null; ce = null; }
                     string file = f;
                     MrzResult res = r;
                     PageResult page = pg;
-                    Post(delegate { if (gen == photoGen) PhotoRead(file, res, page); });
+                    CertResult cert = ce;
+                    Post(delegate { if (gen == photoGen) PhotoRead(file, res, page, cert); });
                 }
             }
             Post(delegate { mrzRunning--; if (gen == photoGen) PhotosRead(); });
@@ -11996,9 +12488,16 @@ public class DogovorForm : Form {
 
     static bool Blr(MrzResult r) { return r.Line2.Length == 44 && r.Line2.Substring(10, 3) == "BLR"; }
 
-    void PhotoRead(string f, MrzResult r, PageResult page) {
+    void PhotoRead(string f, MrzResult r, PageResult page, CertResult cert) {
         string name = Path.GetFileName(f);
         if (r != null && r.Info.StartsWith("не открывается")) { strip.Mark(f, "фото не открывается", St.Bad); return; }
+        if (cert != null && cert.Found) {
+            lastCert = cert;
+            certWhere = name;
+            ApplyCert();
+            strip.Mark(f, certSure ? "адрес прочитан" : "адрес - проверьте", certSure ? St.Good : Warn);
+            return;
+        }
         if (page != null && page.Found) {
             lastPage = page;
             pageWhere = name;
@@ -12043,9 +12542,13 @@ public class DogovorForm : Form {
             else if (photoFioOk) parts.Add("Ф.И.О. прочитано с фото «" + pageWhere + "»");
             else { parts.Add("Ф.И.О. с фото «" + pageWhere + "» прочитано неуверенно - проверьте подсказку под полем"); good = false; }
         }
+        if (lastCert != null) {
+            if (certSure) parts.Add("адрес объекта прочитан со свидетельства (фото «" + certWhere + "»)");
+            else { parts.Add("адрес со свидетельства (фото «" + certWhere + "») прочитан неуверенно - проверьте подсказку под адресом"); good = false; }
+        }
         if (parts.Count == 0) { PhotoNote(importNote, photoNote.ForeColor); return; }
         string s = string.Join("; ", parts.ToArray());
-        PhotoNote((importNote.Length > 0 ? importNote.TrimEnd('.') + ". " : "") + char.ToUpper(s[0]) + s.Substring(1) + ". Сверьте с паспортом.", good ? St.Good : Warn);
+        PhotoNote((importNote.Length > 0 ? importNote.TrimEnd('.') + ". " : "") + char.ToUpper(s[0]) + s.Substring(1) + ". Сверьте с документами.", good ? St.Good : Warn);
     }
 
     static string Same(string s) { return s.Trim().ToUpper().Replace('Ё', 'Е').Replace("  ", " "); }
@@ -12067,6 +12570,75 @@ public class DogovorForm : Form {
         if (!lastPage.NameOk) d.Add("имя");
         if (!lastPage.PatronymicOk) d.Add("отчество");
         return string.Join(", ", d.ToArray());
+    }
+
+    // ---------- адрес со свидетельства ----------
+
+    // название из своих списков (сельсоветы, прежние н.п. и улицы) - прочитано верно, даже если буквы были неуверенные
+    bool Known(string key, string v) {
+        if (v.Length == 0) return true;
+        ComboBox cb = inp[key] as ComboBox;
+        if (cb != null) foreach (object o in cb.Items) if (Same(o.ToString()) == Same(v)) return true;
+        return false;
+    }
+
+    // поля адреса со свидетельства
+    static readonly string[] CertKeys = { "np_tip", "np", "selsovet", "ulica_tip", "ulica", "dom", "korp", "kv" };
+
+    string[] CertValues() {
+        CertResult c = lastCert;
+        return new string[] { c.NpTip, c.Np, c.Selsovet, c.UlicaTip, c.Ulica, c.Dom, c.Korp, c.Kv };
+    }
+
+    bool CertSame() {
+        string[] v = CertValues();
+        for (int i = 0; i < CertKeys.Length; i++) if (Same(V(CertKeys[i])) != Same(v[i])) return false;
+        return true;
+    }
+
+    void PutCert() {
+        string[] v = CertValues();
+        for (int i = 0; i < CertKeys.Length; i++) SetV(CertKeys[i], v[i]);
+        if (lastCert.Kadastr.Length > 0 && lastCert.KadastrOk && V("kadastr").Length == 0) SetV("kadastr", lastCert.Kadastr);
+    }
+
+    // прочитанное со свидетельства - в пустые поля адреса, если уверенно; иначе подсказка под адресом
+    void ApplyCert() {
+        CertResult c = lastCert;
+        // сельсовет - из закрытого списка: прочитанное с 1-2 ошибками («Воровлянский») - ближайший из справочника
+        if (c.Selsovet.Length > 0 && !Known("selsovet", c.Selsovet)) {
+            string best = null;
+            int bd = 99, cnt = 0;
+            foreach (string k in With(lists.Get("Сельсовет"), memory.Hist("сельсовет"))) {
+                int d = PassportPage.Distance(Same(k), Same(c.Selsovet));
+                if (d < bd) { bd = d; best = k; cnt = 1; } else if (d == bd) cnt++;
+            }
+            if (best != null && cnt == 1 && bd <= 2 && bd * 5 <= best.Length) { c.Selsovet = best; c.SelsovetSure = true; }
+        }
+        certSure = c.Found && c.Rest && (c.NpSure || Known("np", c.Np) || Same(c.Np) == "МИНСК") &&
+            (c.SelsovetSure || Known("selsovet", c.Selsovet)) && (c.UlicaSure || Known("ulica", c.Ulica));
+        bool empty = true;
+        foreach (string k in CertKeys) if (k != "np_tip" && k != "ulica_tip" && V(k).Length > 0) empty = false;
+        if (certSure && empty) PutCert();
+        else if (c.Kadastr.Length > 0 && c.KadastrOk && V("kadastr").Length == 0 && CertSame()) SetV("kadastr", c.Kadastr);
+        CertNote();
+    }
+
+    void CertNote() {
+        if (lastCert == null) { Note(certNote, "", St.Hint, false); certNote.Cursor = Cursors.Default; return; }
+        CertResult c = lastCert;
+        string owner = "";
+        // правообладатель - тот, с кем договор? (сравниваем фамилию)
+        if (c.Owner.Length > 0 && V("fio").Length > 0) {
+            string a = Same(c.Owner).Split(' ')[0], b = Same(V("fio")).Split(' ')[0];
+            if (a != b && PassportPage.Distance(a, b) > 1) owner = " Правообладатель по свидетельству: " + c.Owner + " - не тот, с кем договор?";
+        }
+        string kad = c.Kadastr.Length > 0 && V("kadastr").Length > 0 && Digits(V("kadastr")) != c.Kadastr ? " Кадастровый номер в свидетельстве: " + c.Kadastr + "." : "";
+        bool same = CertSame();
+        if (same) Note(certNote, "Адрес как в свидетельстве (фото «" + certWhere + "») - сверьте с документом." + kad + owner, owner.Length > 0 ? Warn : St.Good, false);
+        else Note(certNote, "Со свидетельства (фото «" + certWhere + "»): " + c.Short + (certSure ? "" : " - прочитано неуверенно, проверьте") +
+            "; щёлкните, чтобы подставить." + kad + owner, Warn, true);
+        certNote.Cursor = same ? Cursors.Default : Cursors.Hand;
     }
 
     void LichnyNote() {
@@ -12307,14 +12879,16 @@ public class DogovorForm : Form {
         photoDir = null;
         lastMrz = null;
         lastPage = null;
-        mrzWhere = pageWhere = importNote = photoPersonal = photoFio = "";
-        photoFioOk = mrzWeak = false;
+        lastCert = null;
+        mrzWhere = pageWhere = importNote = photoPersonal = photoFio = certWhere = "";
+        photoFioOk = mrzWeak = certSure = false;
         if (viewer != null && !viewer.IsDisposed) viewer.Close();
         strip.ClearMarks();
         RefreshPhotos();
         Note(photoNote, "", St.Hint, false);
         LichnyNote();
         FioNote();
+        CertNote();
         head.Text = "Новый договор";
         headSub.Text = "Заполните поля - программа подставит их в шаблон Word и сохранит договор в папку «Договоры»";
         headSub.ForeColor = St.Hint;
