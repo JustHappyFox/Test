@@ -11905,6 +11905,9 @@ public class BaseLink {
     public LiveBase Base;
     public string Folder, Table, Error;
     public bool Ready { get { return Base != null; } }
+    // ищем только по индексам базы (CDX), перебора таблицы нет; нет индекса - проверить нельзя (а не «нет в базе»)
+    public bool AccountIndex { get { return Base != null && Base.TagFor("NAB") != null; } }
+    public bool AddressIndex { get { return Base != null && Base.TagFor("UL", true) != null; } }
     readonly object sync = new object();
 
     // открыть базу; запомненное (папка, таблица, справочник улиц) - в settings, найденное заново - туда же
@@ -12002,6 +12005,7 @@ public class BaseLink {
         lock (sync) {
             SearchResult r = Base.Search(nab, SearchMode.Account, null, false);
             if (r.Error != null) throw new Exception(r.Error);
+            if (r.NoIndex) throw new Exception("в базе нет индекса по лицевому счёту");
             if (r.Table == null) return found;
             foreach (int row in r.Rows)
                 if (Clean(F(r.Table, row, "NAB")) == Clean(nab)) found.Add(Describe(r.Table, row));
@@ -12016,6 +12020,7 @@ public class BaseLink {
         lock (sync) {
             SearchResult r = Base.Search(query, SearchMode.Address, null, false);
             if (r.Error != null) throw new Exception(r.Error);
+            if (r.NoIndex) throw new Exception("в базе нет индекса по улице и дому");
             if (r.Table != null)
                 foreach (int row in r.Rows) if (!r.Added.ContainsKey(row)) found.Add(Describe(r.Table, row));
             if (found.Count == 0 && r.Note.Length > 0) note = r.Note;
@@ -12850,8 +12855,15 @@ public class DogovorForm : Form {
                     foreach (string k in new string[] { "БазаПапка", "БазаТаблица", "БазаУлицы", "БазаУлицыКлюч", "БазаСвязи" })
                         if (settings.ContainsKey(k)) memory.Values[k] = settings[k];
                     memory.Save();
-                    baseLabel.Text = "База: " + b.Table + "\n" + b.Base.RecordCount.ToString("#,0") + " записей - лицевые и адреса проверяются";
-                    baseLabel.ForeColor = Color.FromArgb(150, 210, 170);
+                    // проверка - поиском по индексу базы (несколько чтений), не перебором всех записей
+                    if (b.AccountIndex && b.AddressIndex) {
+                        baseLabel.Text = "База: " + b.Table + "\nлицевой и адрес ищутся по индексу базы";
+                        baseLabel.ForeColor = Color.FromArgb(150, 210, 170);
+                    } else {
+                        string what = !b.AccountIndex && !b.AddressIndex ? "индексов - лицевые и адреса" : !b.AccountIndex ? "индекса по лицевому - лицевые" : "индекса по адресу - адреса";
+                        baseLabel.Text = "База: " + b.Table + "\nнет " + what + " не проверяются";
+                        baseLabel.ForeColor = Color.FromArgb(240, 150, 150);
+                    }
                 } else {
                     baseLabel.Text = "База недоступна: " + b.Error + "\nлицевые не проверяются";
                     baseLabel.ForeColor = Color.FromArgb(240, 150, 150);
