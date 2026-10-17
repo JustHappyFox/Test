@@ -5244,6 +5244,984 @@ public static class CertPage {
     }
 }
 
+// Счётчик на фото (Энергомера CE208BY / CE318BY): заводской номер - по штрихкоду наклейки (Code 128, своя контрольная
+// сумма), тип - по надписи модификации со сверкой со справочником, показания - с табло (семисегментные цифры).
+public class MeterResult {
+    public bool Found;                    // на снимке счётчик: табло, или штрихкод вместе с надписью типа
+    public string Serial = "";            // заводской номер
+    public int SerialRows;                // сколько строк развёртки штрихкода дали этот номер
+    public string Type = "";              // полное обозначение из справочника
+    public bool TypeOk;
+    public string TypeText = "";          // как прочитана надпись
+    public string Reading = "";           // показания как на табло, с запятой: «05801,969» («?» - цифра не разобрана)
+    public bool ReadingOk;                // цифры чёткие, экран 1.8.0 (сумма)
+    public string Code = "";              // код экрана: «1.8.0» - сумма
+    public string Year = "";              // год на наклейке со штрихкодом (выпуск, первая поверка)
+    public string Info = "";
+}
+
+public static class MeterPhoto {
+    // ---------- штрихкод Code 128 ----------
+
+    static readonly string[] P128 = ("212222 222122 222221 121223 121322 131222 122213 122312 132212 221213 221312 231212 112232 122132 122231 " +
+        "113222 123122 123221 223211 221132 221231 213212 223112 312131 311222 321122 321221 312212 322112 322211 212123 212321 232121 111323 " +
+        "131123 131321 112313 132113 132311 211313 231113 231311 112133 112331 132131 113123 113321 133121 313121 211331 231131 213113 213311 " +
+        "213131 311123 311321 331121 312113 312311 332111 314111 221411 431111 111224 111422 121124 121421 141122 141221 112214 112412 122114 " +
+        "122411 142112 142211 241211 221114 413111 241112 134111 111242 121142 121241 114212 124112 124211 411212 421112 421211 212141 214121 " +
+        "412121 111143 111341 131141 114113 114311 411113 411311 113141 114131 311141 411131 211412 211214 211232").Split(' ');
+    static Dictionary<int, List<int>> eTable;
+
+    static int EKey(int e1, int e2, int e3, int e4) { return ((e1 * 10 + e2) * 10 + e3) * 10 + e4; }
+
+    static void InitTable() {
+        if (eTable != null) return;
+        Dictionary<int, List<int>> t = new Dictionary<int, List<int>>();
+        for (int v = 0; v < P128.Length; v++) {
+            int[] w = new int[6];
+            for (int i = 0; i < 6; i++) w[i] = P128[v][i] - '0';
+            int k = EKey(w[0] + w[1], w[1] + w[2], w[2] + w[3], w[3] + w[4]);
+            List<int> l;
+            if (!t.TryGetValue(k, out l)) { l = new List<int>(); t[k] = l; }
+            l.Add(v);
+        }
+        eTable = t;
+    }
+
+    // знак по ширинам 6 элементов (полоса, пробел, ...): по расстояниям между краями - так не мешает растекание краски
+    static int Symbol(double[] r, int i) {
+        double T = 0;
+        for (int k = 0; k < 6; k++) T += r[i + k];
+        double m = T / 11;
+        int[] e = new int[4];
+        for (int k = 0; k < 4; k++) {
+            double x = (r[i + k] + r[i + k + 1]) / m;
+            e[k] = (int)Math.Round(x);
+            if (e[k] < 2 || e[k] > 7) return -1;
+        }
+        List<int> c;
+        if (!eTable.TryGetValue(EKey(e[0], e[1], e[2], e[3]), out c)) return -1;
+        if (c.Count == 1) return c[0];
+        // несколько знаков с теми же расстояниями - по сумме ширин полос
+        double bars = (r[i] + r[i + 2] + r[i + 4]) / m;
+        int best = -1;
+        double bd = 9;
+        foreach (int v in c) {
+            int b = P128[v][0] - '0' + P128[v][2] - '0' + P128[v][4] - '0';
+            if (Math.Abs(b - bars) < bd) { bd = Math.Abs(b - bars); best = v; }
+        }
+        return best;
+    }
+
+    static bool Stop(double[] r, int i) {
+        if (i + 7 > r.Length) return false;
+        double T = 0;
+        for (int k = 0; k < 7; k++) T += r[i + k];
+        double m = T / 13;
+        int[] want = { 2, 3, 3, 1, 1, 1, 2 };
+        for (int k = 0; k < 6; k++) {
+            double x = (r[i + k] + r[i + k + 1]) / m;
+            if (Math.Abs(x - (want[k] + want[k + 1])) > 0.6) return false;
+        }
+        return true;
+    }
+
+    // разбор последовательности ширин (r[0] - полоса); null - не Code 128
+    static string Decode128(double[] r, int start) { int end; return Decode128(r, start, out end); }
+
+    // end - индекс последнего участка знака «стоп»
+    static string Decode128(double[] r, int start, out int end) {
+        end = -1;
+        int s = Symbol(r, start);
+        if (s < 103 || s > 105) return null;
+        // тихая зона перед штрихкодом
+        double mod = 0;
+        for (int k = 0; k < 6; k++) mod += r[start + k];
+        mod /= 11;
+        if (start > 0 && r[start - 1] < 3 * mod) return null;
+        List<int> vals = new List<int>();
+        vals.Add(s);
+        int i = start + 6;
+        while (true) {
+            if (Stop(r, i)) { end = i + 6; break; }
+            if (i + 6 > r.Length) return null;
+            int v = Symbol(r, i);
+            if (v < 0 || v > 102) return null;
+            vals.Add(v);
+            i += 6;
+            if (vals.Count > 40) return null;
+        }
+        if (vals.Count < 3) return null;
+        int sum = vals[0];
+        for (int k = 1; k < vals.Count - 1; k++) sum += k * vals[k];
+        if (sum % 103 != vals[vals.Count - 1]) return null;
+        // текст: набор C - пары цифр, B - знаки ASCII
+        StringBuilder sb = new StringBuilder();
+        int set = s == 105 ? 'C' : s == 104 ? 'B' : 'A';
+        for (int k = 1; k < vals.Count - 1; k++) {
+            int v = vals[k];
+            if (set == 'C') {
+                if (v < 100) sb.Append(v.ToString("00"));
+                else if (v == 100) set = 'B';
+                else if (v == 101) set = 'A';
+            } else {
+                if (v == 99) set = 'C';
+                else if (v == 100 && set == 'A') set = 'B';
+                else if (v == 101 && set == 'B') set = 'A';
+                else if (v < 96) sb.Append((char)(set == 'B' || v < 64 ? v + 32 : v - 64));
+            }
+        }
+        return sb.ToString();
+    }
+
+    // развёртка: строки снимка через шаг; в каждой - края полос с точностью до доли точки
+    // where: x0, y0, x1, y1 штрихкода с самым частым текстом, и 1 - если он перевёрнут
+    static Dictionary<string, int> Scan(GrayImage g, out int[] where) {
+        InitTable();
+        Dictionary<string, int> votes = new Dictionary<string, int>();
+        where = null;
+        Dictionary<string, int[]> box = new Dictionary<string, int[]>();
+        int w = g.W, R = Math.Max(6, w / 160), step = Math.Max(2, g.H / 600);
+        double[] mean = new double[w];
+        float[] v = new float[w];
+        int bestN = 0;
+        string bestText = null;
+        for (int y = 0; y < g.H; y += step) {
+            int o = y * w;
+            for (int x = 0; x < w; x++) v[x] = g.P[o + x];
+            // порог - середина между самым светлым и самым тёмным рядом (среднее по окну сдвигает края у тихой зоны)
+            for (int x0 = 0; x0 < w; x0 += 4) {
+                int xa = Math.Max(0, x0 - R), xb = Math.Min(w - 1, x0 + 3 + R);
+                float lo = 255, hi = 0;
+                for (int x = xa; x <= xb; x++) { if (v[x] < lo) lo = v[x]; if (v[x] > hi) hi = v[x]; }
+                double t = hi - lo < 30 ? -1 : (lo + hi) / 2.0;
+                for (int x = x0; x < x0 + 4 && x < w; x++) mean[x] = t;
+            }
+            // края: переходы через порог
+            List<double> edges = new List<double>();
+            List<bool> darkAfter = new List<bool>();
+            bool prev = v[0] < mean[0];
+            for (int x = 1; x < w; x++) {
+                bool d = v[x] < mean[x];
+                if (d == prev) continue;
+                double t0 = v[x - 1] - mean[x - 1], t1 = v[x] - mean[x];
+                double f = t0 == t1 ? 0.5 : t0 / (t0 - t1);
+                edges.Add(x - 1 + f);
+                darkAfter.Add(d);
+                prev = d;
+            }
+            if (edges.Count < 30) continue;
+            double[] runs = new double[edges.Count - 1];
+            for (int k = 0; k + 1 < edges.Count; k++) runs[k] = edges[k + 1] - edges[k];
+            // в обе стороны (штрихкод может быть вверх ногами); участок k тёмный, если после края k - тёмное
+            int n = runs.Length;
+            for (int dir = 0; dir < 2; dir++) {
+                double[] r = runs;
+                if (dir == 1) {
+                    r = new double[n];
+                    for (int k = 0; k < n; k++) r[k] = runs[n - 1 - k];
+                }
+                for (int k = 0; k + 13 < n; k++) {
+                    if (darkAfter[dir == 0 ? k : n - 1 - k] == false) continue;
+                    int end;
+                    string txt = Decode128(r, k, out end);
+                    if (txt == null || txt.Length == 0) continue;
+                    int c;
+                    votes.TryGetValue(txt, out c);
+                    votes[txt] = c + 1;
+                    if (c + 1 > bestN) { bestN = c + 1; bestText = txt; }
+                    double xa = dir == 0 ? edges[k] : edges[n - 1 - end], xb = dir == 0 ? edges[end + 1] : edges[n - k];
+                    int[] bx;
+                    if (!box.TryGetValue(txt, out bx)) { bx = new int[] { (int)xa, y, (int)xb, y, dir }; box[txt] = bx; }
+                    bx[0] = Math.Min(bx[0], (int)xa); bx[2] = Math.Max(bx[2], (int)xb); bx[1] = Math.Min(bx[1], y); bx[3] = Math.Max(bx[3], y);
+                }
+            }
+        }
+        if (bestText != null) where = box[bestText];
+        return votes;
+    }
+
+    // заводской номер со штрихкода: строка с наибольшим числом подтверждений (не меньше двух)
+    public static string Barcode(GrayImage full, out int rows) { string year; return Barcode(full, out rows, out year); }
+
+    // year - год, напечатанный поперёк справа от штрихкода (на наклейке Энергомеры)
+    public static string Barcode(GrayImage full, out int rows, out string year) {
+        rows = 0;
+        year = "";
+        string best = "";
+        GrayImage img = full;
+        for (int turn = 0; turn < 2; turn++) {
+            int[] where;
+            Dictionary<string, int> v = Scan(img, out where);
+            foreach (KeyValuePair<string, int> kv in v)
+                if (kv.Value > rows && kv.Key.Length >= 6) { rows = kv.Value; best = kv.Key; }
+            if (rows >= 2) {
+                if (where != null) try { year = Year(img, where); } catch (Exception) { year = ""; }
+                break;
+            }
+            img = full.Rotate90();       // снимок на боку - штрихкод вертикальный
+        }
+        if (rows < 2) { rows = 0; return ""; }
+        return best;
+    }
+
+    // год справа от штрихкода (у перевёрнутого - слева), написан снизу вверх: 4 цифры 20xx
+    static string Year(GrayImage g, int[] b) {
+        Init();
+        int w = b[2] - b[0];
+        bool flip = b[4] == 1;
+        // надпись: по высоте - около трети ширины штрихкода, середина - чуть ниже середины полос
+        double cy = (b[1] + b[3]) / 2.0 + (flip ? -0.08 : 0.08) * w;
+        int x0 = flip ? b[0] - (int)(0.32 * w) : b[2] + (int)(0.02 * w), x1 = flip ? b[0] - (int)(0.02 * w) : b[2] + (int)(0.32 * w);
+        int y0 = (int)(cy - 0.32 * w), y1 = (int)(cy + 0.32 * w);
+        if (x1 - x0 < 10 || y1 - y0 < 10) return "";
+        GrayImage crop = Crop(g, x0, y0, x1, y1);
+        // поворот: снизу вверх - по часовой; у перевёрнутого снимка - против
+        GrayImage r = crop.Rotate90();
+        if (flip) r = r.Rotate90().Rotate90();
+        // крупнее и с белыми полями - поиск строк рассчитан на текст не мельче 20 точек
+        r = Grow(r, Math.Max(1, (int)Math.Ceiling(80.0 / Math.Max(1, r.H))));
+        foreach (GrayImage img in new GrayImage[] { r, r.Rotate90().Rotate90() }) {
+            foreach (PassportPage.Line l in PassportPage.FindLines(img, false)) {
+                PassportPage.Strip st = PassportPage.ReadLine(img, l, latin);
+                if (st == null || st.G == null) continue;
+                StringBuilder sb = new StringBuilder();
+                foreach (Glyph gl in st.G) sb.Append(gl.C);
+                string t = Key(sb.ToString());
+                for (int i = 0; i + 4 <= t.Length; i++) {
+                    string y4 = t.Substring(i, 4);
+                    int yv;
+                    if (int.TryParse(y4, out yv) && yv >= 2005 && yv <= DateTime.Now.Year) return y4;
+                }
+            }
+        }
+        return "";
+    }
+
+    // ---------- табло: семисегментные цифры ----------
+
+    // сегменты: a - верх, b - правый верхний, c - правый нижний, d - низ, e - левый нижний, f - левый верхний, g - середина
+    static readonly string[] Seg7 = { "abcdef", "bc", "abdeg", "abcdg", "bcfg", "acdfg", "acdefg", "abc", "abcdefg", "abcdfg" };
+
+    class Blob { public int X0, Y0, X1, Y1; public int Ht { get { return Y1 - Y0 + 1; } } public int Wd { get { return X1 - X0 + 1; } } }
+
+    // тёмное относительно среднего по окну (r - полуширина окна)
+    static bool[] Dark(GrayImage g, int r) {
+        int w = g.W, h = g.H;
+        long[] sum = new long[(w + 1) * (h + 1)];
+        for (int y = 0; y < h; y++) {
+            long row = 0;
+            for (int x = 0; x < w; x++) {
+                row += g.P[y * w + x];
+                sum[(y + 1) * (w + 1) + x + 1] = sum[y * (w + 1) + x + 1] + row;
+            }
+        }
+        bool[] d = new bool[w * h];
+        for (int y = 0; y < h; y++) {
+            int ya = Math.Max(0, y - r), yb = Math.Min(h, y + r + 1);
+            for (int x = 0; x < w; x++) {
+                int xa = Math.Max(0, x - r), xb = Math.Min(w, x + r + 1);
+                long s = sum[yb * (w + 1) + xb] - sum[ya * (w + 1) + xb] - sum[yb * (w + 1) + xa] + sum[ya * (w + 1) + xa];
+                int mean = (int)(s / ((xb - xa) * (yb - ya)));
+                int v = g.P[y * w + x];
+                d[y * w + x] = mean - v > Math.Max(12, mean * 15 / 100);
+            }
+        }
+        return d;
+    }
+
+    // утолщение тёмного на r точек (сегменты одной цифры сливаются в одно пятно)
+    static bool[] Dilate(bool[] m, int w, int h, int r) {
+        if (r <= 0) return m;
+        bool[] t = new bool[w * h], o = new bool[w * h];
+        for (int y = 0; y < h; y++) {
+            int cnt = 0, b = y * w;
+            for (int x = 0; x < Math.Min(w, r); x++) if (m[b + x]) cnt++;
+            for (int x = 0; x < w; x++) {
+                if (x + r < w && m[b + x + r]) cnt++;
+                if (x - r - 1 >= 0 && m[b + x - r - 1]) cnt--;
+                t[b + x] = cnt > 0;
+            }
+        }
+        for (int x = 0; x < w; x++) {
+            int cnt = 0;
+            for (int y = 0; y < Math.Min(h, r); y++) if (t[y * w + x]) cnt++;
+            for (int y = 0; y < h; y++) {
+                if (y + r < h && t[(y + r) * w + x]) cnt++;
+                if (y - r - 1 >= 0 && t[(y - r - 1) * w + x]) cnt--;
+                o[y * w + x] = cnt > 0;
+            }
+        }
+        return o;
+    }
+
+    // значение, вокруг которого больше всего других (в пределах tol); из этой группы - крайнее (min или max)
+    static double Cluster(List<int> v, double tol, bool min) {
+        int best = 0;
+        double res = v[0];
+        foreach (int a in v) {
+            int cnt = 0;
+            double ext = a;
+            foreach (int b in v) if (Math.Abs(b - a) <= tol) { cnt++; ext = min ? Math.Min(ext, b) : Math.Max(ext, b); }
+            if (cnt > best || cnt == best && (min ? ext < res : ext > res)) { best = cnt; res = ext; }
+        }
+        return res;
+    }
+
+    // увеличить в k раз и обвести полем цвета фона: сверху и снизу - широким (поиск строк ждёт строку
+    // не выше 1/12 высоты картинки, как на странице)
+    static GrayImage Grow(GrayImage g, int k) {
+        int pad = 20 * k, padY = 6 * g.H * k;
+        GrayImage o = new GrayImage(g.W * k + 2 * pad, g.H * k + 2 * padY);
+        for (int i = 0; i < o.P.Length; i++) o.P[i] = 255;
+        // поле - цвета фона наклейки (светлее всего)
+        byte bg = 0;
+        foreach (byte v in g.P) if (v > bg) bg = v;
+        for (int i = 0; i < o.P.Length; i++) o.P[i] = bg;
+        for (int y = 0; y < g.H * k; y++)
+            for (int x = 0; x < g.W * k; x++) o.P[(y + padY) * o.W + x + pad] = (byte)g.Sample((double)x / k, (double)y / k);
+        return o;
+    }
+
+    static void Save(GrayImage g, string file) {
+        using (Bitmap bm = new Bitmap(g.W, g.H)) {
+            for (int y = 0; y < g.H; y++) for (int x = 0; x < g.W; x++) { int v = g.P[y * g.W + x]; bm.SetPixel(x, y, Color.FromArgb(v, v, v)); }
+            bm.Save(file);
+        }
+    }
+
+    static GrayImage Crop(GrayImage g, int x0, int y0, int x1, int y1) {
+        x0 = Math.Max(0, x0); y0 = Math.Max(0, y0); x1 = Math.Min(g.W - 1, x1); y1 = Math.Min(g.H - 1, y1);
+        GrayImage c = new GrayImage(Math.Max(1, x1 - x0 + 1), Math.Max(1, y1 - y0 + 1));
+        for (int y = 0; y < c.H; y++) Array.Copy(g.P, (y0 + y) * g.W + x0, c.P, y * c.W, c.W);
+        return c;
+    }
+
+    // ряды пятен одной высоты слева направо (кандидаты в строку цифр)
+    static List<List<Blob>> Rows(List<Blob> bl, int minCount) {
+        bl.Sort(delegate(Blob a, Blob b) { return a.X0.CompareTo(b.X0); });
+        List<List<Blob>> rows = new List<List<Blob>>();
+        bool[] used = new bool[bl.Count];
+        for (int s = 0; s < bl.Count; s++) {
+            if (used[s]) continue;
+            List<Blob> row = new List<Blob>();
+            row.Add(bl[s]);
+            int cur = s;
+            while (true) {
+                int next = -1;
+                Blob c = bl[cur];
+                for (int j = cur + 1; j < bl.Count; j++) {
+                    Blob d = bl[j];
+                    double h = Math.Max(c.Ht, d.Ht);
+                    if (d.X0 > c.X1 + 0.9 * h) break;
+                    if (used[j] || d.X0 < c.X1 - 0.15 * h) continue;
+                    // с соседом слева: верх на одном уровне, низ - почти (у «7» и «1» низ бывает выше)
+                    if (Math.Abs(d.Y0 - c.Y0) > 0.12 * h || Math.Abs(d.Y1 - c.Y1) > 0.2 * h || Math.Min(c.Ht, d.Ht) < 0.75 * h) continue;
+                    if (next < 0 || d.X0 < bl[next].X0) next = j;
+                }
+                if (next < 0) break;
+                row.Add(bl[next]);
+                cur = next;
+            }
+            if (row.Count >= minCount) {
+                foreach (Blob b in row) used[bl.IndexOf(b)] = true;
+                rows.Add(row);
+            }
+        }
+        return rows;
+    }
+
+    public static bool Debug;
+    public static string DebugDump;
+    public static double DebugH0, DebugH1;
+
+    class Digits {
+        public string Text = "";        // цифры, «?» - не разобрана; точка - где нашлась
+        public double Score;            // сумма уверенностей
+        public bool Sure = true;
+        public int Count, Bad;
+        public double Top, Base, Left;  // в координатах полного снимка
+        public double H;
+        public double Tilt;             // поворот строки (dy/dx), с которым она прочитана
+        public double TiltFix;          // уточнение поворота по самим цифрам
+        public double X0, X1, Y0, Y1;   // где строка на полном снимке (для отсева повторов)
+    }
+
+    // прочитать ряд по полному снимку. Пятна ряда - на уменьшенном снимке, выпрямленном сдвигом x' = x + sh*y: по ним
+    // только полоса строки; цифры в полосе делятся по пустым столбцам (у семисегментных цифр между ними всегда просвет)
+    static Digits ReadRow(GrayImage full, List<Blob> row, double f, double sh) { return ReadRow(full, row, f, sh, double.NaN); }
+
+    static Digits ReadRow(GrayImage full, List<Blob> row, double f, double sh, double tiltSet) {
+        int n = row.Count;
+        // ряд может быть чуть повёрнут: прямая по низу пятен
+        double tilt = 0, xref = 0;
+        if (!double.IsNaN(tiltSet)) tilt = tiltSet;
+        else if (n >= 2) {
+            double sx = 0, sy = 0, sxx = 0, sxy = 0;
+            foreach (Blob b in row) { double x = (b.X0 + b.X1) / 2.0, y = b.Y1; sx += x; sy += y; sxx += x * x; sxy += x * y; }
+            double den = n * sxx - sx * sx;
+            if (den > 0) tilt = (n * sxy - sx * sy) / den;
+            if (Math.Abs(tilt) > 0.3) tilt = 0;
+        }
+        xref = (row[0].X0 + row[n - 1].X1) / 2.0 * f;
+        List<double> tops = new List<double>(), bots = new List<double>();
+        foreach (Blob b in row) {
+            double off = tilt * ((b.X0 + b.X1) / 2.0 * f - xref);
+            tops.Add(b.Y0 * f - off); bots.Add((b.Y1 + 1) * f - off);
+        }
+        tops.Sort(); bots.Sort();
+        double top = tops[n / 2], bot = bots[bots.Count - 1 - n / 3];
+        double h = bot - top;
+        if (h < 10) return null;
+        // полоса шире ряда: недостающие цифры (не собравшиеся в пятно) найдутся по столбцам
+        int core0 = (int)(row[0].X0 * f), core1 = (int)((row[n - 1].X1 + 1) * f);
+        int bx0 = (int)(core0 - 6 * h), bx1 = (int)(core1 + 6 * h);
+        int by0 = (int)(top - 0.2 * h), by1 = (int)(bot + 0.2 * h);
+        GrayImage band = new GrayImage(Math.Max(1, bx1 - bx0 + 1), Math.Max(1, by1 - by0 + 1));
+        for (int y = 0; y < band.H; y++) {
+            for (int x = 0; x < band.W; x++) {
+                double xs = bx0 + x, yf = by0 + y + tilt * (xs - xref);
+                double xf = xs - sh * yf;
+                band.P[y * band.W + x] = xf < 0 || xf > full.W - 1 || yf < 0 || yf > full.H - 1 ? (byte)255 : (byte)full.Sample(xf, yf);
+            }
+        }
+        bool[] dk = Dark(band, Math.Max(4, (int)(0.6 * h)));
+        int W = band.W, H = band.H;
+        double tp = top - by0, bs = bot - by0;
+        if (DebugDump != null && h > DebugH0 && h < DebugH1) {
+            try {
+                using (Bitmap bm = new Bitmap(W, H * 2)) {
+                    for (int y = 0; y < H; y++) for (int x = 0; x < W; x++) {
+                        int v = band.P[y * W + x];
+                        bm.SetPixel(x, y, Color.FromArgb(v, v, v));
+                        bm.SetPixel(x, H + y, dk[y * W + x] ? Color.Black : Color.White);
+                    }
+                    bm.Save(DebugDump + "_" + sh.ToString("0.00") + "_" + bx0 + "_" + by0 + ".png");
+                }
+            } catch { }
+        }
+        int c0x = core0 - bx0, c1x = core1 - bx0;
+        // остаток наклона: при верном - меньше всего занятых столбцов
+        int ya = (int)(tp + 0.04 * h), yb = (int)(bs - 0.24 * h);
+        double slant = 0;
+        int bestCols = int.MaxValue;
+        for (double sl = -0.08; sl <= 0.0801; sl += 0.02) {
+            bool[] col = new bool[W + 2 * H];
+            for (int y = ya; y <= yb; y++) {
+                if (y < 0 || y >= H) continue;
+                int d = (int)Math.Round(sl * (bs - y));
+                for (int x = c0x; x < c1x && x < W; x++) if (x >= 0 && dk[y * W + x]) { int xx = x - d + H; if (xx >= 0 && xx < col.Length) col[xx] = true; }
+            }
+            int cnt = 0;
+            foreach (bool b in col) if (b) cnt++;
+            if (cnt < bestCols) { bestCols = cnt; slant = sl; }
+        }
+        // проекция на столбцы (без нижней полосы, где точка)
+        int[] proj = new int[W];
+        for (int y = ya; y <= yb; y++) {
+            if (y < 0 || y >= H) continue;
+            for (int x = 0; x < W; x++) {
+                int xi = (int)Math.Round(x + slant * (bs - y));
+                if (xi >= 0 && xi < W && dk[y * W + xi]) proj[x]++;
+            }
+        }
+        int minInk = Math.Max(2, (int)(0.05 * h));
+        List<int[]> cells = new List<int[]>();
+        for (int x = 0; x < W; ) {
+            if (proj[x] < minInk) { x++; continue; }
+            int s0 = x;
+            while (x < W && proj[x] >= minInk) x++;
+            if (cells.Count > 0 && s0 - cells[cells.Count - 1][1] < 0.04 * h) cells[cells.Count - 1][1] = x;
+            else cells.Add(new int[] { s0, x });
+        }
+        // ячейки - цифры: по высоте почти во всю строку; цепочка вокруг ядра ряда без больших разрывов
+        List<int[]> dig = new List<int[]>();
+        List<int> digTop = new List<int>(), digBot = new List<int>();
+        foreach (int[] c in cells) {
+            int y0 = H, y1 = -1;
+            for (int y = 0; y < H; y++)
+                for (int x = c[0]; x < c[1]; x++) {
+                    int xi = (int)Math.Round(x + slant * (bs - y));
+                    if (xi >= 0 && xi < W && dk[y * W + xi]) { if (y < y0) y0 = y; if (y > y1) y1 = y; break; }
+                }
+            if (y1 - y0 < 0.55 * h || y0 > tp + 0.25 * h || y1 < bs - 0.3 * h) continue;
+            if (c[1] - c[0] > 1.3 * h) continue;
+            // цифра стоит отдельно: тёмное не тянется сплошь за верх или низ строки (рамка табло, линии - тянутся)
+            bool[] rowInk = new bool[H];
+            for (int y = 0; y < H; y++)
+                for (int x = c[0]; x < c[1]; x++) {
+                    int xi = (int)Math.Round(x + slant * (bs - y));
+                    if (xi >= 0 && xi < W && dk[y * W + xi]) { rowInk[y] = true; break; }
+                }
+            int yu = (int)(tp + 0.25 * h), yd = (int)(bs - 0.25 * h);
+            if (yu >= 0 && yu < H && rowInk[yu]) { while (yu > 0 && (rowInk[yu - 1] || yu > 1 && rowInk[yu - 2])) yu--; } else yu = H;
+            if (yd >= 0 && yd < H && rowInk[yd]) { while (yd < H - 1 && (rowInk[yd + 1] || yd < H - 2 && rowInk[yd + 2])) yd++; } else yd = -1;
+            if (yu <= tp - 0.12 * h || yd >= bs + 0.12 * h) continue;
+            dig.Add(c);
+            // верх и низ самой цифры - сплошной тёмный участок от середины (без значков над и под строкой)
+            digTop.Add(yu < H ? yu : y0); digBot.Add(yd >= 0 ? yd : y1);
+        }
+        if (dig.Count == 0) return null;
+        // ядро: ячейки, пересекающиеся с рядом пятен; дальше - соседи с разрывом не больше высоты строки
+        int k0 = -1, k1 = -1;
+        for (int k = 0; k < dig.Count; k++) if (dig[k][1] > c0x && dig[k][0] < c1x) { if (k0 < 0) k0 = k; k1 = k; }
+        if (k0 < 0) return null;
+        while (k0 > 0 && dig[k0][0] - dig[k0 - 1][1] < 0.8 * h) k0--;
+        while (k1 < dig.Count - 1 && dig[k1 + 1][0] - dig[k1][1] < 0.8 * h) k1++;
+        dig = dig.GetRange(k0, k1 - k0 + 1);
+        n = dig.Count;
+        // верх и низ строки - по самим цифрам: самая частая высота верха (у «1», «4», «7» верх ниже) и низа
+        tp = Cluster(digTop.GetRange(k0, n), 0.08 * h, true);
+        bs = Cluster(digBot.GetRange(k0, n), 0.08 * h, false) + 1;
+        h = bs - tp;
+        if (h < 8) return null;
+        List<double> widths = new List<double>();
+        foreach (int[] c in dig) widths.Add(c[1] - c[0]);
+        widths.Sort();
+        double maxW = widths[widths.Count - 1];
+        List<double> wide = new List<double>();
+        foreach (double x in widths) if (x > 0.6 * maxW) wide.Add(x);
+        double Wt = wide[wide.Count / 2];
+        // толщина штриха: тёмные отрезки поперёк вертикальных сегментов
+        List<int> runs = new List<int>();
+        foreach (int[] c in dig)
+            foreach (double v in new double[] { 0.3, 0.7 }) {
+                int y = (int)(tp + v * h), run = 0;
+                if (y < 0 || y >= H) continue;
+                for (int x = c[0] - 2; x <= c[1] + 2; x++) {
+                    int xi = (int)Math.Round(x + slant * (bs - y));
+                    bool d = xi >= 0 && xi < W && dk[y * W + xi];
+                    if (d) run++;
+                    else { if (run > 0) runs.Add(run); run = 0; }
+                }
+                if (run > 0) runs.Add(run);
+            }
+        runs.Sort();
+        double t = runs.Count > 0 ? runs[runs.Count / 2] : 0.14 * h;
+        t = Math.Max(0.07 * h, Math.Min(0.25 * h, t));
+        // узкая ячейка - «1» (два сегмента во всю высоту); мало тёмного - соринка или блик, не цифра
+        for (int k = dig.Count - 1; k >= 0; k--) {
+            int[] c = dig[k];
+            if (c[1] - c[0] >= 0.6 * Wt) continue;
+            int ink = 0;
+            for (int x = c[0]; x < c[1]; x++) ink += proj[x];
+            if (ink < 0.45 * (yb - ya) * t) { dig.RemoveAt(k); digTop.RemoveAt(k0 + k); digBot.RemoveAt(k0 + k); }
+        }
+        n = dig.Count;
+        if (n == 0) return null;
+        if (Debug) Console.WriteLine("row n=" + n + " sh=" + sh + " h=" + h.ToString("0") + " slant=" + slant.ToString("0.00") + " Wt=" + Wt.ToString("0") + " t=" + t.ToString("0.0") + " band=" + bx0 + "," + by0 + " " + W + "x" + H);
+        Digits res = new Digits();
+        res.Top = by0 + tp; res.Base = by0 + bs; res.H = h; res.Left = bx0 + dig[0][0] - sh * res.Base;
+        res.Tilt = tilt;
+        res.X0 = bx0 + dig[0][0] - sh * res.Base; res.X1 = bx0 + dig[n - 1][1] - sh * res.Top; res.Y0 = res.Top; res.Y1 = res.Base;
+        // уточнение поворота: прямая по низу цифр во всю высоту
+        if (n >= 3) {
+            double sx = 0, sy = 0, sxx = 0, sxy = 0;
+            int m = 0;
+            for (int k = 0; k < n; k++) {
+                double yb2 = digBot[k0 + k];
+                if (Math.Abs(yb2 - bs) > 0.2 * h) continue;
+                double x = (dig[k][0] + dig[k][1]) / 2.0;
+                sx += x; sy += yb2; sxx += x * x; sxy += x * yb2; m++;
+            }
+            double den = m * sxx - sx * sx;
+            if (m >= 3 && den > 0) res.TiltFix = (m * sxy - sx * sy) / den;
+        }
+        StringBuilder sb = new StringBuilder();
+        double[] cl = new double[n], cr = new double[n];
+        bool[] sure = new bool[n];
+        string segs = "abcdefg";
+        for (int k = 0; k < n; k++) {
+            double c0 = dig[k][0], c1 = dig[k][1];
+            if (c1 - c0 < 0.6 * Wt) c0 = c1 - Wt;           // «1» - только правые сегменты
+            cl[k] = c0; cr[k] = c1;
+            double[] fr = new double[7];
+            for (int q = 0; q < 7; q++) {
+                double u0, u1, v0, v1;   // u - по ширине (точки), v - по высоте (точки от верха цифры)
+                char sg = segs[q];
+                if (sg == 'a' || sg == 'd' || sg == 'g') {
+                    u0 = c0 + 0.3 * (c1 - c0); u1 = c1 - 0.3 * (c1 - c0);
+                    double vc = sg == 'a' ? t / 2 : sg == 'd' ? h - t / 2 : h / 2;
+                    v0 = vc - 0.35 * t; v1 = vc + 0.35 * t;
+                } else {
+                    bool left = sg == 'e' || sg == 'f', upper = sg == 'b' || sg == 'f';
+                    double uc = left ? c0 + t / 2 : c1 - t / 2;
+                    u0 = uc - 0.35 * t; u1 = uc + 0.35 * t;
+                    v0 = upper ? 0.2 * h : 0.62 * h; v1 = upper ? 0.38 * h : 0.8 * h;
+                }
+                int on = 0, all = 0;
+                for (double v = v0; v <= v1; v += Math.Max(1, (v1 - v0) / 6))
+                    for (double u = u0; u <= u1; u += Math.Max(1, (u1 - u0) / 6)) {
+                        int y = (int)Math.Round(tp + v), x = (int)Math.Round(u + slant * (h - v));
+                        all++;
+                        if (x >= 0 && x < W && y >= 0 && y < H && dk[y * W + x]) on++;
+                    }
+                fr[q] = all == 0 ? 0 : (double)on / all;
+            }
+            // цифра, которой лучше всего соответствуют сегменты
+            int best = -1;
+            double b1 = -1, b2 = -1;
+            for (int dgt = 0; dgt < 10; dgt++) {
+                double sc = 0;
+                for (int q = 0; q < 7; q++) sc += Seg7[dgt].IndexOf(segs[q]) >= 0 ? Math.Min(1, fr[q] / 0.6) : Math.Min(1, (1 - fr[q]) / 0.6);
+                sc /= 7;
+                if (sc > b1) { b2 = b1; b1 = sc; best = dgt; } else if (sc > b2) b2 = sc;
+            }
+            bool ok = b1 >= 0.85 && b1 - b2 >= 0.1;
+            // всё тёмное в ячейке должно лежать на сегментах этой цифры (иначе это не семисегментная цифра: буква, штрихкод, рамка)
+            if (best >= 0) {
+                int dark = 0, extra = 0;
+                for (int y = (int)tp; y <= (int)bs; y++) {
+                    if (y < 0 || y >= H) continue;
+                    double v = y - tp;
+                    for (int x = (int)Math.Floor(Math.Min(c0, dig[k][0])); x <= (int)Math.Ceiling(c1); x++) {
+                        int xi = (int)Math.Round(x + slant * (bs - y));
+                        if (xi < 0 || xi >= W || !dk[y * W + xi]) continue;
+                        dark++;
+                        bool inSeg = false;
+                        foreach (char sg in Seg7[best]) {
+                            bool z;
+                            if (sg == 'a') z = v <= 1.4 * t;
+                            else if (sg == 'd') z = v >= h - 1.4 * t;
+                            else if (sg == 'g') z = Math.Abs(v - h / 2) <= 0.9 * t;
+                            else {
+                                bool left = sg == 'e' || sg == 'f', upper = sg == 'b' || sg == 'f';
+                                z = (left ? x <= c0 + 1.4 * t : x >= c1 - 1.4 * t) && (upper ? v <= h / 2 + 0.4 * t : v >= h / 2 - 0.4 * t);
+                            }
+                            if (z) { inSeg = true; break; }
+                        }
+                        if (!inSeg) extra++;
+                    }
+                }
+                if (dark == 0 || extra > 0.12 * dark) b1 = Math.Min(b1, 0.6);
+                if (best == 1 && dig[k][1] - dig[k][0] > 2.2 * t) b1 = Math.Min(b1, 0.6);   // «1» - узкая
+                // каждый сегмент цифры виден хотя бы наполовину (иначе это обрывок линии или надписи)
+                for (int q = 0; q < 7; q++) if (Seg7[best].IndexOf(segs[q]) >= 0 && fr[q] < 0.45) b1 = Math.Min(b1, 0.65);
+            }
+            if (Debug) { StringBuilder db = new StringBuilder(); foreach (double x in fr) db.Append(x.ToString("0.00") + " "); Console.WriteLine("  cell " + c0.ToString("0") + ".." + c1.ToString("0") + " fr " + db + " -> " + best + " " + b1.ToString("0.00") + "/" + b2.ToString("0.00")); }
+            if (b1 < 0.7) { sb.Append('?'); res.Bad++; }
+            else { sb.Append((char)('0' + best)); sure[k] = ok; }
+            if (b1 >= 0.7) res.Score += b1;
+            res.Count++;
+        }
+        // десятичная точка: тёмное пятнышко у нижнего края в промежутке между цифрами, над ним пусто
+        int dotAfter = -1;
+        double dotInk = 0;
+        for (int k = 0; k + 1 < n; k++) {
+            double g0 = cr[k] - 0.2 * t, g1 = cl[k + 1] + 0.2 * t;
+            int on = 0, all = 0, above = 0, allA = 0;
+            for (double v = h - 1.2 * t; v <= h + 0.1 * t; v += 1)
+                for (double u = g0; u <= g1; u += 1) {
+                    int y = (int)Math.Round(tp + v), x = (int)Math.Round(u + slant * (h - v));
+                    all++;
+                    if (x >= 0 && x < W && y >= 0 && y < H && dk[y * W + x]) on++;
+                }
+            for (double v = h - 2.8 * t; v <= h - 1.8 * t; v += 1)
+                for (double u = cr[k] + 0.2 * t; u <= cl[k + 1] - 0.2 * t; u += 1) {
+                    int y = (int)Math.Round(tp + v), x = (int)Math.Round(u + slant * (h - v));
+                    allA++;
+                    if (x >= 0 && x < W && y >= 0 && y < H && dk[y * W + x]) above++;
+                }
+            double ink = all == 0 ? 0 : (double)on / all, inkA = allA == 0 ? 0 : (double)above / allA;
+            // в промежутке без точки внизу ничего (сегменты d соседей в промежуток не заходят)
+            double extra = ink - 0.0;
+            if (extra > 0.12 && inkA < 0.1 && ink > dotInk) { dotInk = ink; dotAfter = k; }
+        }
+        string txt = sb.ToString();
+        if (dotAfter >= 0) txt = txt.Substring(0, dotAfter + 1) + "." + txt.Substring(dotAfter + 1);
+        // неразобранные ячейки по краям - не цифры табло (рамка, надписи рядом)
+        int cut0 = 0, cut1 = 0;
+        while (cut0 < txt.Length && txt[cut0] == '?') cut0++;
+        while (cut1 < txt.Length - cut0 && txt[txt.Length - 1 - cut1] == '?') cut1++;
+        res.Bad -= cut0 + cut1;
+        res.Count -= cut0 + cut1;
+        res.Text = txt.Substring(cut0, txt.Length - cut0 - cut1).Trim('.');
+        // уверенно: все оставшиеся цифры разобраны чётко
+        res.Sure = res.Bad == 0 && res.Count > 0;
+        string digitsOnly = sb.ToString();
+        for (int k = 0; k < n; k++) {
+            if (k < cut0 || k >= n - cut1) continue;
+            if (digitsOnly[k] != '?' && !sure[k]) res.Sure = false;
+        }
+        return res;
+    }
+
+    // сдвиг строк маски: x' = x + sh*y (наклонные цифры становятся прямыми)
+    static bool[] Shear(bool[] m, int w, int h, double sh, out int w2) {
+        w2 = w + (int)Math.Ceiling(sh * h) + 1;
+        bool[] o = new bool[w2 * h];
+        for (int y = 0; y < h; y++) {
+            int d = (int)Math.Round(sh * y), a = y * w, b = y * w2 + d;
+            for (int x = 0; x < w; x++) if (m[a + x]) o[b + x] = true;
+        }
+        return o;
+    }
+
+    // сегменты одной цифры - в одно пятно (по высоте зазор больше: у «7», «1», «0» верх и низ разделены местом среднего сегмента)
+    static List<Blob> Group(bool[] m, int w, int h) {
+        List<Mrz.Comp> cs = new List<Mrz.Comp>();
+        foreach (Mrz.Comp c in Mrz.Components(m, w, h))
+            if (c.Ht >= 4 && c.Ht < h / 4 && c.Wd < w / 4 && c.N >= 8) cs.Add(c);
+        cs.Sort(delegate(Mrz.Comp a, Mrz.Comp b) { return a.X0.CompareTo(b.X0); });
+        int nc = cs.Count;
+        int[] par = new int[nc];
+        double[] th = new double[nc];
+        for (int i = 0; i < nc; i++) { par[i] = i; th[i] = (double)cs[i].N / Math.Max(cs[i].Wd, cs[i].Ht); }
+        for (int i = 0; i < nc; i++) {
+            Mrz.Comp a = cs[i];
+            bool dotA = a.Wd < 2.2 * th[i] && a.Ht < 2.2 * th[i];
+            for (int j = i + 1; j < nc; j++) {
+                Mrz.Comp b = cs[j];
+                if (b.X0 > a.X1 + 2 * th[i] + 2) break;
+                bool dotB = b.Wd < 2.2 * th[j] && b.Ht < 2.2 * th[j];
+                if (dotA || dotB) continue;                      // точка между цифрами склеила бы соседей
+                double t = Math.Min(th[i], th[j]);
+                if (Math.Max(th[i], th[j]) > 2.5 * t) continue;
+                double gx = Math.Max(b.X0 - a.X1, a.X0 - b.X1), gy = Math.Max(b.Y0 - a.Y1, a.Y0 - b.Y1);
+                if (gx <= 0.5 * t + 1 && gy <= 1.8 * t + 1) {
+                    int ra = i, rb = j;
+                    while (par[ra] != ra) ra = par[ra];
+                    while (par[rb] != rb) rb = par[rb];
+                    if (ra != rb) par[Math.Max(ra, rb)] = Math.Min(ra, rb);
+                }
+            }
+        }
+        Dictionary<int, Blob> groups = new Dictionary<int, Blob>();
+        for (int i = 0; i < nc; i++) {
+            int ri = i;
+            while (par[ri] != ri) ri = par[ri];
+            Blob b;
+            if (!groups.TryGetValue(ri, out b)) { b = new Blob(); b.X0 = cs[i].X0; b.Y0 = cs[i].Y0; b.X1 = cs[i].X1; b.Y1 = cs[i].Y1; groups[ri] = b; }
+            b.X0 = Math.Min(b.X0, cs[i].X0); b.Y0 = Math.Min(b.Y0, cs[i].Y0); b.X1 = Math.Max(b.X1, cs[i].X1); b.Y1 = Math.Max(b.Y1, cs[i].Y1);
+        }
+        List<Blob> bl = new List<Blob>();
+        foreach (Blob b in groups.Values) {
+            if (b.Ht < 12 || b.Ht > h / 4) continue;
+            double ar = (double)b.Ht / b.Wd;
+            if (ar < 1.0 || ar > 12) continue;
+            bl.Add(b);
+        }
+        return bl;
+    }
+
+    static double Height(List<Blob> row) {
+        double h = 0;
+        foreach (Blob b in row) h = Math.Max(h, b.Ht);
+        return h;
+    }
+
+    // показания с табло: строка из 5-10 крупных цифр; над ней слева - код экрана («1.8.0» - сумма)
+    static Digits Lcd(GrayImage full, GrayImage small, out Digits code) {
+        code = null;
+        double f = (double)full.W / small.W;
+        bool[] dk = Dark(small, Math.Max(10, Math.Min(small.W, small.H) / 40));
+        Digits best = null;
+        double bestSh = 0;
+        foreach (double sh in new double[] { 0, 0.08, 0.16, 0.24, 0.32 }) {
+            List<Digits> done = new List<Digits>();        // повторы - только при этом же сдвиге (при другом читается иначе)
+            int w2;
+            bool[] m = Shear(dk, small.W, small.H, sh, out w2);
+            List<Blob> bl = Group(m, w2, small.H);
+            // предложения: ряды пятен (хотя бы два) и отдельные пятна, похожие на цифру; крупные - первыми
+            List<List<Blob>> props = Rows(bl, 2);
+            foreach (Blob b in bl) {
+                double ar = (double)b.Ht / b.Wd;
+                if (ar < 1.2 || ar > 3.5 || b.Ht < 14) continue;
+                List<Blob> one = new List<Blob>();
+                one.Add(b);
+                props.Add(one);
+            }
+            props.Sort(delegate(List<Blob> a, List<Blob> b) { return Height(b).CompareTo(Height(a)); });
+            if (Debug) Console.WriteLine("sh=" + sh + " blobs " + bl.Count + " proposals " + props.Count);
+            foreach (List<Blob> row in props) {
+                if (row.Count > 11) continue;
+                // уже прочитанное место (при этом или другом сдвиге) - не повторять
+                double cx = ((row[0].X0 + row[row.Count - 1].X1) / 2.0 - sh * (row[0].Y0 + row[0].Y1) / 2.0) * f;
+                double cy = (row[0].Y0 + row[0].Y1) / 2.0 * f, hh = Height(row) * f;
+                bool seen = false;
+                foreach (Digits d0 in done)
+                    if (cx >= d0.X0 - 0.3 * d0.H && cx <= d0.X1 + 0.3 * d0.H && cy >= d0.Y0 - 0.3 * d0.H && cy <= d0.Y1 + 0.3 * d0.H && hh < 1.4 * d0.H && hh > 0.5 * d0.H) seen = true;
+                if (seen) continue;
+                Digits d = ReadRow(full, row, f, sh);
+                if (d == null || d.Count == 0) continue;
+                // строка повёрнута сильнее, чем казалось по пятнам, - прочитать ещё раз с поправкой
+                if (Math.Abs(d.TiltFix) > 0.015) {
+                    Digits d2 = ReadRow(full, row, f, sh, d.Tilt + d.TiltFix);
+                    if (d2 != null && d2.Score > d.Score) d = d2;
+                }
+                done.Add(d);
+                if (Debug) Console.WriteLine("ROW " + d.Text + " score " + d.Score.ToString("0.0") + " n " + d.Count + " bad " + d.Bad + " h " + d.H.ToString("0"));
+                // качество: доля уверенных цифр, размер; печатные строки разбираются плохо
+                if (d.Count < 4) continue;
+                double q = d.Score / d.Count;
+                if (q < 0.75 || d.Bad > 1) continue;
+                if (best == null || d.Score * d.H > best.Score * best.H) { best = d; bestSh = sh; }
+            }
+        }
+        if (best == null) return null;
+        // код экрана («1.8.0»): строка мелких цифр над основным рядом, у левого края. Мелкие цифры с точками
+        // слипаются, поэтому строку ищем по тёмному в полосе над рядом, а цифры в ней делит ReadRow
+        double left = (best.Left + bestSh * best.Base) / f, topS = best.Top / f, hs = best.H / f;   // в выпрямленных координатах
+        int xa = (int)(left - 0.5 * hs), xb = (int)(left + 2.5 * hs);
+        int yA = (int)Math.Max(0, topS - 1.6 * hs), yB = (int)(topS - 0.05 * hs);
+        if (yB > yA) {
+            int[] ink = new int[yB - yA + 1];
+            for (int y = yA; y <= yB; y++)
+                for (int x = xa; x <= xb; x++) {
+                    int xi = (int)Math.Round(x - bestSh * y);
+                    if (xi >= 0 && xi < small.W && dk[y * small.W + xi]) ink[y - yA]++;
+                }
+            int need = Math.Max(2, (xb - xa) / 40);
+            int yb = yB;
+            while (yb >= yA && ink[yb - yA] < need) yb--;
+            int yt = yb, gap = 0;
+            while (yt > yA && gap <= 0.06 * hs) { yt--; if (ink[yt - yA] < need) gap++; else gap = 0; }
+            yt += gap;
+            double hc = yb - yt + 1;
+            if (yb > yA && hc >= 0.25 * hs && hc <= 0.85 * hs) {
+                Blob cb = new Blob();
+                cb.X0 = xa; cb.X1 = xb; cb.Y0 = yt; cb.Y1 = yb;
+                List<Blob> crow = new List<Blob>();
+                crow.Add(cb);
+                code = ReadRow(full, crow, f, bestSh);
+            }
+            if (Debug) Console.WriteLine("code band " + yt + ".." + yb + " hs " + hs.ToString("0") + " -> " + (code == null ? "-" : code.Text));
+        }
+        return best;
+    }
+
+    // для проверки: текст табло и кода экрана («?» в конце - неуверенно)
+    public static string LcdText(GrayImage full, GrayImage small, out string code) {
+        Digits c;
+        Digits d = Lcd(full, small, out c);
+        code = c == null ? "" : c.Text + (c.Sure ? "" : "?");
+        return d == null ? "" : d.Text + (d.Sure ? "" : "?");
+    }
+
+    // ---------- тип: надпись модификации («R32.043.JA.UVFL») ----------
+
+    public static string[] Families = { "Arial", "Arial Narrow", "Tahoma", "Verdana", "Segoe UI", "Calibri", "Trebuchet MS", "Microsoft Sans Serif" };
+    const string LatinChars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ.";
+    static GlyphSet latin;
+    static readonly object sync = new object();
+
+    static void Init() {
+        lock (sync) {
+            if (latin == null) latin = GlyphSet.FromFonts(LatinChars, Families, new FontStyle[] { FontStyle.Regular, FontStyle.Bold });
+        }
+    }
+
+    // для сравнения: только буквы и цифры, похожие знаки - одинаково (O, U и 0, I и 1, B и 8, S и 5, Z и 2, Y и V)
+    static string Key(string s) {
+        StringBuilder sb = new StringBuilder();
+        foreach (char c0 in s.ToUpperInvariant()) {
+            char c = c0;
+            int k = "АВЕКМНОРСТХ".IndexOf(c);
+            if (k >= 0) c = "ABEKMHOPCTX"[k];
+            if (!char.IsLetterOrDigit(c)) continue;
+            if (c == 'O' || c == 'Q' || c == 'D' || c == 'U') c = '0';
+            else if (c == 'I') c = '1';
+            else if (c == 'B') c = '8';
+            else if (c == 'S') c = '5';
+            else if (c == 'Z') c = '2';
+            else if (c == 'Y') c = 'V';
+            sb.Append(c);
+        }
+        return sb.ToString();
+    }
+
+    // наименьшее число правок, чтобы key встретился где-то внутри text
+    static int Within(string text, string key) {
+        int m = key.Length;
+        int[] prev = new int[m + 1], cur = new int[m + 1];
+        for (int j = 0; j <= m; j++) prev[j] = j;
+        int best = prev[m];
+        foreach (char ch in text) {
+            cur[0] = 0;
+            for (int j = 1; j <= m; j++)
+                cur[j] = Math.Min(Math.Min(cur[j - 1] + 1, prev[j] + 1), prev[j - 1] + (key[j - 1] == ch ? 0 : 1));
+            if (cur[m] < best) best = cur[m];
+            int[] t = prev; prev = cur; cur = t;
+        }
+        return best;
+    }
+
+    // тип по надписи: строки снимка читаются латиницей и цифрами и сравниваются с модификациями справочника
+    public static string ReadType(GrayImage full, GrayImage small, List<string> types, out bool ok, out string seen) {
+        Init();
+        ok = false;
+        seen = "";
+        List<string> keys = new List<string>();
+        foreach (string t in types) {
+            int sp = t.IndexOf(' ');
+            keys.Add(Key(sp < 0 ? t : t.Substring(sp + 1)));
+        }
+        double f = (double)full.W / small.W;
+        int best = -1, d1 = 99, d2 = 99;
+        foreach (PassportPage.Line l in PassportPage.Scale(PassportPage.FindLines(small, false), f)) {
+            if (l.Comps.Count < 8 || l.Comps.Count > 60) continue;
+            PassportPage.Strip st = PassportPage.ReadLine(full, l, latin);
+            if (st == null || st.G == null) continue;
+            StringBuilder sb = new StringBuilder();
+            foreach (Glyph g in st.G) sb.Append(g.C);
+            string text = Key(sb.ToString());
+            if (text.Length < 6) continue;
+            for (int i = 0; i < keys.Count; i++) {
+                if (keys[i].Length == 0) continue;
+                int d = Within(text, keys[i]);
+                if (d < d1) {
+                    if (best >= 0 && keys[best] != keys[i]) d2 = d1;
+                    d1 = d; best = i; seen = sb.ToString();
+                } else if (d < d2 && (best < 0 || keys[i] != keys[best])) d2 = d;
+            }
+        }
+        if (best < 0 || d1 > Math.Max(2, keys[best].Length / 5)) return "";
+        // уверенно: совпало точно (или с одной ошибкой у длинного обозначения), а следующий вариант заметно дальше
+        ok = d1 == 0 && d2 >= 1 || d1 == 1 && d2 >= 3 && keys[best].Length >= 10;
+        return types[best];
+    }
+
+    // ---------- всё вместе ----------
+
+    public static MeterResult Read(string path, List<string> types) {
+        MeterResult r = new MeterResult();
+        GrayImage full, small;
+        Mrz.LoadPair(path, out full, out small);
+        int rows;
+        string year;
+        string serial = Barcode(full, out rows, out year);
+        // заводской номер - только цифры (6-15)
+        bool digits = serial.Length >= 6 && serial.Length <= 15;
+        foreach (char c in serial) if (!char.IsDigit(c)) digits = false;
+        if (digits) { r.Serial = serial; r.SerialRows = rows; r.Year = year; }
+        Digits code;
+        Digits d = Lcd(full, small, out code);
+        if (d != null) {
+            // показания: не меньше 6 цифр, после точки 2-3 знака
+            string t = d.Text;
+            int dot = t.IndexOf('.'), nd = 0;
+            foreach (char c in t) if (char.IsDigit(c) || c == '?') nd++;
+            int dec = dot < 0 ? 0 : t.Length - dot - 1;
+            if (nd >= 6 && nd <= 10 && dot > 0 && dec >= 2 && dec <= 3) {
+                r.Reading = t.Replace('.', ',');
+                string cd = code == null ? "" : code.Text.Replace(".", "");
+                if (cd.Length == 3) r.Code = cd[0] + "." + cd[1] + "." + cd[2];
+                r.ReadingOk = d.Sure && t.IndexOf('?') < 0 && r.Code == "1.8.0" && code.Sure;
+            }
+        }
+        if (r.Serial.Length > 0 || r.Reading.Length > 0) {
+            bool ok;
+            string seen;
+            r.Type = ReadType(full, small, types, out ok, out seen);
+            r.TypeOk = ok;
+            r.TypeText = seen;
+        }
+        // счётчик на снимке: табло прочитано целиком (печатные цифры документов так не читаются), или номер со штрихкода и тип
+        bool lcd = r.Reading.Length > 0 && r.Reading.IndexOf('?') < 0 && d.H >= 0.015 * Math.Max(full.W, full.H);
+        r.Found = lcd || r.Serial.Length > 0 && r.Type.Length > 0;
+        return r;
+    }
+}
+
 // Фото документов абонента (паспорт, свидетельство): у каждого договора своя папка с фото,
 // миниатюры в форме, окно просмотра рядом с формой, перенос фото с телефона по кабелю.
 
@@ -11027,6 +12005,10 @@ public class DogovorForm : Form {
     readonly PhotoStrip strip = new PhotoStrip();
     readonly Label photoNote = Ui.Note(""), lichnyNote = Ui.Note(""), fioNote = Ui.Note(""), certNote = Ui.Note("");
     CertResult lastCert;                            // прочитанное со свидетельства о госрегистрации
+    readonly Label[] meterNotes = { Ui.Note(""), Ui.Note("") };
+    readonly MeterResult[] photoMeter = new MeterResult[2];    // прочитанное с фото счётчиков 1 и 2
+    readonly string[] meterWhere = { "", "" };
+    int lastMeterIdx;
     string certWhere = "";
     bool certSure;
     Button phoneButton, photoAdd, photoFolder;
@@ -11327,6 +12309,10 @@ public class DogovorForm : Form {
         g.Row(Cell.G(parts, 2));
         foreach (Cell x in parts.Cells()) cardOfLater.Add(x.Ctl);
         g.Row(F("Тип счётчика - так будет в договоре (собирается сам, можно поправить)", T(p + "tip", 1, null), 2));
+        Label mn = meterNotes[i - 1];
+        int mi = i;
+        mn.Click += delegate { if (photoMeter[mi - 1] != null) { PutMeter(mi, true); MeterNote(mi); } };
+        g.Row(F(null, mn, 2));
         g.Row(F("Заводской номер", T(p + "zav", 1, null), 1), F("Дата поверки (год-квартал)", T(p + "poverka", 1, "например 2025-2"), 1));
         g.Row(F("Цель использования электроэнергии", C(p + "cel", true, false, null), 2));
         g.Row(F("Фазность", S(p + "faz", "1 ф", "3 ф"), 1), F("Пломба госповерителя", C(p + "plomba_gp", true, false, null), 1));
@@ -11674,6 +12660,8 @@ public class DogovorForm : Form {
         } finally { loading = false; }
         if (key == "ls") Recheck(true, false);
         if (lastCert != null && (Array.IndexOf(CertKeys, key) >= 0 || key == "fio" || key == "kadastr")) CertNote();
+        for (int i = 1; i <= 2; i++)
+            if (photoMeter[i - 1] != null && (key == "pu" + i + "_zav" || key == "pu" + i + "_tip" || key == "pu" + i + "_pokaz" || key == "pu" + i + "_poverka")) MeterNote(i);
         if (key == "adres" || key == "np_tip" || key == "np" || key == "ulica_tip" || key == "ulica" || key == "dom" || key == "korp" || key == "kv") Recheck(false, true);
         if (key.EndsWith("tarif") || key.EndsWith("vvod_tip") || key == "schetchikov" || key == "sms" || key == "utratil" || key == "plita") Enable();
         RefreshState();
@@ -11983,6 +12971,7 @@ public class DogovorForm : Form {
                 new string[] { "faz", "фазность" }, new string[] { "askue", "АСКУЭ да/нет" }, new string[] { "tarif", "тариф" },
                 new string[] { "gruppa", "тарифная группа" } };
             foreach (string[] q in mq) if (V(p + q[0]).Length == 0) r.Add(new Problem(p + q[0], q[1] + w, true));
+            if (V(p + "poverka").EndsWith("-")) r.Add(new Problem(p + "poverka", "дата поверки: допишите квартал" + w, true));
         }
         // не обязательно, но стоит проверить
         string id = V("lichny");
@@ -12253,7 +13242,7 @@ public class DogovorForm : Form {
         tip.SetToolTip(phoneButton, "Телефон подключён кабелем и разблокирован, на телефоне выбрано «Передача файлов».\nНовые фото с телефона попадут в папку этого договора");
         foreach (Button b in new Button[] { folder, add, phoneButton }) { b.TabStop = false; c.AddExtra(b); }
         strip.Hint = "Фото пока нет. Сфотографируйте телефоном паспорт (последнюю страницу - со строками «<<<», предпоследнюю, прописку) " +
-            "и свидетельство, подключите телефон кабелем и нажмите «Забрать фото с телефона». Личный номер, Ф.И.О. и адрес объекта программа прочитает с фото сама.";
+            "свидетельство и счётчик, подключите телефон кабелем и нажмите «Забрать фото с телефона». Личный номер, Ф.И.О., адрес объекта, номер и тип счётчика программа прочитает с фото сама.";
         strip.OpenPhoto += delegate(string f) { ShowPhoto(f); };
         strip.RemovePhoto += delegate(string f) { RemovePhoto(f); };
         strip.Resized += delegate { LayoutCards(); };
@@ -12427,7 +13416,7 @@ public class DogovorForm : Form {
 
     // для проверки: открыть фото по номеру, что написано про фото
     public void ShowPhotoAt(int i) { List<string> f = strip.Files; if (i < f.Count) ShowPhoto(f[i]); }
-    public string PhotoStatus { get { return photoNote.Text + " | " + lichnyNote.Text + " | " + fioNote.Text + " | " + certNote.Text + " | папка: " + PhotoRef(); } }
+    public string PhotoStatus { get { return photoNote.Text + " | " + lichnyNote.Text + " | " + fioNote.Text + " | " + certNote.Text + " | " + meterNotes[0].Text + " | " + meterNotes[1].Text + " | папка: " + PhotoRef(); } }
 
     void PhoneDone(PhoneResult r, string dir, DateTime since, int gen) {
         phoneBusy = false;
@@ -12457,6 +13446,8 @@ public class DogovorForm : Form {
     void ReadPassport(List<string> files) {
         int gen = photoGen;
         List<string> list = new List<string>(files);
+        List<string> mtypes = new List<string>();
+        foreach (MeterType mt in lists.Meters()) mtypes.Add(mt.Full);
         foreach (string f in list) strip.Mark(f, "читаю...", St.Hint);
         mrzRunning++;
         System.Threading.Thread th = new System.Threading.Thread(delegate() {
@@ -12465,18 +13456,23 @@ public class DogovorForm : Form {
                     MrzResult r = null;
                     PageResult pg = null;
                     CertResult ce = null;
+                    MeterResult me = null;
                     try {
                         r = Mrz.Read(f);
-                        // строк «<<<» нет (или нашлось что-то похожее, но не они) - может, это страница с Ф.И.О.
-                        if (!r.Valid) pg = PassportPage.Read(f);
+                        // строк «<<<» нет - может, это счётчик (штрихкод, табло, надпись типа)
+                        if (!r.Valid) me = MeterPhoto.Read(f, mtypes);
+                        bool meter = me != null && me.Found;
+                        // может, страница паспорта с Ф.И.О.
+                        if (!r.Valid && !meter) pg = PassportPage.Read(f);
                         // и не она - может, свидетельство о госрегистрации (адрес)
-                        if (!r.Valid && (pg == null || !pg.Found)) ce = CertPage.Read(f);
-                    } catch (Exception ex) { r = new MrzResult(); r.Info = "не открывается: " + ex.Message; pg = null; ce = null; }
+                        if (!r.Valid && !meter && (pg == null || !pg.Found)) ce = CertPage.Read(f);
+                    } catch (Exception ex) { r = new MrzResult(); r.Info = "не открывается: " + ex.Message; pg = null; ce = null; me = null; }
                     string file = f;
                     MrzResult res = r;
                     PageResult page = pg;
                     CertResult cert = ce;
-                    Post(delegate { if (gen == photoGen) PhotoRead(file, res, page, cert); });
+                    MeterResult mres = me;
+                    Post(delegate { if (gen == photoGen) PhotoRead(file, res, page, cert, mres); });
                 }
             }
             Post(delegate { mrzRunning--; if (gen == photoGen) PhotosRead(); });
@@ -12488,9 +13484,15 @@ public class DogovorForm : Form {
 
     static bool Blr(MrzResult r) { return r.Line2.Length == 44 && r.Line2.Substring(10, 3) == "BLR"; }
 
-    void PhotoRead(string f, MrzResult r, PageResult page, CertResult cert) {
+    void PhotoRead(string f, MrzResult r, PageResult page, CertResult cert, MeterResult meter) {
         string name = Path.GetFileName(f);
         if (r != null && r.Info.StartsWith("не открывается")) { strip.Mark(f, "фото не открывается", St.Bad); return; }
+        if (meter != null && meter.Found) {
+            int i = ApplyMeter(meter, name);
+            bool sure = (meter.Serial.Length > 0) && (meter.Reading.Length == 0 || meter.ReadingOk) && (meter.Type.Length == 0 || meter.TypeOk);
+            strip.Mark(f, "счётчик " + i + (sure ? " прочитан" : " - проверьте"), sure ? St.Good : Warn);
+            return;
+        }
         if (cert != null && cert.Found) {
             lastCert = cert;
             certWhere = name;
@@ -12542,6 +13544,16 @@ public class DogovorForm : Form {
             else if (photoFioOk) parts.Add("Ф.И.О. прочитано с фото «" + pageWhere + "»");
             else { parts.Add("Ф.И.О. с фото «" + pageWhere + "» прочитано неуверенно - проверьте подсказку под полем"); good = false; }
         }
+        for (int i = 1; i <= 2; i++) {
+            MeterResult m = photoMeter[i - 1];
+            if (m == null) continue;
+            List<string> got = new List<string>();
+            if (m.Serial.Length > 0) got.Add("зав. №");
+            if (m.Type.Length > 0) got.Add(m.TypeOk ? "тип" : "тип (проверьте)");
+            if (m.Reading.Length > 0) got.Add(m.ReadingOk ? "показания" : "показания (проверьте)");
+            parts.Add("счётчик " + i + " (фото «" + meterWhere[i - 1] + "»): " + (got.Count > 0 ? string.Join(", ", got.ToArray()) : "прочитать не удалось"));
+            if (!(m.Reading.Length == 0 || m.ReadingOk) || !(m.Type.Length == 0 || m.TypeOk)) good = false;
+        }
         if (lastCert != null) {
             if (certSure) parts.Add("адрес объекта прочитан со свидетельства (фото «" + certWhere + "»)");
             else { parts.Add("адрес со свидетельства (фото «" + certWhere + "») прочитан неуверенно - проверьте подсказку под адресом"); good = false; }
@@ -12570,6 +13582,80 @@ public class DogovorForm : Form {
         if (!lastPage.NameOk) d.Add("имя");
         if (!lastPage.PatronymicOk) d.Add("отчество");
         return string.Join(", ", d.ToArray());
+    }
+
+    // ---------- счётчик с фото ----------
+
+    // к какому счётчику фото: тот же заводской номер - к нему; иначе - к первому незаполненному
+    int TargetMeter(MeterResult m) {
+        int n = V("schetchikov") == "1 счётчик" ? 1 : 2;
+        if (m.Serial.Length > 0)
+            for (int i = 1; i <= n; i++)
+                if (V("pu" + i + "_zav") == m.Serial || photoMeter[i - 1] != null && photoMeter[i - 1].Serial == m.Serial) return i;
+        // снимок табло без наклейки - к тому счётчику, что снимали только что
+        if (m.Serial.Length == 0 && lastMeterIdx > 0) return lastMeterIdx;
+        for (int i = 1; i <= n; i++) if (V("pu" + i + "_zav").Length == 0 && photoMeter[i - 1] == null) return i;
+        return 1;
+    }
+
+    // прочитанное с фото - в пустые поля счётчика (уверенное), остальное - подсказкой под типом
+    int ApplyMeter(MeterResult m, string name) {
+        int i = TargetMeter(m);
+        MeterResult old = photoMeter[i - 1];
+        if (old != null && (m.Serial.Length == 0 || old.Serial == m.Serial)) {
+            // второй снимок того же счётчика: недостающее - с нового
+            if (m.Serial.Length == 0) { m.Serial = old.Serial; m.SerialRows = old.SerialRows; }
+            if (m.Type.Length == 0 || !m.TypeOk && old.TypeOk) { m.Type = old.Type; m.TypeOk = old.TypeOk; m.TypeText = old.TypeText; }
+            if (m.Reading.Length == 0 || !m.ReadingOk && old.ReadingOk) { m.Reading = old.Reading; m.ReadingOk = old.ReadingOk; m.Code = old.Code; }
+        }
+        photoMeter[i - 1] = m;
+        meterWhere[i - 1] = name;
+        lastMeterIdx = i;
+        PutMeter(i, false);
+        MeterNote(i);
+        return i;
+    }
+
+    // all - по щелчку на подсказке: всё прочитанное (и неуверенное), поверх введённого
+    void PutMeter(int i, bool all) {
+        MeterResult m = photoMeter[i - 1];
+        string p = "pu" + i + "_";
+        if (m.Serial.Length > 0 && (all || V(p + "zav").Length == 0)) SetV(p + "zav", m.Serial);
+        if (m.Type.Length > 0 && (all || m.TypeOk && V(p + "model").Length == 0 && V(p + "tip").Length == 0)) {
+            MeterType t = MeterType.Parse(m.Type);
+            SetV(p + "model", t.Model);
+            SetV(p + "korpus", t.Case);
+            SetV(p + "modif", t.Mod);
+        }
+        if (m.Reading.Length > 0 && m.Reading.IndexOf('?') < 0 && (all || m.ReadingOk && V(p + "pokaz").Length == 0)) SetV(p + "pokaz", m.Reading);
+        // год с наклейки - в дату поверки, квартал дописать
+        if (m.Year.Length > 0 && (V(p + "poverka").Length == 0 || all && !V(p + "poverka").StartsWith(m.Year))) SetV(p + "poverka", m.Year + "-");
+    }
+
+    void MeterNote(int i) {
+        Label l = meterNotes[i - 1];
+        MeterResult m = photoMeter[i - 1];
+        if (m == null) { Note(l, "", St.Hint, false); l.Cursor = Cursors.Default; return; }
+        string p = "pu" + i + "_";
+        List<string> diff = new List<string>();
+        if (m.Serial.Length > 0 && V(p + "zav") != m.Serial) diff.Add("зав. № " + m.Serial);
+        if (m.Type.Length > 0 && Lists.Squeeze(V(p + "tip")) != Lists.Squeeze(m.Type)) {
+            diff.Add("тип " + m.Type + (m.TypeOk ? "" : " (надпись прочитана неточно - проверьте)"));
+        }
+        if (m.Reading.Length > 0 && V(p + "pokaz") != m.Reading) {
+            string why = m.Reading.IndexOf('?') >= 0 ? " («?» - цифра не разобрана, впишите сами)" :
+                !m.ReadingOk ? (m.Code.Length > 0 && m.Code != "1.8.0" ? " - на табло экран " + m.Code + ", а нужен 1.8.0 (сумма)" : " - проверьте по фото") : "";
+            diff.Add("показания " + m.Reading + why);
+        }
+        if (m.Year.Length > 0 && !V(p + "poverka").StartsWith(m.Year)) diff.Add("год на наклейке " + m.Year);
+        string quarter = V(p + "poverka").EndsWith("-") ? " Дата поверки: допишите квартал (год " + V(p + "poverka").TrimEnd('-') + " - с наклейки)." : "";
+        if (diff.Count == 0) {
+            Note(l, "Как на фото «" + meterWhere[i - 1] + "» - сверьте со счётчиком." + quarter, St.Good, false);
+            l.Cursor = Cursors.Default;
+        } else {
+            Note(l, "С фото «" + meterWhere[i - 1] + "»: " + string.Join("; ", diff.ToArray()) + ". Щёлкните, чтобы подставить." + quarter, Warn, true);
+            l.Cursor = Cursors.Hand;
+        }
     }
 
     // ---------- адрес со свидетельства ----------
@@ -12880,6 +13966,9 @@ public class DogovorForm : Form {
         lastMrz = null;
         lastPage = null;
         lastCert = null;
+        photoMeter[0] = photoMeter[1] = null;
+        meterWhere[0] = meterWhere[1] = "";
+        lastMeterIdx = 0;
         mrzWhere = pageWhere = importNote = photoPersonal = photoFio = certWhere = "";
         photoFioOk = mrzWeak = certSure = false;
         if (viewer != null && !viewer.IsDisposed) viewer.Close();
@@ -12889,6 +13978,8 @@ public class DogovorForm : Form {
         LichnyNote();
         FioNote();
         CertNote();
+        MeterNote(1);
+        MeterNote(2);
         head.Text = "Новый договор";
         headSub.Text = "Заполните поля - программа подставит их в шаблон Word и сохранит договор в папку «Договоры»";
         headSub.ForeColor = St.Hint;
