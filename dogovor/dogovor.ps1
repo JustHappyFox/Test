@@ -415,6 +415,58 @@ public class Lists {
         if (!System.IO.File.Exists(file)) System.IO.File.WriteAllText(file, Default, new UTF8Encoding(true));
         Load();
         try { AddMissing(); } catch { }
+        try { AddMeters(); } catch { }
+    }
+
+    // Новые типы счётчиков из встроенного списка дописываются в раздел [Счётчики] старого справочника - один раз
+    // на каждое обновление списка (метка в файле), чтобы удалённые пользователем строки не возвращались каждый запуск
+    public const int MetersVersion = 2;     // то же число - в строке-метке встроенного справочника (Default)
+    const string MetersMark = "# список счётчиков обновлён программой, версия ";
+
+    void AddMeters() {
+        int section = -1, last = -1, version = 0;
+        List<string> have = new List<string>();
+        for (int i = 0; i < lines.Count; i++) {
+            string s = lines[i].Trim();
+            if (s.StartsWith("[") && s.EndsWith("]")) {
+                if (section >= 0) break;
+                if (Key(s.Substring(1, s.Length - 2)) == Key("Счётчики")) { section = i; last = i; }
+                continue;
+            }
+            if (section < 0) continue;
+            if (s.StartsWith(MetersMark)) {
+                string d = s.Substring(MetersMark.Length).Trim();
+                int n = 0;
+                while (n < d.Length && char.IsDigit(d[n])) n++;
+                if (n > 0) version = Math.Max(version, int.Parse(d.Substring(0, n)));
+            }
+            if (s.Length > 0) last = i;
+            if (s.Length > 0 && !s.StartsWith("#")) have.Add(Squeeze(s));
+        }
+        if (section < 0 || version >= MetersVersion) return;
+        List<string> add = new List<string>();
+        bool take = false;
+        foreach (string raw in Default.Replace("\r\n", "\n").Split('\n')) {
+            string s = raw.Trim();
+            if (s.StartsWith("[") && s.EndsWith("]")) { take = Key(s.Substring(1, s.Length - 2)) == Key("Счётчики"); continue; }
+            if (!take || s.Length == 0 || s.StartsWith("#")) continue;
+            if (!have.Contains(Squeeze(s))) { add.Add(s); have.Add(Squeeze(s)); }
+        }
+        add.Insert(0, MetersMark + MetersVersion + (add.Count > 0 ? " (дописано " + add.Count + ")" : ""));
+        lines.InsertRange(last + 1, add);
+        System.IO.File.WriteAllLines(File, lines.ToArray(), new UTF8Encoding(true));
+        Load();
+    }
+
+    // для сравнения типов: без пробелов и точек, латиницей, заглавными ("СЕ 318BY R32.043" = "CE318BYR32043")
+    public static string Squeeze(string s) {
+        StringBuilder sb = new StringBuilder();
+        foreach (char c in s.ToUpperInvariant()) {
+            if (c == ' ' || c == '.' || c == '\t') continue;
+            int k = "АВЕКМНОРСТХ".IndexOf(c);
+            sb.Append(k >= 0 ? "ABEKMHOPCTX"[k] : c);
+        }
+        return sb.ToString();
     }
 
     // в справочник от прошлой версии дописываются списки, которых в нём ещё нет (правки пользователя не трогаются)
@@ -551,18 +603,33 @@ public class Lists {
 "\r\n" +
 "[Счётчики]\r\n" +
 "# Полное обозначение, как на счётчике. В программе выбирается по частям: модель, корпус, модификация.\r\n" +
+"# Расшифровка (по руководствам по эксплуатации Энергомеры): корпус S - в щиток, R - на DIN-рейку, C - сплит на опору\r\n" +
+"# (с выносным дисплеем СЕ901); код вроде 146 или 145.1: класс точности, 4 - 230 В, ток (3 - 5(10) А, 4 - 5(40) А,\r\n" +
+"# 5 - 5(60) А, 6 - 5(100) А, 9 - 5(80) А), у СЕ 208 после точки - число измерительных элементов;\r\n" +
+"# интерфейсы: J - оптопорт, A - RS-485, P - PLC-модем, R - радиомодем, G - GSM; дальше - доп. функции\r\n" +
+"# (Q - реле нагрузки, U - параметры сети, Y - два направления, V - эл. пломбы, F, M - датчики поля, L - подсветка).\r\n" +
+"# список счётчиков обновлён программой, версия 2\r\n" +
 "# Однофазные СЕ 208\r\n" +
 "CE208BY S53 145.1 JA.UKVFLZ\r\nCE208BY S53 145.1 JR.UKVFLZ\r\nCE208BY S53 145.1 JP.UKVFLZ\r\nCE208BY S53 145.1 JPR.UKVFLZ\r\n" +
 "CE208BY S53 145.1 JR.QUKVFLZ\r\nCE208BY S53 145.1 JPR.QUKVFLZ\r\nCE208BY S53 146.1 JR.UKVFLZ\r\nCE208BY S53 146.1 JPR.UKVFLZ\r\n" +
-"CE208BY S53 146.1 JR.QUKVFLZ\r\nCE208BY S53 146.1 JPR.QUKVFLZ\r\nCE208BY S7 145.1 JPR.UKVFLZ\r\nCE208BY S7 146.1 JPR.UKVFLZ\r\n" +
-"CE208BY S7 149.1 JPR.QUKVFLZ\r\nCE208BY C1.145.2.JR.QUKVFZ\r\nCE208BY C1.146.2.JR.QUKVFZ\r\nCE208BY C1.145.2.JPR.QUKVFZ\r\n" +
-"CE208BY C1.146.2.JPR.QUKVFZ\r\nCE208BY C2 145.2.JPR.QUKVFZ\r\nCE208BY C2 146.2.JPR.QUKVFZ\r\n" +
+"CE208BY S53 146.1 JR.QUKVFLZ\r\nCE208BY S53 146.1 JPR.QUKVFLZ\r\nCE208BY S51 145.1 JR.UKVFLZ\r\nCE208BY S51 145.1 JR.QUKVFLZ\r\n" +
+"CE208BY S51 145.2 JR.UKVFLZ\r\nCE208BY S51 145.2 JR.QUKVFLZ\r\nCE208BY S7 145.1 JPR.UKVFLZ\r\nCE208BY S7 146.1 JPR.UKVFLZ\r\n" +
+"CE208BY S7 149.1 JPR.QUKVFLZ\r\nCE208BY S7 145.1 JR.UKVFLZ\r\nCE208BY S7 145.2 JR.UKVFLZ\r\nCE208BY S7 145.2 JPR.UKVFLZ\r\n" +
+"CE208BY S8 146.2 JG.QUKVFLZ\r\nCE208BY R7 145.2 JR.QUKVFLZ\r\nCE208BY R7 745.2 JR.QUYKVFLZ\r\nCE208BY C1.145.2.JR.QUKVFZ\r\n" +
+"CE208BY C1.146.2.JR.QUKVFZ\r\nCE208BY C1.145.2.JPR.QUKVFZ\r\nCE208BY C1.146.2.JPR.QUKVFZ\r\nCE208BY C2 145.2.JPR.QUKVFZ\r\n" +
+"CE208BY C2 146.2.JPR.QUKVFZ\r\nCE208BY S52/2 145.1 R.LFZ\r\n" +
 "# Трёхфазные СЕ 318\r\n" +
 "CE318BY R32 043 JA.UVFL\r\nCE318BY R32 043 JR.UVFL\r\nCE318BY R32 146 JA.UVFL\r\nCE318BY R32 146 JR.UVFL\r\n" +
-"CE318BY R32 146 JP.UVFL\r\nCE318BY R32 146 JPR.UVFL\r\nCE318BY S31 043 JPR.UVFL\r\nCE318BY S31 146 JA.UVFL\r\n" +
-"CE318BY S31 146 JR.UVFL\r\nCE318BY S31 146 JPR.UVFL\r\nCE318BY S31 146 JR.QUVFL\r\nCE318BY S31 146 JPR.QUVFL\r\n" +
-"CE318BY S34 146 JPR.UVFL\r\nCE318BY S34 146 JPR.QUVFL\r\nCE318BY S35 043 JPR.UVFL\r\nCE318BY S35 146 JPR.UVFL\r\n" +
-"CE318BY S35 149.JPR.QUVFL\r\nCE318BY S37 146 JPR.QUVFL\r\n" +
+"CE318BY R32 146 JP.UVFL\r\nCE318BY R32 146 JPR.UVFL\r\nCE318BY R32 746 JA.UYVFL\r\nCE318BY R32 643 JR.UYVFL\r\n" +
+"CE318BY R32 746 JR.UYVFL\r\nCE318BY S31 043 JPR.UVFL\r\nCE318BY S31 146 JA.UVFL\r\nCE318BY S31 146 JR.UVFL\r\n" +
+"CE318BY S31 146 JPR.UVFL\r\nCE318BY S31 146 JR.QUVFL\r\nCE318BY S31 146 JPR.QUVFL\r\nCE318BY S31 043 JA.UVFL\r\n" +
+"CE318BY S31 149 JR.QUVFL\r\nCE318BY S31 149 JPR.QUVFL\r\nCE318BY S31 643 JA.UYVFL\r\nCE318BY S31 643 JPR.UYVFL\r\n" +
+"CE318BY S31 746 JPR.UYVFL\r\nCE318BY S34 146 JPR.UVFL\r\nCE318BY S34 146 JPR.QUVFL\r\nCE318BY S35 043 JPR.UVFL\r\n" +
+"CE318BY S35 146 JPR.UVFL\r\nCE318BY S35 149.JPR.QUVFL\r\nCE318BY S35 746 JPR.UYVFL\r\nCE318BY S35 643 JAPR.SUYVMFL\r\n" +
+"CE318BY S37 146 JPR.QUVFL\r\nCE318BY S37 043 JAPRG.UVFL\r\nCE318BY S37 146 JAPRG.QUVFL\r\nCE318BY S37 643 JAPR.UYVFL\r\n" +
+"CE318BY S37 643 JAPRG.UYVFL\r\nCE318BY S37 746 JAPR.QUYVFL\r\nCE318BY S37 746 JAPRG.QUYVFL\r\nCE318BY S39 643 JAPRG.UYVFL\r\n" +
+"CE318BY S39 746 JAPRG.UYVFL\r\nCE318BY S39 749 JAPRG.QUYVFL\r\nCE318BY C3 146 JR.QUVF\r\nCE318BY C3 146 JPR.QUVF\r\n" +
+"CE318BY C3 746 JR.QUYVF\r\n" +
 "\r\n" +
 "[Место установки]\r\n" +
 "ЩУЭ на границе участка\r\nза границей земельного участка\r\nв доме\r\nв гараже\r\nна лестничной клетке\r\n" +
@@ -692,12 +759,14 @@ public class MeterType {
         return "";
     }
 
-    // интерфейсы в модификации: P - PLC-модем, R - радиомодем ("JPR.UVFL" - оба)
+    // интерфейсы в модификации - часть перед последней («146 JPR.QUVFL» -> JPR, «145.1 R.LFZ» -> R):
+    // P - PLC-модем, R - радиомодем (JPR - оба)
     public static string Modem(string mod) {
-        int j = mod.IndexOf('J');
-        if (j < 0) return "";
-        int e = mod.IndexOf('.', j);
-        string code = e < 0 ? mod.Substring(j + 1) : mod.Substring(j + 1, e - j - 1);
+        string[] t = mod.Split(new char[] { ' ', '.' }, StringSplitOptions.RemoveEmptyEntries);
+        if (t.Length < 2) return "";
+        string code = t[t.Length - 2].ToUpperInvariant().Replace('Р', 'P');
+        foreach (char c in code) if (!char.IsLetterOrDigit(c)) return "";
+        if (code.Length == 0 || char.IsDigit(code[0])) return "";
         bool plc = code.IndexOf('P') >= 0, radio = code.IndexOf('R') >= 0;
         return plc && radio ? "PLC и радио" : plc ? "PLC" : radio ? "радио" : "";
     }
