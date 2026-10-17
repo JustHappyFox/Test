@@ -142,8 +142,13 @@ public static class DocxTemplate {
     const string W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
     static readonly Regex Field = new Regex("«([□¶]?)([A-ZА-ЯЁ0-9_]+)»");
 
-    // values: имя поля -> текст ("\n" - перенос строки); для флажков "1" - отмечен. Возвращает поля, которых не было в values
+    // values: имя поля -> текст ("\n" - перенос строки, "\t" - табуляция); для флажков "1" - отмечен. Возвращает поля, которых не было в values
     public static List<string> Fill(string template, string output, Dictionary<string, string> values) {
+        return Fill(template, output, values, null);
+    }
+
+    // sizes: имя поля -> размер шрифта значения в полупунктах (длинный текст в узкой ячейке - мельче, чтобы таблица не росла)
+    public static List<string> Fill(string template, string output, Dictionary<string, string> values, Dictionary<string, int> sizes) {
         List<ZipEntry> entries = Zip.Read(template);
         List<string> missing = new List<string>();
         foreach (ZipEntry e in entries) {
@@ -157,7 +162,7 @@ public static class DocxTemplate {
             List<XmlNode> paras = new List<XmlNode>();
             foreach (XmlNode p in doc.SelectNodes("//w:p", ns)) paras.Add(p);
             foreach (XmlNode p in paras)
-                if (FillParagraph(doc, p, values, missing)) changed = true;
+                if (FillParagraph(doc, p, values, sizes, missing)) changed = true;
             if (!changed) continue;
             using (MemoryStream ms = new MemoryStream()) {
                 XmlWriterSettings ws = new XmlWriterSettings();
@@ -184,7 +189,7 @@ public static class DocxTemplate {
         return ts;
     }
 
-    static bool FillParagraph(XmlDocument doc, XmlNode p, Dictionary<string, string> values, List<string> missing) {
+    static bool FillParagraph(XmlDocument doc, XmlNode p, Dictionary<string, string> values, Dictionary<string, int> sizes, List<string> missing) {
         List<XmlNode> ts = Texts(p);
         if (ts.Count == 0) return false;
         StringBuilder sb = new StringBuilder();
@@ -216,7 +221,10 @@ public static class DocxTemplate {
             if (match.Groups[1].Value == "¶") hasPara = true;
             string value;
             if (!values.TryGetValue((box ? "□" : "") + name, out value)) { value = ""; if (!missing.Contains(name)) missing.Add(name); }
+            XmlNode run = first.ParentNode;
             Put(doc, first, firstOffset, match.Length, value, box);
+            int size;
+            if (!box && sizes != null && sizes.TryGetValue(name, out size)) Resize(doc, run, p, size);
         }
         // «¶ИМЯ» - поле в своём абзаце: пустое значение - абзаца нет совсем
         if (hasPara && p.ParentNode != null) {
@@ -265,11 +273,46 @@ public static class DocxTemplate {
         string[] lines = value.Replace("\r\n", "\n").Split('\n');
         for (int i = 0; i < lines.Length; i++) {
             if (i > 0) parts.Add(doc.CreateElement("w", "br", W));
-            if (lines[i].Length > 0) parts.Add(MakeText(doc, lines[i]));
+            string[] cells = lines[i].Split('\t');
+            for (int j = 0; j < cells.Length; j++) {
+                if (j > 0) parts.Add(doc.CreateElement("w", "tab", W));
+                if (cells[j].Length > 0) parts.Add(MakeText(doc, cells[j]));
+            }
         }
         if (after.Length > 0) parts.Add(MakeText(doc, after));
         foreach (XmlNode n in parts) run.InsertBefore(n, t);
         run.RemoveChild(t);
+    }
+
+    // размер шрифта куска (полупункты); точный межстрочный интервал абзаца - под новый размер
+    static void Resize(XmlDocument doc, XmlNode run, XmlNode p, int size) {
+        XmlNode rPr = null;
+        foreach (XmlNode c in run.ChildNodes) if (c.LocalName == "rPr") rPr = c;
+        if (rPr == null) { rPr = doc.CreateElement("w", "rPr", W); run.PrependChild(rPr); }
+        foreach (string n in new string[] { "sz", "szCs" }) {
+            XmlElement e = null;
+            foreach (XmlNode c in rPr.ChildNodes) if (c.LocalName == n) e = (XmlElement)c;
+            if (e == null) {
+                e = doc.CreateElement("w", n, W);
+                // порядок в rPr: ... sz, szCs, highlight, u ...
+                XmlNode before = null;
+                foreach (XmlNode c in rPr.ChildNodes)
+                    if (before == null && (c.LocalName == "highlight" || c.LocalName == "u" || c.LocalName == "effect" || c.LocalName == "bdr" ||
+                        c.LocalName == "shd" || c.LocalName == "fitText" || c.LocalName == "vertAlign" || c.LocalName == "rtl" ||
+                        c.LocalName == "cs" || c.LocalName == "em" || c.LocalName == "lang" || c.LocalName == "eastAsianLayout" ||
+                        (n == "sz" && c.LocalName == "szCs"))) before = c;
+                rPr.InsertBefore(e, before);
+            }
+            e.SetAttribute("val", W, size.ToString());
+        }
+        foreach (XmlNode c in p.ChildNodes) {
+            if (c.LocalName != "pPr") continue;
+            foreach (XmlNode sp in c.ChildNodes) {
+                XmlElement e = sp as XmlElement;
+                if (e == null || e.LocalName != "spacing" || e.GetAttribute("lineRule", W) != "exact") continue;
+                e.SetAttribute("line", W, Math.Min(int.Parse(e.GetAttribute("line", W)), size * 12).ToString());
+            }
+        }
     }
 
     static List<XmlNode> Children(XmlNode n) {
@@ -309,6 +352,53 @@ public static class DocxTemplate {
             }
         }
         return names;
+    }
+}
+
+// Ширина текста в шрифте бланка (Times New Roman) - чтобы решить, влезет ли значение на своё место.
+// Ширины букв - из таблицы (единицы 1/2048 кегля, как в самом шрифте; сняты с метрически совместимого
+// Liberation Serif): так одинаково на любом компьютере, без измерения на экране
+public static class Fit {
+    const string Chars = " !\u0022#%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[]_abcdefghijklmnopqrstuvwxyz\u00AB\u00BB\u00A0\u2013\u2014\u2116\u0401\u0410\u0411\u0412\u0413\u0414\u0415\u0416\u0417\u0418\u0419\u041A\u041B\u041C\u041D\u041E\u041F\u0420\u0421\u0422\u0423\u0424\u0425\u0426\u0427\u0428\u0429\u042A\u042B\u042C\u042D\u042E\u042F\u0430\u0431\u0432\u0433\u0434\u0435\u0436\u0437\u0438\u0439\u043A\u043B\u043C\u043D\u043E\u043F\u0440\u0441\u0442\u0443\u0444\u0445\u0446\u0447\u0448\u0449\u044A\u044B\u044C\u044D\u044E\u044F\u0451\u0406\u0456\u040E\u045E";
+    static readonly int[] Regular = {
+        512, 682, 836, 1024, 1706, 1593, 369, 682, 682, 1024, 1155, 512, 682, 512, 569, 1024, 1024, 1024, 1024, 1024, 1024, 1024, 1024, 1024,
+        1024, 569, 569, 1155, 1155, 1155, 909, 1886, 1479, 1366, 1366, 1479, 1251, 1139, 1479, 1479, 682, 797, 1479, 1251, 1821, 1479, 1479, 1139,
+        1479, 1366, 1139, 1251, 1479, 1479, 1933, 1479, 1479, 1251, 682, 682, 1024, 909, 1024, 909, 1024, 909, 682, 1024, 1024, 569, 569, 1024,
+        569, 1593, 1024, 1024, 1024, 1024, 682, 797, 569, 1024, 1024, 1479, 1024, 1024, 909, 1024, 1024, 512, 1024, 2048, 1954, 1251, 1479, 1176,
+        1366, 1184, 1397, 1251, 1835, 1026, 1479, 1479, 1366, 1389, 1821, 1479, 1479, 1479, 1139, 1366, 1251, 1450, 1618, 1479, 1479, 1331, 2066, 2066,
+        1446, 1786, 1176, 1352, 2105, 1366, 909, 1042, 967, 840, 1042, 909, 1415, 809, 1096, 1096, 995, 1022, 1296, 1096, 1024, 1096, 1024, 909,
+        895, 1024, 1327, 1024, 1096, 1030, 1577, 1577, 1059, 1376, 934, 879, 1530, 942, 909, 682, 569, 1450, 1024 };
+    static readonly int[] Bold = {
+        512, 682, 1137, 1024, 2048, 1706, 569, 682, 682, 1024, 1167, 512, 682, 512, 569, 1024, 1024, 1024, 1024, 1024, 1024, 1024, 1024, 1024,
+        1024, 682, 682, 1167, 1167, 1167, 1024, 1905, 1479, 1366, 1479, 1479, 1366, 1251, 1593, 1593, 797, 1024, 1593, 1366, 1933, 1479, 1593, 1251,
+        1593, 1479, 1139, 1366, 1479, 1479, 2048, 1479, 1479, 1366, 682, 682, 1024, 1024, 1139, 909, 1139, 909, 682, 1024, 1139, 569, 682, 1139,
+        569, 1706, 1139, 1024, 1139, 1139, 909, 797, 682, 1139, 1024, 1479, 1024, 1024, 909, 1024, 1024, 512, 1024, 2048, 2058, 1366, 1479, 1354,
+        1366, 1303, 1409, 1366, 2025, 1081, 1593, 1593, 1485, 1526, 1933, 1593, 1593, 1593, 1251, 1479, 1366, 1503, 1759, 1479, 1593, 1503, 2249, 2249,
+        1567, 2011, 1354, 1389, 2306, 1479, 1024, 1024, 1106, 930, 1036, 909, 1485, 823, 1180, 1180, 1180, 1149, 1395, 1180, 1024, 1180, 1139, 909,
+        1006, 1024, 1417, 1024, 1180, 1155, 1729, 1729, 1194, 1599, 1083, 885, 1565, 1108, 909, 797, 569, 1503, 1024 };
+
+    // ширина строки, пт
+    public static float Width(string s, float pt, bool bold) {
+        int[] w = bold ? Bold : Regular;
+        long sum = 0;
+        foreach (char c in s) {
+            int i = Chars.IndexOf(c);
+            sum += i >= 0 ? w[i] : 1100;     // незнакомый знак - как средняя заглавная
+        }
+        return sum * pt / 2048f;
+    }
+
+    // сколько строк займёт текст в колонке шириной width пт (перенос по словам)
+    public static int Lines(string s, float pt, float width) {
+        int lines = 1;
+        float x = 0, space = Width(" ", pt, false);
+        foreach (string w in s.Split(new char[] { ' ' }, StringSplitOptions.RemoveEmptyEntries)) {
+            float ww = Width(w, pt, false);
+            if (x > 0 && x + space + ww > width) { lines++; x = 0; }
+            x += (x > 0 ? space : 0) + ww;
+            while (x > width) { lines++; x -= width; }   // слово длиннее строки - Word режет его
+        }
+        return lines;
     }
 }
 
@@ -626,15 +716,34 @@ public static class St {
     public static readonly Color NavMark = Color.FromArgb(99, 179, 237);
     public static readonly Color Accent = Color.FromArgb(35, 99, 178);
     public static readonly Color AccentHover = Color.FromArgb(28, 84, 153);
-    public static readonly Color Caption = Color.FromArgb(92, 102, 117);
+    public static readonly Color Caption = Color.FromArgb(58, 66, 78);
     public static readonly Color Text = Color.FromArgb(31, 36, 43);
     public static readonly Color Hint = Color.FromArgb(128, 137, 150);
-    public static readonly Color Missing = Color.FromArgb(253, 232, 232);
+    public static readonly Color Missing = Color.FromArgb(255, 222, 222);
     public static readonly Color MissingBorder = Color.FromArgb(220, 90, 90);
     public static readonly Color Bad = Color.FromArgb(200, 55, 55);
     public static readonly Color Good = Color.FromArgb(46, 140, 87);
     public static readonly Color Box = Color.FromArgb(248, 250, 252);
     public static readonly Color Disabled = Color.FromArgb(236, 239, 243);
+    // рамка полей ввода - чёрная, чтобы поле не сливалось с фоном; у недоступного - серая
+    public static readonly Color Field = Color.Black;
+    public static readonly Color FieldOff = Color.FromArgb(170, 176, 184);
+    // поле, в котором курсор
+    public static readonly Color Focus = Color.FromArgb(255, 247, 205);
+
+    // свой цвет у каждого раздела: фон, полоса заголовка, метка (полоска слева, рамка, значок в меню)
+    public static Tint TintOf(string card) {
+        switch (card) {
+            case "Договор": return new Tint(236, 243, 252, 211, 227, 248, 52, 110, 190);
+            case "Фото документов": return new Tint(243, 240, 251, 225, 218, 246, 118, 90, 190);
+            case "Потребитель": return new Tint(235, 247, 238, 208, 237, 215, 46, 138, 78);
+            case "Объект": return new Tint(253, 245, 229, 248, 229, 188, 196, 126, 24);
+            case "Счётчики": return new Tint(232, 246, 247, 201, 234, 237, 22, 126, 138);
+            case "Пломбы и оборудование": return new Tint(252, 238, 241, 245, 212, 219, 184, 68, 94);
+            case "Дополнительно": return new Tint(244, 246, 230, 228, 235, 196, 116, 138, 26);
+            default: return new Tint(241, 242, 244, 223, 226, 231, 100, 110, 125);
+        }
+    }
 
     public static readonly Font Base = new Font("Segoe UI", 10f);
     public static readonly Font Small = new Font("Segoe UI", 9f);
@@ -642,6 +751,17 @@ public static class St {
     public static readonly Font Title = new Font("Segoe UI", 12.5f, FontStyle.Bold);
     public static readonly Font Big = new Font("Segoe UI", 16f, FontStyle.Bold);
     public static readonly Font NavFont = new Font("Segoe UI", 10.5f);
+}
+
+public class Tint {
+    public readonly Color Body, Head, Mark;
+    public Tint(int r1, int g1, int b1, int r2, int g2, int b2, int r3, int g3, int b3) {
+        Body = Color.FromArgb(r1, g1, b1);
+        Head = Color.FromArgb(r2, g2, b2);
+        Mark = Color.FromArgb(r3, g3, b3);
+    }
+    // тёмный оттенок метки - для заголовков
+    public Color Dark { get { return Color.FromArgb(Mark.R * 6 / 10, Mark.G * 6 / 10, Mark.B * 6 / 10); } }
 }
 
 public static class Ui {
@@ -812,6 +932,21 @@ public class Combo : ComboBox {
 
     static readonly ToolTip tip = new ToolTip();
 
+    // своя чёрная рамка поверх плоской серой: список не сливается с фоном (как текстовые поля)
+    protected override void WndProc(ref Message m) {
+        base.WndProc(ref m);
+        if (m.Msg == 0x000F && IsHandleCreated) {
+            try {
+                using (Graphics g = Graphics.FromHwnd(Handle))
+                using (Pen p = new Pen(!Enabled ? St.FieldOff : BackColor == St.Missing ? St.MissingBorder : St.Field))
+                    g.DrawRectangle(p, 0, 0, Width - 1, Height - 1);
+            } catch { }
+        }
+    }
+
+    protected override void OnEnabledChanged(EventArgs e) { base.OnEnabledChanged(e); Invalidate(); }
+    protected override void OnBackColorChanged(EventArgs e) { base.OnBackColorChanged(e); Invalidate(); }
+
     // длинный текст: показываем начало, целиком - во всплывающей подсказке
     void ShowStart() {
         if (!Wrap || DropDownStyle != ComboBoxStyle.DropDown) return;
@@ -893,7 +1028,7 @@ public class Seg : Panel {
     bool missing;
 
     public Seg(params string[] options) {
-        BackColor = St.InputBorder;
+        BackColor = St.Field;
         Padding = new Padding(1);
         buttons = new RadioButton[options.Length];
         for (int i = 0; i < options.Length; i++) {
@@ -933,7 +1068,7 @@ public class Seg : Panel {
 
     public bool Missing {
         get { return missing; }
-        set { missing = value; BackColor = value ? St.MissingBorder : St.InputBorder; }
+        set { missing = value; BackColor = value ? St.MissingBorder : Enabled ? St.Field : St.FieldOff; }
     }
 
     public int Index {
@@ -954,33 +1089,49 @@ public class Seg : Panel {
     }
 
     public RadioButton Button(int i) { return buttons[i]; }
+
+    protected override void OnEnabledChanged(EventArgs e) {
+        base.OnEnabledChanged(e);
+        if (!missing) BackColor = Enabled ? St.Field : St.FieldOff;
+    }
 }
 
-// Белая карточка раздела с рамкой
+// Карточка раздела: светлый фон цвета раздела, сверху полоса с названием, слева цветная полоска
 public class CardPanel : Panel {
+    public Tint Tint = St.TintOf("");
+    public int HeadHeight = 38;
     public CardPanel() {
         BackColor = St.Card;
         DoubleBuffered = true;
         SetStyle(ControlStyles.ResizeRedraw, true);
     }
+    public void SetTint(Tint t) { Tint = t; BackColor = t.Body; Invalidate(); }
     protected override void OnPaint(PaintEventArgs e) {
         base.OnPaint(e);
-        using (Pen p = new Pen(St.Border)) e.Graphics.DrawRectangle(p, 0, 0, Width - 1, Height - 1);
+        Graphics g = e.Graphics;
+        using (SolidBrush b = new SolidBrush(Tint.Head)) g.FillRectangle(b, 0, 0, Width, HeadHeight);
+        using (SolidBrush b = new SolidBrush(Tint.Mark)) {
+            g.FillRectangle(b, 0, 0, 6, Height);
+            g.FillRectangle(b, 0, HeadHeight - 2, Width, 2);
+        }
+        using (Pen p = new Pen(Tint.Mark)) g.DrawRectangle(p, 0, 0, Width - 1, Height - 1);
     }
 }
 
-// Светлая рамка внутри карточки (счётчик 1, счётчик 2)
+// Рамка внутри карточки (счётчик 1, счётчик 2): белая, с рамкой цвета раздела
 public class BoxPanel : Panel {
     public string Title = "";
+    public Color Mark = St.Border;
     public BoxPanel() {
-        BackColor = St.Box;
+        BackColor = Color.White;
         DoubleBuffered = true;
         SetStyle(ControlStyles.ResizeRedraw, true);
     }
     protected override void OnPaint(PaintEventArgs e) {
         base.OnPaint(e);
-        using (Pen p = new Pen(St.Border)) e.Graphics.DrawRectangle(p, 0, 0, Width - 1, Height - 1);
-        TextRenderer.DrawText(e.Graphics, Title, St.Bold, new Point(14, 10), Enabled ? St.Text : St.Hint);
+        Color c = Enabled ? Mark : St.FieldOff;
+        using (Pen p = new Pen(c, 2f)) e.Graphics.DrawRectangle(p, 1, 1, Width - 2, Height - 2);
+        TextRenderer.DrawText(e.Graphics, Title, St.Bold, new Point(12, 7), Enabled ? St.Text : St.Hint);
     }
 }
 
@@ -1015,7 +1166,7 @@ public class Cell {
 public class Grid {
     public readonly Control Host;
     public readonly int Cols;
-    public int PadX = 20, PadTop = 0, PadBottom = 20, Gap = 14, RowGap = 12;
+    public int PadX = 18, PadTop = 0, PadBottom = 12, Gap = 10, RowGap = 6;
     readonly List<Cell[]> rows = new List<Cell[]>();
 
     public Grid(Control host, int cols) { Host = host; Cols = cols; }
@@ -1047,7 +1198,7 @@ public class Grid {
                 int cy = y;
                 // поля одной строки - на одном уровне, даже если у какого-то нет подписи
                 if (c.Cap != null) c.Cap.SetBounds(cx, cy, cw, capH);
-                if (anyCap && c.Sub == null) cy += capH + 3;
+                if (anyCap && c.Sub == null) cy += capH + 1;
                 int h = 0;
                 if (c.Sub != null) { h = c.Sub.Layout(cw); c.Sub.Host.SetBounds(cx, cy, cw, h); }
                 else if (c.Ctl != null) { h = Ui.HeightOf(c.Ctl, cw); c.Ctl.SetBounds(cx, cy, cw, h); }
@@ -1078,13 +1229,16 @@ public class Card {
         Title.BackColor = Color.Transparent;
         Sub.Text = subtitle ?? "";
         Sub.Font = St.Small;
-        Sub.ForeColor = St.Hint;
+        Sub.ForeColor = St.Caption;
         Sub.AutoSize = true;
         Sub.BackColor = Color.Transparent;
         Panel.Controls.Add(Title);
         Panel.Controls.Add(Sub);
+        Tint t = St.TintOf(name);
+        Panel.SetTint(t);
+        Title.ForeColor = t.Dark;
         Grid = new Grid(Panel, cols);
-        Grid.PadTop = 58;
+        Grid.PadTop = Panel.HeadHeight + 8;
     }
 
     public void AddExtra(Control c) {
@@ -1094,14 +1248,15 @@ public class Card {
 
     public int Layout(int width) {
         Panel.Width = width;
-        Title.Location = new Point(18, 14);
-        Sub.Location = new Point(Title.Right + 10, 14 + Title.Height - Sub.Height - 2);
-        int x = width - 20;
+        int head = Panel.HeadHeight - 2;
+        Title.Location = new Point(18, (head - Title.Height) / 2);
+        Sub.Location = new Point(Title.Right + 10, Title.Top + Title.Height - Sub.Height - 2);
+        int x = width - 10;
         for (int i = Extra.Count - 1; i >= 0; i--) {
             Control c = Extra[i];
             x -= c.Width;
-            c.Location = new Point(x, 12 + Math.Max(0, (Title.Height - c.Height) / 2));
-            x -= 12;
+            c.Location = new Point(x, Math.Max(2, (head - c.Height) / 2));
+            x -= 8;
         }
         // узко - пояснение рядом с заголовком прячем, чтобы кнопки на него не налезали
         Sub.Visible = Extra.Count == 0 || x >= Sub.Right;
@@ -1115,6 +1270,7 @@ public class Card {
 public class NavItem : Control {
     public bool Active, Small;
     public int Count = -1;
+    public Color Mark = Color.Empty;    // цвет раздела - значок слева
     bool hover;
 
     public NavItem(string text, bool small) {
@@ -1137,7 +1293,13 @@ public class NavItem : Control {
         using (SolidBrush b = new SolidBrush(back)) g.FillRectangle(b, ClientRectangle);
         if (Active) using (SolidBrush b = new SolidBrush(St.NavMark)) g.FillRectangle(b, 0, 0, 4, Height);
         Color fore = Active || hover ? Color.White : St.NavText;
-        Rectangle tr = new Rectangle(22, 0, Width - 60, Height);
+        int tx = 22;
+        if (Mark != Color.Empty) {
+            using (SolidBrush b = new SolidBrush(Mark)) g.FillRectangle(b, 14, (Height - 12) / 2, 12, 12);
+            using (Pen p = new Pen(Color.FromArgb(150, 255, 255, 255))) g.DrawRectangle(p, 14, (Height - 12) / 2, 11, 11);
+            tx = 34;
+        }
+        Rectangle tr = new Rectangle(tx, 0, Width - tx - 38, Height);
         TextRenderer.DrawText(g, Text, Font, tr, fore, TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.EndEllipsis);
         if (Count > 0) {
             string s = Count.ToString();
@@ -1202,8 +1364,10 @@ public class DateBox : Panel {
             if (e.KeyCode == Keys.Escape && popup != null) popup.Close();
         };
         box.MouseUp += delegate { if (popup == null || popup.IsDisposed) ShowCalendar(); };
+        box.Enter += delegate { box.BackColor = St.Focus; };
+        box.Leave += delegate { box.BackColor = Enabled ? Color.White : St.Disabled; };
         pick.FlatStyle = FlatStyle.Flat;
-        pick.FlatAppearance.BorderColor = St.InputBorder;
+        pick.FlatAppearance.BorderColor = St.Field;
         pick.BackColor = Color.White;
         pick.UseVisualStyleBackColor = false;
         pick.Cursor = Cursors.Hand;
@@ -1339,7 +1503,7 @@ public class Heaters : Panel {
         r.Count.SetItems(new List<string>(Counts));
         r.Power = new Button();
         r.Power.FlatStyle = FlatStyle.Flat;
-        r.Power.FlatAppearance.BorderColor = St.InputBorder;
+        r.Power.FlatAppearance.BorderColor = St.Field;
         r.Power.BackColor = Color.White;
         r.Power.UseVisualStyleBackColor = false;
         r.Power.Font = St.Base;
@@ -1906,7 +2070,9 @@ public static class Mrz {
     }
 
     // знак -> сетка GW x GH: высота знака - во всю сетку, ширина - по пропорции, по центру
-    public static float[] Grid(float[] ink, int stride, int x0, int y0, int x1, int y1) {
+    public static float[] Grid(float[] ink, int stride, int x0, int y0, int x1, int y1) { return Grid(ink, stride, x0, y0, x1, y1, GW, GH); }
+
+    public static float[] Grid(float[] ink, int stride, int x0, int y0, int x1, int y1, int GW, int GH) {
         float[] grid = new float[GW * GH];
         double h = y1 - y0 + 1, w = x1 - x0 + 1;
         double k = Math.Min(GH / h, GW / w);       // точек сетки на точку знака
@@ -3122,8 +3288,11 @@ public class GlyphSet {
     readonly List<int> owner = new List<int>();
     readonly List<double> relH = new List<double>(), relY = new List<double>(), asp = new List<double>();
     public int Fonts;
+    public int GW = Mrz.GW, GH = Mrz.GH;      // сетка сравнения
 
     GlyphSet(string chars) { Chars = chars; }
+
+    public float[] Grid(float[] ink, int stride, int x0, int y0, int x1, int y1) { return Mrz.Grid(ink, stride, x0, y0, x1, y1, GW, GH); }
 
     static float[] Norm(float[] g) {
         double m = 0;
@@ -3161,14 +3330,26 @@ public class GlyphSet {
     }
 
     // образцы рисуются жирными шрифтами этого компьютера (каких нет - пропускаются)
-    public static GlyphSet FromFonts(string chars, string[] families) {
+    public static GlyphSet FromFonts(string chars, string[] families) { return FromFonts(chars, families, new FontStyle[] { FontStyle.Bold }); }
+
+    public static GlyphSet FromFonts(string chars, string[] families, FontStyle[] styles) { return FromFonts(chars, families, styles, Mrz.GW, Mrz.GH); }
+
+    public static GlyphSet FromFonts(string chars, string[] families, FontStyle[] styles, int gw, int gh) {
+        return FromFonts(chars, families, styles, gw, gh, new double[] { 0, 0.045, 0.09 });
+    }
+
+    // blurs - размытие образцов (доля высоты заглавной)
+    public static GlyphSet FromFonts(string chars, string[] families, FontStyle[] styles, int gw, int gh, double[] blurs) {
         GlyphSet s = new GlyphSet(chars);
+        s.GW = gw;
+        s.GH = gh;
         const int W = 200, H = 200;
         List<float[]> seen = new List<float[]>();
         lock (Mrz.Gdi) {
-            foreach (string fam in families) {
+            foreach (string fam in families)
+            foreach (FontStyle style in styles) {
                 Font f = null;
-                try { f = new Font(fam, 64f, FontStyle.Bold, GraphicsUnit.Pixel); } catch { f = null; }
+                try { f = new Font(fam, 64f, style, GraphicsUnit.Pixel); } catch { f = null; }
                 if (f == null) continue;
                 using (f) {
                     int x0, y0, x1, y1;
@@ -3187,10 +3368,10 @@ public class GlyphSet {
                     s.Fonts++;
                     for (int k = 0; k < chars.Length; k++) {
                         float[] ink = Render(f, chars[k].ToString(), W, H);
-                        foreach (double sigma in new double[] { 0, 0.045, 0.09 }) {
+                        foreach (double sigma in blurs) {
                             float[] b = sigma > 0 ? Blur(ink, W, H, sigma * cap) : ink;
                             if (!Box(b, W, H, out x0, out y0, out x1, out y1)) continue;
-                            s.Add(k, Mrz.Grid(b, W, x0, y0, x1, y1), (y1 - y0 + 1) / cap, ((y0 + y1) / 2.0 - capMid) / cap, (x1 - x0 + 1.0) / (y1 - y0 + 1));
+                            s.Add(k, s.Grid(b, W, x0, y0, x1, y1), (y1 - y0 + 1) / cap, ((y0 + y1) / 2.0 - capMid) / cap, (x1 - x0 + 1.0) / (y1 - y0 + 1));
                         }
                     }
                 }
@@ -3296,6 +3477,8 @@ public class Glyph {
     public double[] Sc;           // оценки всех знаков набора
     public bool Space;            // перед знаком пробел
     public int X0, X1;
+    internal object Src;          // строка, откуда знак (для перечитывания по образцу)
+    internal int CutA, CutB;
 }
 
 public class PageResult {
@@ -3347,9 +3530,10 @@ public static class PassportPage {
 
     public static int FontCount { get { Init(); return sans.Fonts; } }
 
-    class Line {
+    internal class Line {
         public List<Mrz.Comp> Comps;
-        public double Cap, Y;
+        public bool Mixed;                  // обычный текст (строчные и заглавные), а не одни заглавные
+        public double Cap, Y, MedH, H80;
         public int X0;
         public List<Glyph> G;
         public string Text = "";
@@ -3357,7 +3541,10 @@ public static class PassportPage {
 
     // ---------- строки текста на странице ----------
 
-    static List<Line> FindLines(GrayImage g) {
+    internal static List<Line> FindLines(GrayImage g) { return FindLines(g, false); }
+
+    // mixed - обычный текст: строчные буквы, широкие пробелы (текст по ширине)
+    internal static List<Line> FindLines(GrayImage g, bool mixed) {
         bool[] dark = Mrz.Binarize(g);
         List<Mrz.Comp> cand = new List<Mrz.Comp>();
         foreach (Mrz.Comp c in Mrz.Components(dark, g.W, g.H))
@@ -3377,7 +3564,7 @@ public static class PassportPage {
                 int next = -1;
                 for (int j = cur + 1; j < cand.Count; j++) {
                     Mrz.Comp d = cand[j];
-                    if (d.X0 > c.X1 + 1.4 * href) break;
+                    if (d.X0 > c.X1 + (mixed ? 4.0 : 1.4) * href) break;
                     if (used[j] || d.X0 < c.X0 + 0.3 * c.Wd) continue;
                     if (Math.Abs(d.Cy - (yref + slope * (d.Cx - xref))) > 0.45 * href) continue;
                     if (d.Ht < 0.3 * href || d.Ht > 1.7 * href) continue;
@@ -3388,7 +3575,7 @@ public static class PassportPage {
                 cur = next;
                 Mrz.Comp n = cand[next];
                 // строка может идти с наклоном: следующий знак ищем по продолжению линии
-                if (n.Ht >= 0.7 * href && n.Ht <= 1.3 * href) {
+                if (n.Ht >= (mixed ? 0.5 : 0.7) * href && n.Ht <= 1.3 * href) {
                     double dxs = n.Cx - xref;
                     if (dxs > 0.5 * href) slope = 0.6 * slope + 0.4 * Math.Max(-0.4, Math.Min(0.4, (n.Cy - yref) / dxs));
                     yref = n.Cy;
@@ -3396,14 +3583,29 @@ public static class PassportPage {
                 }
                 href = Math.Max(href, Math.Min(n.Ht, href * 1.4));
             }
-            if (chain.Count < 4) continue;
+            if (chain.Count < (mixed ? 3 : 4)) continue;
             Line l = new Line();
+            l.Mixed = mixed;
             l.Comps = new List<Mrz.Comp>();
             foreach (int i in chain) { used[i] = true; l.Comps.Add(cand[i]); }
             List<int> hs = new List<int>();
             foreach (Mrz.Comp c in l.Comps) hs.Add(c.Ht);
             hs.Sort();
             l.Cap = hs[(int)(hs.Count * 0.8)];
+            // в обычном тексте строка из одних заглавных (заголовок) читается как заглавные
+            l.MedH = hs[(int)(hs.Count * 0.4)];
+            l.H80 = hs[(int)(hs.Count * 0.8)];
+            if (l.Mixed) {
+                // высота заглавной - по строчным (их больше всего): у шрифта с засечками заглавная в 1,48 раза выше
+                l.Cap = 1.48 * hs[(int)(hs.Count * 0.4)];
+                List<double> cys = new List<double>();
+                foreach (Mrz.Comp c in l.Comps) cys.Add(c.Cy);
+                cys.Sort();
+                l.Y = cys[cys.Count / 2];
+                l.X0 = l.Comps[0].X0;
+                lines.Add(l);
+                continue;
+            }
             // строка заглавных: почти все знаки высотой с заглавную (у подписей полей - строчные)
             int tall = 0;
             double ys = 0;
@@ -3412,6 +3614,15 @@ public static class PassportPage {
             l.Y = ys / tall;
             l.X0 = l.Comps[0].X0;
             lines.Add(l);
+        }
+        if (mixed && lines.Count > 0) {
+            // строки из одних заглавных (заголовки): их буквы заметно выше строчных основного текста
+            List<double> med = new List<double>();
+            foreach (Line l in lines) for (int k = 0; k < l.Comps.Count; k++) med.Add(l.MedH);
+            med.Sort();
+            double body = med[med.Count / 2];
+            foreach (Line l in lines)
+                if (l.MedH >= 1.3 * body) { l.Mixed = false; l.Cap = l.H80; }
         }
         lines.Sort(delegate(Line a, Line b) { return a.Y.CompareTo(b.Y); });
         return lines;
@@ -3444,19 +3655,24 @@ public static class PassportPage {
     }
 
 
-    static Strip ReadLine(GrayImage g, Line line, GlyphSet set) {
+    internal static Strip ReadLine(GrayImage g, Line line, GlyphSet set) {
         double cap = line.Cap;
-        // наклон строки - по центрам знаков высотой с заглавную
+        bool mixed = line.Mixed;
+        // наклон строки - по центрам знаков высотой с заглавную (в обычном тексте - по низу строчных)
         double sx = 0, sy = 0, sxx = 0, sxy = 0;
         int n = 0;
-        foreach (Mrz.Comp c in line.Comps)
-            if (c.Ht >= 0.75 * cap && c.Ht <= 1.3 * cap) { sx += c.Cx; sy += c.Cy; sxx += c.Cx * c.Cx; sxy += c.Cx * c.Cy; n++; }
+        foreach (Mrz.Comp c in line.Comps) {
+            double y;
+            if (!mixed) { if (c.Ht < 0.75 * cap || c.Ht > 1.3 * cap) continue; y = c.Cy; }
+            else { if (c.Ht < 0.5 * cap || c.Ht > 0.9 * cap) continue; y = c.Y1 + 0.5 - cap / 2; }
+            sx += c.Cx; sy += y; sxx += c.Cx * c.Cx; sxy += c.Cx * y; n++;
+        }
         if (n < 3) return null;
         double den = n * sxx - sx * sx;
         double b = Math.Abs(den) < 1e-9 ? 0 : (n * sxy - sx * sy) / den, a = (sy - b * sx) / n;
         double norm = Math.Sqrt(1 + b * b), dx = 1 / norm, dy = b / norm;
         double x0 = line.Comps[0].X0 - 0.8 * cap, x1 = line.Comps[line.Comps.Count - 1].X1 + 0.8 * cap;
-        int L = (int)((x1 - x0) * norm), SH = (int)(2.4 * cap);
+        int L = (int)((x1 - x0) * norm), SH = (int)((mixed ? 2.6 : 2.4) * cap);
         if (L < 10 || SH < 10) return null;
         double px = x0, py = a + b * x0;
         float[] strip = new float[L * SH];
@@ -3472,7 +3688,7 @@ public static class PassportPage {
         float[] ink = new float[strip.Length];
         bool[] bin = new bool[strip.Length];
         // только полоса строки (с запасом на кратки и хвосты букв): соседние строки не слипаются с нашими буквами
-        int bandTop = Math.Max(0, (int)(SH / 2.0 - 0.8 * cap)), bandBot = Math.Min(SH - 1, (int)(SH / 2.0 + 0.8 * cap));
+        int bandTop = Math.Max(0, (int)(SH / 2.0 - (mixed ? 0.75 : 0.8) * cap)), bandBot = Math.Min(SH - 1, (int)(SH / 2.0 + (mixed ? 0.95 : 0.8) * cap));
         for (int i = 0; i < strip.Length; i++) {
             float k = (bg - strip[i]) / (bg - fg);
             ink[i] = k < 0 ? 0 : k > 1 ? 1 : k;
@@ -3482,6 +3698,7 @@ public static class PassportPage {
         int count;
         int[] lab = Label(bin, L, SH, out count);
         int[] cx0 = new int[count + 1], cx1 = new int[count + 1], cy0 = new int[count + 1], cy1 = new int[count + 1], cn = new int[count + 1];
+        double[] cink = new double[count + 1], csx = new double[count + 1];
         for (int i = 1; i <= count; i++) { cx0[i] = L; cy0[i] = SH; cx1[i] = -1; cy1[i] = -1; }
         for (int y = 0; y < SH; y++)
             for (int x = 0; x < L; x++) {
@@ -3492,6 +3709,8 @@ public static class PassportPage {
                 if (y < cy0[l]) cy0[l] = y;
                 if (y > cy1[l]) cy1[l] = y;
                 cn[l]++;
+                cink[l] += ink[y * L + x];
+                csx[l] += x;
             }
         // знаки строки: задевают середину полосы; чужие строки сверху и снизу - мимо
         double mid = SH / 2.0;
@@ -3499,7 +3718,7 @@ public static class PassportPage {
         List<double> hts = new List<double>();
         for (int i = 1; i <= count; i++) {
             if (cn[i] < 4) continue;
-            if (cy1[i] < mid - 0.45 * cap || cy0[i] > mid + 0.45 * cap) continue;
+            if (cy1[i] < mid - 0.45 * cap || cy0[i] > mid + (mixed ? 0.6 : 0.45) * cap) continue;
             // обрезок буквы соседней строки у края полосы; край страницы, тень
             if (cy0[i] == bandTop && (cy0[i] + cy1[i]) / 2.0 < mid - 0.3 * cap) continue;
             if (cy0[i] == bandTop && cy1[i] == bandBot) continue;
@@ -3508,8 +3727,12 @@ public static class PassportPage {
             if (cy1[i] - cy0[i] + 1 > 1.9 * cap) continue;
             keep[i] = true;
             double h = cy1[i] - cy0[i] + 1;
-            if (h > 0.7 * cap && h < 1.3 * cap) hts.Add(h);
+            if (!mixed ? h > 0.7 * cap && h < 1.3 * cap : h > 0.5 * cap && h < 0.85 * cap) hts.Add(h);
         }
+        // в обычном тексте мелкие бледные пятнышки - обрывки защитного узора, а не точки и кратки
+        if (mixed)
+            for (int i = 1; i <= count; i++)
+                if (keep[i] && cy1[i] - cy0[i] + 1 <= 0.45 * cap && cink[i] / Math.Max(1, cn[i]) < 0.6) keep[i] = false;
         // мелочь над и под строкой (кратка над Й, Ў, точки Ё) - тоже своя, если рядом с буквой
         for (int i = 1; i <= count; i++) {
             if (keep[i] || cn[i] < 3) continue;
@@ -3517,19 +3740,62 @@ public static class PassportPage {
             if (h > 0.45 * cap || w > 0.9 * cap) continue;
             if (cy1[i] < mid - 1.0 * cap || cy0[i] > mid + 1.0 * cap) continue;
             if (cy0[i] == bandTop || cy1[i] == bandBot) continue;
+            if (mixed && cink[i] / Math.Max(1, cn[i]) < 0.6) continue;
             keep[i] = true;
         }
         if (hts.Count < 2) return null;
         hts.Sort();
         double capS = hts[hts.Count / 2];
         double ym = 0; int ymn = 0;
-        for (int i = 1; i <= count; i++) {
-            double h = cy1[i] - cy0[i] + 1;
-            if (keep[i] && h > 0.85 * capS && h < 1.15 * capS) { ym += (cy0[i] + cy1[i]) / 2.0; ymn++; }
+        if (!mixed) {
+            for (int i = 1; i <= count; i++) {
+                double h = cy1[i] - cy0[i] + 1;
+                if (keep[i] && h > 0.85 * capS && h < 1.15 * capS) { ym += (cy0[i] + cy1[i]) / 2.0; ymn++; }
+            }
+            if (ymn > 0) mid = ym / ymn;
+        } else {
+            // по строчным: середина заглавной - выше линии строки на половину заглавной
+            double xh = capS;
+            capS = 1.48 * xh;
+            List<int> bot = new List<int>();
+            for (int i = 1; i <= count; i++) {
+                double h = cy1[i] - cy0[i] + 1;
+                if (keep[i] && h > 0.85 * xh && h < 1.15 * xh) bot.Add(cy1[i]);
+            }
+            bot.Sort();
+            if (bot.Count > 0) mid = bot[bot.Count / 2] + 0.5 - capS / 2;
         }
-        if (ymn > 0) mid = ym / ymn;
         // только свои знаки: области строки
-        bool[] own = keep;
+        bool[] own = (bool[])keep.Clone();
+        // обычный текст: точки и запятые - отдельно (иначе «г.» под перекладиной «г» читается как «п»)
+        List<Glyph> punct = new List<Glyph>();
+        if (mixed) {
+            double baseY = mid + capS / 2;
+            List<int> low = new List<int>(), high = new List<int>();
+            for (int i = 1; i <= count; i++) {
+                if (!own[i]) continue;
+                double h = cy1[i] - cy0[i] + 1, w = cx1[i] - cx0[i] + 1;
+                if (h > 0.3 * capS || w > 0.35 * capS) continue;
+                if (cy1[i] >= baseY - 0.12 * capS && cy0[i] >= baseY - 0.3 * capS) low.Add(i);
+                else if (cy1[i] < baseY - 0.25 * capS && cy0[i] > mid - 0.25 * capS) high.Add(i);
+            }
+            foreach (int i in low) {
+                // запятая - вытянута вниз под строку, точка - круглая
+                double ph = cy1[i] - cy0[i] + 1, pw = cx1[i] - cx0[i] + 1;
+                char c = cy1[i] > baseY + 0.12 * capS || ph > 1.4 * pw ? ',' : '.';
+                // двоеточие / точка с запятой: над точкой - ещё точка
+                foreach (int j in high)
+                    if (own[j] && Math.Min(cx1[i], cx1[j]) - Math.Max(cx0[i], cx0[j]) >= 0) { c = c == ',' ? ';' : ':'; own[j] = false; }
+                own[i] = false;
+                Glyph pg = new Glyph();
+                pg.C = c; pg.S = 1; pg.C2 = c; pg.S2 = 0;
+                pg.Sc = new double[set.Chars.Length];
+                for (int k = 0; k < pg.Sc.Length; k++) pg.Sc[k] = set.Chars[k] == c ? 1 : -1;
+                pg.X0 = cx0[i];
+                pg.X1 = cx1[i];
+                punct.Add(pg);
+            }
+        }
         float[] inkOwn = new float[ink.Length];
         for (int i = 0; i < ink.Length; i++) inkOwn[i] = lab[i] != 0 ? (own[lab[i]] ? ink[i] : 0) : Math.Min(ink[i], 0.44f);
         // разрезы: по столбцам с краской - промежутки между буквами и провалы внутри слипшихся букв
@@ -3546,12 +3812,13 @@ public static class PassportPage {
         List<int> cuts = new List<int>();          // x разрезов по порядку
         List<bool> gapAfter = new List<bool>();    // от этого разреза до следующего - пусто (промежуток)
         List<int> gapW = new List<int>();
+        List<bool> inside = new List<bool>();      // разрез посреди краски (а не в промежутке)
         int xs = 0;
         while (xs < L && col[xs] <= 0) xs++;
         while (xs < L) {
             int xe = xs;
             while (xe < L && col[xe] > 0) xe++;             // краска: [xs, xe)
-            cuts.Add(xs); gapAfter.Add(false); gapW.Add(0);
+            cuts.Add(xs); gapAfter.Add(false); gapW.Add(0); inside.Add(false);
             int w = xe - xs;
             if (w > 0.8 * capS) {
                 double mx = 0;
@@ -3562,12 +3829,13 @@ public static class PassportPage {
                     bool lm = true;
                     for (int k = Math.Max(xs, x - minGap / 2); k <= Math.Min(xe - 1, x + minGap / 2); k++)
                         if (col[k] < col[x] || (col[k] == col[x] && k < x)) lm = false;
-                    if (lm) { cuts.Add(x); gapAfter.Add(false); gapW.Add(0); }
+                    if (lm) { cuts.Add(x); gapAfter.Add(false); gapW.Add(0); inside.Add(true); }
                 }
             }
             int nx = xe;
             while (nx < L && col[nx] <= 0) nx++;
             cuts.Add(xe);                                     // дальше - промежуток до следующей краски
+            inside.Add(false);
             gapAfter.Add(true);
             gapW.Add(nx < L ? nx - xe : 0);
             xs = nx;
@@ -3575,25 +3843,51 @@ public static class PassportPage {
         if (cuts.Count < 2) return null;
         Strip st = new Strip();
         st.Ink = inkOwn; st.L = L; st.SH = SH; st.Mid = mid; st.Cap = capS;
-        st.Cuts = cuts; st.Gap = gapAfter; st.GapW = gapW; st.Set = set;
+        st.Cuts = cuts; st.Gap = gapAfter; st.GapW = gapW; st.Inside = inside; st.Set = set; st.Mixed = mixed;
+        if (mixed) {
+            st.Lab = lab; st.Own = own; st.CX0 = cx0; st.CX1 = cx1; st.Raw = ink;
+            st.Cen = new double[count + 1];
+            for (int i = 1; i <= count; i++) st.Cen[i] = cn[i] > 0 ? csx[i] / cn[i] : 0;
+        }
         st.G = Decode(st, null);
+        st.Punct = punct;
+        if (punct.Count > 0) st.G = WithPunct(st.G, punct, capS);
         return st;
     }
 
     // строка, готовая к делению на знаки: полоса, разрезы, оценки уже проверенных кусков
-    class Strip {
+    internal class Strip {
         public float[] Ink;
         public int L, SH;
         public double Mid, Cap;
         public List<int> Cuts, GapW;
-        public List<bool> Gap;
+        public List<bool> Gap, Inside;
+        public bool Mixed;
+        public List<Glyph> Punct;
+        public int[] Lab, CX0, CX1;           // обычный текст: буква берётся целиком своей областью краски
+        public bool[] Own;
+        public double[] Cen;
+        public float[] Raw;
         public GlyphSet Set;
         public Dictionary<long, Glyph> Cache = new Dictionary<long, Glyph>();
         public List<Glyph> G;
     }
 
+    // точки и запятые - на свои места среди букв; пробелы - заново по промежуткам
+    static List<Glyph> WithPunct(List<Glyph> gs, List<Glyph> punct, double cap) {
+        List<Glyph> all = new List<Glyph>(gs);
+        foreach (Glyph p in punct) {
+            Glyph c = new Glyph();
+            c.C = p.C; c.S = p.S; c.C2 = p.C2; c.S2 = p.S2; c.Sc = p.Sc; c.X0 = p.X0; c.X1 = p.X1;
+            all.Add(c);
+        }
+        all.Sort(delegate(Glyph a, Glyph b) { return (a.X0 + a.X1).CompareTo(b.X0 + b.X1); });
+        for (int i = 0; i < all.Count; i++) all[i].Space = i > 0 && all[i].X0 - all[i - 1].X1 > 0.33 * cap;
+        return all;
+    }
+
     // какие знаки могут стоять на этом месте строки (null - любые)
-    delegate string Alphabet(int x0, int x1);
+    internal delegate string Alphabet(int x0, int x1);
 
     const string ByLetters = "АБВГДЕЁЖЗІЙКЛМНОПРСТУЎФХЦЧШЫЬЭЮЯ-";      // в белорусском нет И, Щ, Ъ
     const string RuLetters = "АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ-";     // в русском нет І, Ў
@@ -3602,14 +3896,25 @@ public static class PassportPage {
         long key = (long)i * 100000 + j;
         Glyph g;
         if (!st.Cache.TryGetValue(key, out g)) {
-            g = Classify(st.Ink, st.L, st.SH, st.Cuts[i], st.Cuts[j], st.Mid, st.Cap, st.Set);
+            g = st.Mixed ? ClassifyWhole(st, st.Cuts[i], st.Cuts[j]) : Classify(st.Ink, st.L, st.SH, st.Cuts[i], st.Cuts[j], st.Mid, st.Cap, st.Set);
             st.Cache[key] = g;
         }
         return g;
     }
 
     // знак с выбором только из разрешённых (копия - оценки общие)
-    static Glyph Restrict(Glyph g, string allowed, GlyphSet set) {
+    // деление по разрезу посреди краски и склейка через промежуток бывают реже - небольшой штраф
+    public static double CutPenalty = 0.12, GapPenalty = 0.1;
+
+    static double Penalty(Strip st, int ci, int cj) {
+        if (!st.Mixed) return 0;          // в паспорте (жирные заглавные) буквы часто слипаются - без штрафа
+        double p = st.Inside[ci] ? CutPenalty : 0;
+        // узкий промежуток - внутри буквы бывает (ы, Ы), широкий - между буквами
+        for (int k = ci + 1; k < cj; k++) if (st.Gap[k]) p += st.GapW[k] > 0.1 * st.Cap ? GapPenalty : 0.02;
+        return p;
+    }
+
+    internal static Glyph Restrict(Glyph g, string allowed, GlyphSet set) {
         Glyph r = new Glyph();
         r.Sc = g.Sc;
         r.X0 = g.X0;
@@ -3626,7 +3931,7 @@ public static class PassportPage {
 
     // знак - от разреза до разреза внутри куска или через узкий промежуток (Ы, разорванные буквы);
     // лучшее деление строки - где сумма (ширина x сходство) больше
-    static List<Glyph> Decode(Strip st, Alphabet abc) {
+    internal static List<Glyph> Decode(Strip st, Alphabet abc) {
         List<int> cuts = st.Cuts;
         double capS = st.Cap;
         int m = cuts.Count;
@@ -3636,8 +3941,9 @@ public static class PassportPage {
         for (int i = 0; i < m; i++) { best2[i] = double.MinValue; from[i] = -1; }
         best2[0] = 0;
         for (int j = 1; j < m; j++) {
-            // промежуток или соринка - без знака
-            if (best2[j - 1] > double.MinValue && best2[j - 1] > best2[j]) { best2[j] = best2[j - 1]; from[j] = j - 1; got[j] = null; }
+            // промежуток или соринка - без знака (в обычном тексте пропуск краски - со штрафом)
+            double drop = st.Mixed && !st.Gap[j - 1] ? -0.3 * (cuts[j] - cuts[j - 1]) / capS : 0;
+            if (best2[j - 1] > double.MinValue && best2[j - 1] + drop > best2[j]) { best2[j] = best2[j - 1] + drop; from[j] = j - 1; got[j] = null; }
             if (st.Gap[j - 1]) continue;
             for (int i = j - 1; i >= 0; i--) {
                 if (cuts[j] - cuts[i] > 1.7 * capS) break;
@@ -3650,14 +3956,14 @@ public static class PassportPage {
                 if (raw == null) continue;
                 Glyph gl = Restrict(raw, abc == null ? null : abc(cuts[i], cuts[j]), st.Set);
                 if (gl == null) continue;
-                double v = best2[i] + (cuts[j] - cuts[i]) / capS * gl.S;
+                double v = best2[i] + (cuts[j] - cuts[i]) / capS * gl.S - Penalty(st, i, j);
                 if (v > best2[j]) { best2[j] = v; from[j] = i; got[j] = gl; }
             }
         }
         List<Glyph> res = new List<Glyph>();
         int at = m - 1;
         while (at > 0 && from[at] >= 0) {
-            if (got[at] != null) res.Add(got[at]);
+            if (got[at] != null) { got[at].Src = st; got[at].CutA = from[at]; got[at].CutB = at; res.Add(got[at]); }
             at = from[at];
         }
         res.Reverse();
@@ -3692,6 +3998,33 @@ public static class PassportPage {
         } catch { }
     }
 
+    // обычный текст: буквы с засечками заходят друг на друга - область краски относится к куску, где её середина,
+    // и берётся целиком; режется по столбцам только большая область (несколько слипшихся букв)
+    static Glyph ClassifyWhole(Strip st, int xa, int xb) {
+        int L = st.L, SH = st.SH;
+        int wa = Math.Max(0, (int)(xa - 0.6 * st.Cap)), wb = Math.Min(L, (int)(xb + 0.6 * st.Cap));
+        int ww = wb - wa;
+        if (ww <= 0) return null;
+        float[] m = new float[ww * SH];
+        bool any = false;
+        for (int y = 0; y < SH; y++)
+            for (int x = wa; x < wb; x++) {
+                int i = y * L + x, l = st.Lab[i];
+                bool take;
+                if (l == 0) take = x >= xa && x < xb;
+                else if (!st.Own[l]) take = false;
+                else if (st.CX1[l] - st.CX0[l] + 1 > 1.2 * st.Cap) take = x >= xa && x < xb;
+                else take = st.Cen[l] >= xa && st.Cen[l] < xb;
+                if (!take) continue;
+                m[y * ww + x - wa] = l == 0 ? Math.Min(st.Raw[i], 0.44f) : st.Raw[i];
+                if (l != 0) any = true;
+            }
+        if (!any) return null;
+        Glyph g = Classify(m, ww, SH, 0, ww, st.Mid, st.Cap, st.Set);
+        if (g != null) { g.X0 += wa; g.X1 += wa; }
+        return g;
+    }
+
     static Glyph Classify(float[] ink, int L, int SH, int xa, int xb, double mid, double cap, GlyphSet set) {
         int bx0 = L, by0 = SH, bx1 = -1, by1 = -1;
         double mass = 0;
@@ -3706,7 +4039,7 @@ public static class PassportPage {
                 if (y > by1) by1 = y;
             }
         if (bx1 < 0 || mass < 0.02 * cap * cap) return null;
-        float[] grid = Mrz.Grid(ink, L, bx0, by0, bx1, by1);
+        float[] grid = set.Grid(ink, L, bx0, by0, bx1, by1);
         double h = (by1 - by0 + 1) / cap, yy = ((by0 + by1) / 2.0 - mid) / cap, asp = (bx1 - bx0 + 1.0) / (by1 - by0 + 1);
         double[] sc = set.Score(grid, h, yy, asp);
         Glyph g = new Glyph();
@@ -3721,7 +4054,7 @@ public static class PassportPage {
         return g;
     }
 
-    static string Text(List<Glyph> gs) {
+    internal static string Text(List<Glyph> gs) {
         StringBuilder sb = new StringBuilder();
         foreach (Glyph g in gs) { if (g.Space) sb.Append(' '); sb.Append(g.C); }
         return sb.ToString();
@@ -3749,7 +4082,7 @@ public static class PassportPage {
         return best.Result;
     }
 
-    static List<Line> Scale(List<Line> lines, double f) {
+    internal static List<Line> Scale(List<Line> lines, double f) {
         foreach (Line l in lines) {
             l.Comps = Mrz.Scale(l.Comps, f);
             l.Cap *= f;
@@ -3759,13 +4092,13 @@ public static class PassportPage {
         return lines;
     }
 
-    static int Weight(List<Line> lines) {
+    internal static int Weight(List<Line> lines) {
         int w = 0;
         foreach (Line l in lines) w += l.Comps.Count;
         return w;
     }
 
-    static GrayImage Rotate180(GrayImage g) {
+    internal static GrayImage Rotate180(GrayImage g) {
         GrayImage r = new GrayImage(g.W, g.H);
         int n = g.P.Length;
         for (int i = 0; i < n; i++) r.P[n - 1 - i] = g.P[i];
@@ -4012,7 +4345,7 @@ public static class PassportPage {
 
     // лучшее прочтение участка строки (разрезы from..to) ровно по образцу: sets[t] - какие знаки могут стоять на месте t.
     // Возвращает сумму (ширина x сходство); пропуск краски (соринка) - штраф.
-    static double Constrained(Strip st, int from, int to, string[] sets, out string text) {
+    internal static double Constrained(Strip st, int from, int to, string[] sets, out string text) {
         int m = to - from + 1, n = sets.Length;
         double[,] f = new double[m, n + 1];
         int[,] bi = new int[m, n + 1];
@@ -4046,7 +4379,7 @@ public static class PassportPage {
                         if (q >= 0 && raw.Sc[q] > bs) { bs = raw.Sc[q]; c = ch; }
                     }
                     if (c == '\0') continue;
-                    double v = f[i, t - 1] + w * bs;
+                    double v = f[i, t - 1] + w * bs - Penalty(st, ci, cj);
                     if (v > f[k, t]) { f[k, t] = v; bi[k, t] = i; bc[k, t] = c; }
                 }
             }
@@ -4066,7 +4399,7 @@ public static class PassportPage {
     }
 
     // лучшее прочтение участка без образца (любое число знаков из алфавита) и общая ширина краски
-    static double Free(Strip st, int from, int to, string alphabet, out double inkWidth) {
+    internal static double Free(Strip st, int from, int to, string alphabet, out double inkWidth) {
         int m = to - from + 1;
         double[] f = new double[m];
         for (int k = 0; k < m; k++) f[k] = double.MinValue;
@@ -4092,7 +4425,7 @@ public static class PassportPage {
                 if (raw == null) continue;
                 Glyph gl = Restrict(raw, alphabet, st.Set);
                 if (gl == null) continue;
-                double v = f[i] + (cuts[cj] - cuts[ci]) / st.Cap * gl.S;
+                double v = f[i] + (cuts[cj] - cuts[ci]) / st.Cap * gl.S - Penalty(st, ci, cj);
                 if (v > f[k]) f[k] = v;
             }
         }
@@ -4296,7 +4629,7 @@ public static class PassportPage {
                 if (q >= 0 && raw.Sc[q] > bs) { bs = raw.Sc[q]; bc = c; }
             }
             if (bc == '\0') continue;
-            Chains(st, from, j, m, alt, pos + 1, acc + (cuts[cj] - cuts[ci]) / st.Cap * bs, chars + bc, u, k0, f, pk, pu, pc);
+            Chains(st, from, j, m, alt, pos + 1, acc + (cuts[cj] - cuts[ci]) / st.Cap * bs - Penalty(st, ci, cj), chars + bc, u, k0, f, pk, pu, pc);
         }
     }
 
@@ -10274,6 +10607,25 @@ public class DogovorForm : Form {
         else if (c is DateBox) ((DateBox)c).ValueChanged += h;
         else if (c is Heaters) { ((Heaters)c).Changed += h; ((Heaters)c).Resized += delegate { LayoutCards(); }; }
         else c.TextChanged += h;
+        // поле, в котором курсор, - светло-жёлтое: видно, где печатаешь
+        if (c is TextBox || c is ComboBox) {
+            c.Enter += delegate { c.BackColor = St.Focus; };
+            c.Leave += delegate { c.BackColor = c.Enabled ? Color.White : St.Disabled; checkTimer.Stop(); checkTimer.Start(); };
+        }
+        // с заглавной, когда уходим из поля: «боровляны» -> «Боровляны», «иванов пётр» -> «Иванов Пётр»
+        if (key == "np" || key == "ulica" || key == "fio" || key == "adres_prozh") c.Leave += delegate {
+            string s = V(key), t = key == "fio" ? UpperWords(s) : UpperFirst(s);
+            if (t != s) SetV(key, t);
+        };
+    }
+
+    static string UpperFirst(string s) { return s.Length == 0 ? s : char.ToUpper(s[0]) + s.Substring(1); }
+
+    static string UpperWords(string s) {
+        char[] a = s.ToCharArray();
+        for (int i = 0; i < a.Length; i++)
+            if (char.IsLetter(a[i]) && (i == 0 || a[i - 1] == ' ' || a[i - 1] == '-')) a[i] = char.ToUpper(a[i]);
+        return new string(a);
     }
 
     public string V(string key) {
@@ -10404,11 +10756,12 @@ public class DogovorForm : Form {
         string p = "pu" + i + "_";
         BoxPanel box = new BoxPanel();
         box.Title = "Счётчик " + i;
+        box.Mark = St.TintOf("Счётчики").Mark;
         Grid g = new Grid(box, 2);
-        g.PadX = 14;
-        g.PadTop = 38;
-        g.PadBottom = 16;
-        g.RowGap = 10;
+        g.PadX = 12;
+        g.PadTop = 30;
+        g.PadBottom = 12;
+        g.RowGap = 6;
         // тип счётчика - по частям из справочника; в конце каждого списка «свое»
         Grid parts = new Grid(new Panel(), 4);
         parts.Host.BackColor = Color.Transparent;
@@ -10459,7 +10812,7 @@ public class DogovorForm : Form {
     Control BuildNav() {
         Panel nav = new Panel();
         nav.Dock = DockStyle.Left;
-        nav.Width = 236;
+        nav.Width = 252;
         nav.BackColor = St.Nav;
         Label title = new Label();
         title.Text = "Оформление\nдоговора";
@@ -10476,6 +10829,7 @@ public class DogovorForm : Form {
         int y = 128;
         foreach (Card c in cards) {
             NavItem n = new NavItem(c.Name, false);
+            n.Mark = St.TintOf(c.Name).Mark;
             n.SetBounds(0, y, nav.Width, n.Height);
             Card card = c;
             n.Click += delegate { ScrollTo(card); };
@@ -10571,8 +10925,9 @@ public class DogovorForm : Form {
     void LayoutCards() {
         content.SuspendLayout();
         int full = content.Width - SystemInformation.VerticalScrollBarWidth;
-        int w = Math.Max(600, Math.Min(full - 48, 1240));
-        int x = Math.Max(24, (full - w) / 2);
+        // не шире 1120: поля ближе друг к другу, глазам не бегать по всему экрану
+        int w = Math.Max(600, Math.Min(full - 32, 1120));
+        int x = Math.Max(16, (full - w) / 2);
         int y = 4 + content.AutoScrollPosition.Y;
         // узкая форма (рядом открыто фото) - кнопки фото короче
         bool narrow = w < 900;
@@ -10585,7 +10940,7 @@ public class DogovorForm : Form {
         foreach (Card c in cards) {
             int h = c.Layout(w);
             c.Panel.Location = new Point(x + content.AutoScrollPosition.X, y);
-            y += h + 18;
+            y += h + 10;
         }
         content.AutoScrollMinSize = new Size(0, y - content.AutoScrollPosition.Y + 6);
         content.ResumeLayout();
@@ -10771,7 +11126,7 @@ public class DogovorForm : Form {
     void Enable() {
         bool two = V("schetchikov") != "1 счётчик";
         meter2.Enabled = two;
-        meter2.BackColor = two ? St.Box : St.Disabled;
+        meter2.BackColor = two ? Color.White : St.Disabled;
         meter2.Invalidate();
         inp["sms_tel"].Enabled = V("sms") == "согласен(а)";
         inp["utratil_nom"].Enabled = inp["utratil_ot"].Enabled = V("utratil") == "1";
@@ -11061,7 +11416,8 @@ public class DogovorForm : Form {
         foreach (string[] q in req) if (V(q[0]).Length == 0) r.Add(new Problem(q[0], q[1], true));
         string block = LsBlockText();
         if (block != null) { Problem b = new Problem("ls", block, true); b.Blocker = true; r.Add(b); }
-        if (V("sms") == "согласен(а)" && V("sms_tel").Length == 0) r.Add(new Problem("sms_tel", "номер для СМС", true));
+        if (V("sms") == "согласен(а)" && Digits(V("sms_tel")).Length < 9)
+            r.Add(new Problem("sms_tel", V("sms_tel").Length == 0 ? "номер для СМС" : "номер для СМС не полный (в договоре будет линия)", true));
         if (V("utratil") == "1" && V("utratil_nom").Length == 0) r.Add(new Problem("utratil_nom", "номер приложения, утратившего силу", true));
         int n = V("schetchikov") == "1 счётчик" ? 1 : 2;
         for (int i = 1; i <= n; i++) {
@@ -11107,7 +11463,7 @@ public class DogovorForm : Form {
             bool m = showMissing && miss.ContainsKey(kv.Key);
             if (kv.Value is Seg) { if (((Seg)kv.Value).Missing != m) ((Seg)kv.Value).Missing = m; }
             else if (kv.Value is TextBox || kv.Value is ComboBox) {
-                Color want = m ? St.Missing : (kv.Value.Enabled ? Color.White : St.Disabled);
+                Color want = kv.Value.ContainsFocus ? St.Focus : m ? St.Missing : (kv.Value.Enabled ? Color.White : St.Disabled);
                 if (kv.Value.BackColor != want) kv.Value.BackColor = want;
             }
         }
@@ -11171,11 +11527,11 @@ public class DogovorForm : Form {
     }
 
     string Address() {
-        string tip = V("np_tip"), np = V("np");
+        string tip = V("np_tip"), np = UpperFirst(V("np"));
         List<string> parts = new List<string>();
         bool st = tip.ToUpper() == "СТ" || tip.ToLower() == "с/т";
         if (np.Length > 0) parts.Add(st ? tip + " «" + np.Trim('«', '»', '"') + "»" : (tip + " " + np).Trim());
-        if (V("ulica").Length > 0) parts.Add((V("ulica_tip") + " " + V("ulica")).Trim());
+        if (V("ulica").Length > 0) parts.Add((V("ulica_tip") + " " + UpperFirst(V("ulica"))).Trim());
         string house = "";
         if (V("dom").Length > 0) house = (st ? "уч." : "д.") + V("dom");
         if (V("korp").Length > 0) house += (house.Length > 0 ? " " : "") + "корп." + V("korp");
@@ -11188,6 +11544,23 @@ public class DogovorForm : Form {
 
     static string Line(int n, char c) { return new string(c, n); }
 
+    // размер шрифта значений в узких ячейках: цель использования в шапке таблицы счётчиков.
+    // В бланке там «Бытовое использование» - две строки 10 пт; длинная цель («Бытовое потребление, отопление и
+    // горячее водоснабжение») в 10 пт - пять строк, таблица растёт и её конец уезжает на следующую страницу
+    public static Dictionary<string, int> Sizes(Dictionary<string, string> v) {
+        Dictionary<string, int> r = new Dictionary<string, int>();
+        foreach (string k in new string[] { "ПУ1_ЦЕЛЬ", "ПУ2_ЦЕЛЬ" }) {
+            string s;
+            if (!v.TryGetValue(k, out s) || s.Length == 0) continue;
+            // ширина текста в ячейке 69 пт (берём 68); высота - не больше 40 пт (было 24, запас на странице - около 24)
+            foreach (int hp in new int[] { 20, 18, 16, 14 }) {
+                int lines = Fit.Lines(s, hp / 2f, 68f);
+                if (lines * (hp == 20 ? 12f : hp * 0.6f) <= 40f || hp == 14) { if (hp < 20) r[k] = hp; break; }
+            }
+        }
+        return r;
+    }
+
     static string LowerFirst(string s) {
         if (s.Length < 2 || !char.IsUpper(s[0]) || char.IsUpper(s[1])) return s;
         return char.ToLower(s[0]) + s.Substring(1);
@@ -11198,7 +11571,14 @@ public class DogovorForm : Form {
         v["ДАТА"] = V("data");
         v["ЛС"] = V("ls");
         string tip = V("np_tip");
-        v["НП"] = tip.ToUpper() == "СТ" || tip.ToLower() == "с/т" ? tip + " «" + V("np").Trim('«', '»', '"') + "»" : V("np");
+        string np = UpperFirst(V("np"));
+        if (tip.ToUpper() == "СТ" || tip.ToLower() == "с/т") np = tip + " «" + np.Trim('«', '»', '"') + "»";
+        // за названием - линия до места, где она кончается в бланке (табуляция с подчёркиванием, 122,7 пт).
+        // Название длиннее линии - без табуляции (иначе дата и номер съедут), а почти такое же - добиваем
+        // подчёркнутыми пробелами, чтобы точно перешло за конец линии
+        if (Fit.Width(np, 12f, true) <= 116f) np += "\t";
+        else while (Fit.Width(np, 12f, true) < 130f) np += "\u00A0";
+        v["НП"] = np;
         v["АДРЕС_ОБЪЕКТА"] = V("adres");
         v["ПОДП_В_ЛИЦЕ"] = (Flat(V("podp_dolzh")) + " " + Flat(V("podp_fio"))).Trim();
         v["ПОДП_ДОВЕРЕННОСТЬ"] = V("podp_dov");
@@ -11295,7 +11675,7 @@ public class DogovorForm : Form {
         bool sms = V("sms") == "согласен(а)";
         v["□СМС_ДА"] = sms ? "1" : "0";
         v["□СМС_НЕТ"] = V("sms") == "отказ" ? "1" : "0";
-        v["СМС_ТЕЛ"] = sms && V("sms_tel").Length > 0 ? V("sms_tel") : Line(13, '_');
+        v["СМС_ТЕЛ"] = sms && Digits(V("sms_tel")).Length >= 9 ? V("sms_tel") : Line(13, '_');
         return v;
     }
 
@@ -11684,7 +12064,8 @@ public class DogovorForm : Form {
             if (ask && !same && File.Exists(docx) && MessageBox.Show(this, "Договор «" + name + "» уже есть в папке.\n\nЗаменить его?", Text,
                     MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2) != DialogResult.Yes) return null;
             string tmp = docx + ".tmp";
-            List<string> missing = DocxTemplate.Fill(templateFile, tmp, Compose());
+            Dictionary<string, string> vals = Compose();
+            List<string> missing = DocxTemplate.Fill(templateFile, tmp, vals, Sizes(vals));
             try {
                 if (File.Exists(docx)) File.Delete(docx);
             } catch (IOException) {
