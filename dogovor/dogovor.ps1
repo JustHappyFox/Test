@@ -136,7 +136,7 @@ public static class Zip {
 }
 
 // Шаблон договора: поля «ИМЯ» заменяются текстом, «□ИМЯ» - флажком ☑ или ☐ (символы Wingdings, как в бланке),
-// «¶ИМЯ» - текстом, а если он пустой, абзац с полем убирается.
+// «¶ИМЯ» - текстом, а если он пустой, абзац с полем убирается (в ячейке таблицы - вся строка таблицы).
 // Поле может быть разбито Word-ом на несколько кусков текста - собираем его по всему абзацу.
 public static class DocxTemplate {
     const string W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
@@ -230,7 +230,12 @@ public static class DocxTemplate {
         if (hasPara && p.ParentNode != null) {
             StringBuilder rest = new StringBuilder();
             foreach (XmlNode t in Texts(p)) rest.Append(t.InnerText);
-            if (rest.ToString().Trim().Length == 0 && ((XmlElement)p).GetElementsByTagName("br", W).Count == 0) p.ParentNode.RemoveChild(p);
+            if (rest.ToString().Trim().Length == 0 && ((XmlElement)p).GetElementsByTagName("br", W).Count == 0) {
+                // в ячейке таблицы: пустая ячейка - это пустая строка таблицы, убираем строку (второй счётчик в справке)
+                XmlNode tc = p.ParentNode, tr = tc.ParentNode;
+                if (tc.LocalName == "tc" && tc.NamespaceURI == W && tr != null && tr.LocalName == "tr" && tr.ParentNode != null) tr.ParentNode.RemoveChild(tr);
+                else p.ParentNode.RemoveChild(p);
+            }
         }
         return true;
     }
@@ -655,7 +660,18 @@ public class Lists {
 "\r\n" +
 "[Ток аппарата, А]\r\n" +
 "# номиналы автоматов\r\n" +
-"6\r\n10\r\n16\r\n20\r\n25\r\n32\r\n40\r\n50\r\n63\r\n80\r\n100\r\n120\r\n";
+"6\r\n10\r\n16\r\n20\r\n25\r\n32\r\n40\r\n50\r\n63\r\n80\r\n100\r\n120\r\n" +
+"\r\n" +
+"[Справка: заключение]\r\n" +
+"# справка (данные прибора учёта): текст жирным после таблицы\r\n" +
+"СИСТЕМА УЧЁТА ПРОВЕРЕНА, ПУ на балансе абонента, ТРЕБУЕТСЯ ОТКРЫТЬ ДАННЫЙ Л/С ПО ЗАЯВЛЕНИЮ ПОТРЕБИТЕЛЯ.\r\n" +
+"\r\n" +
+"[Справка: где установлен прибор учёта]\r\n" +
+"# справка: «Прибор учета установлен в тамбуре, собственности абонента.»\r\n" +
+"в тамбуре\r\nв доме\r\nв гараже\r\nв ЩУЭ на границе участка\r\nза границей земельного участка\r\nна лестничной клетке\r\nна опоре\r\n" +
+"\r\n" +
+"[Справка: чья собственность]\r\n" +
+"собственности абонента\r\nсобственности РУП «Минскэнерго»\r\n";
 }
 
 // Запомненные значения (последний подписант, кто оформил и т.п.) и ранее введённые варианты для подсказок
@@ -664,6 +680,14 @@ public class Memory {
     public readonly Dictionary<string, string> Values = new Dictionary<string, string>();
     public readonly Dictionary<string, List<string>> History = new Dictionary<string, List<string>>();
     const int Keep = 60;
+
+    // один файл - один объект на всю программу: окна договора и справки пишут одни и те же настройки
+    static readonly Dictionary<string, Memory> open = new Dictionary<string, Memory>(StringComparer.OrdinalIgnoreCase);
+    public static Memory For(string file) {
+        Memory m;
+        if (!open.TryGetValue(file, out m)) { m = new Memory(file); open[file] = m; }
+        return m;
+    }
 
     public Memory(string file) {
         this.file = file;
@@ -803,13 +827,13 @@ public static class St {
     // свой цвет у каждого раздела: фон, полоса заголовка, метка (полоска слева, рамка, значок в меню)
     public static Tint TintOf(string card) {
         switch (card) {
-            case "Договор": return new Tint(236, 243, 252, 211, 227, 248, 52, 110, 190);
+            case "Договор": case "Справка": return new Tint(236, 243, 252, 211, 227, 248, 52, 110, 190);
             case "Фото документов": return new Tint(243, 240, 251, 225, 218, 246, 118, 90, 190);
-            case "Потребитель": return new Tint(235, 247, 238, 208, 237, 215, 46, 138, 78);
+            case "Потребитель": case "Абонент": return new Tint(235, 247, 238, 208, 237, 215, 46, 138, 78);
             case "Объект": return new Tint(253, 245, 229, 248, 229, 188, 196, 126, 24);
-            case "Счётчики": return new Tint(232, 246, 247, 201, 234, 237, 22, 126, 138);
+            case "Счётчики": case "Прибор учёта": return new Tint(232, 246, 247, 201, 234, 237, 22, 126, 138);
             case "Пломбы и оборудование": return new Tint(252, 238, 241, 245, 212, 219, 184, 68, 94);
-            case "Дополнительно": return new Tint(244, 246, 230, 228, 235, 196, 116, 138, 26);
+            case "Дополнительно": case "Текст справки": return new Tint(244, 246, 230, 228, 235, 196, 116, 138, 26);
             default: return new Tint(241, 242, 244, 223, 226, 231, 100, 110, 125);
         }
     }
@@ -12134,9 +12158,8 @@ public class DogovorForm : Form {
         this.here = here;
         templateFile = Path.Combine(here, "shablon.docx");
         lists = new Lists(Path.Combine(here, "spravochniki.txt"));
-        memory = new Memory(Path.Combine(here, "nastroiki.txt"));
-        outDir = memory.Get("ПапкаДоговоров", "");
-        if (outDir.Length == 0) outDir = Path.Combine(here, "Договоры");
+        memory = Memory.For(Path.Combine(here, "nastroiki.txt"));
+        outDir = Folder(here, memory);
         dataDir = Path.Combine(outDir, "данные");
         photoRoot = Path.Combine(outDir, "фото");
         autoFile = Path.Combine(here, "avtosohranenie.txt");
@@ -12191,6 +12214,8 @@ public class DogovorForm : Form {
             }
         };
         FormClosing += delegate(object s, FormClosingEventArgs e) {
+            // есть главное меню: крестик окна - назад в меню (договор не пропадает, спросит при выходе из программы)
+            if (Home != null && e.CloseReason == CloseReason.UserClosing) { e.Cancel = true; GoBack(); return; }
             // выключение Windows - спрашивать некогда: всё уже в автосохранении
             if (e.CloseReason == CloseReason.WindowsShutDown || e.CloseReason == CloseReason.TaskManagerClosing) { AutoSave(); return; }
             if (!AskSave("Закрыть программу")) e.Cancel = true;
@@ -12200,6 +12225,42 @@ public class DogovorForm : Form {
         autoTimer.Tick += delegate { if (unsavedAuto) AutoSave(); };
         autoTimer.Start();
     }
+
+    // ---------- главное меню и справка ----------
+
+    public StartMenu Home;                           // главное меню (нет - окно договора само по себе, как раньше)
+    SpravkaForm ownSpravka;
+
+    public static string Folder(string here, Memory m) {
+        string d = m.Get("ПапкаДоговоров", "");
+        return d.Length > 0 ? d : Path.Combine(here, "Договоры");
+    }
+
+    public void GoBack() {
+        if (Home == null) return;
+        Hide();
+        Home.Return(null);
+    }
+
+    // справка по этому договору: лицевой, Ф.И.О., адрес, счётчики - из формы
+    public void MakeSpravka() {
+        if (Home != null) { Home.OpenSpravka(this, Data()); return; }
+        if (ownSpravka == null || ownSpravka.IsDisposed) ownSpravka = new SpravkaForm(here);
+        ownSpravka.Back = this;
+        ownSpravka.FromContract(Data());
+        ownSpravka.Show();
+        Hide();
+    }
+
+    public Dictionary<string, string> Data() {
+        Dictionary<string, string> d = new Dictionary<string, string>();
+        foreach (string k in inp.Keys) d[k] = V(k);
+        return d;
+    }
+
+    public bool Unsaved { get { return dirty; } }
+    public bool AskSaveBeforeExit() { return AskSave("Закрыть программу"); }
+    public void SaveForLater() { AutoSave(); }
 
     // ---------- поля ----------
 
@@ -12569,7 +12630,13 @@ public class DogovorForm : Form {
         sub.SetBounds(24, 86, 200, 20);
         nav.Controls.Add(title);
         nav.Controls.Add(sub);
-        int y = 128;
+        int y = 118;
+        NavItem back = new NavItem("← Назад в меню", false);
+        back.SetBounds(0, y, nav.Width, back.Height);
+        back.Click += delegate { GoBack(); };
+        tip.SetToolTip(back, "В главное меню (договор не пропадёт)");
+        nav.Controls.Add(back);
+        y += back.Height + 10;
         foreach (Card c in cards) {
             NavItem n = new NavItem(c.Name, false);
             n.Mark = St.TintOf(c.Name).Mark;
@@ -12638,6 +12705,11 @@ public class DogovorForm : Form {
         open.SetBounds(234, 14, 200, 38);
         open.Click += delegate { OpenSaved(); };
         tip.SetToolTip(open, "Открыть ранее оформленный договор, чтобы исправить или сделать похожий (Ctrl+O)");
+        Button sp = Ui.Button("Создать справку", false);
+        sp.Size = new Size(160, 38);
+        sp.Anchor = AnchorStyles.Right | AnchorStyles.Top;
+        sp.Click += delegate { MakeSpravka(); };
+        tip.SetToolTip(sp, "Справка (данные прибора учёта) по этому договору: лицевой, Ф.И.О., адрес и счётчики возьмутся отсюда");
         Button create = Ui.Button("Сохранить договор", true);
         create.Size = new Size(210, 40);
         create.Anchor = AnchorStyles.Right | AnchorStyles.Top;
@@ -12651,6 +12723,7 @@ public class DogovorForm : Form {
         status.Click += delegate { GoToMissing(); };
         p.Controls.Add(nw);
         p.Controls.Add(open);
+        p.Controls.Add(sp);
         p.Controls.Add(create);
         p.Controls.Add(status);
         p.Resize += delegate {
@@ -12662,8 +12735,11 @@ public class DogovorForm : Form {
             open.SetBounds(nw.Right + 10, 14, narrow ? 110 : 200, 38);
             create.Width = narrow ? 190 : 210;
             create.Location = new Point(p.ClientSize.Width - 24 - create.Width, 13);
-            status.Font = narrow ? St.Small : St.Base;
-            status.SetBounds(open.Right + (narrow ? 14 : 24), 14, Math.Max(10, create.Left - open.Right - (narrow ? 28 : 48)), 38);
+            sp.Text = narrow ? "Справка" : "Создать справку";
+            sp.Width = narrow ? 90 : 160;
+            sp.Location = new Point(create.Left - 10 - sp.Width, 14);
+            status.SetBounds(open.Right + (narrow ? 14 : 24), 14, Math.Max(10, sp.Left - open.Right - (narrow ? 28 : 48)), 38);
+            status.Font = narrow || status.Width < 300 ? St.Small : St.Base;
         };
         return p;
     }
@@ -14538,10 +14614,839 @@ public class SavedDialog : Form {
 public static class DogovorApp {
     public static void Run(string here, string launch) {
         try { Application.EnableVisualStyles(); } catch { }
-        using (DogovorForm f = new DogovorForm(here)) {
-            if (launch != null) f.Tag = launch;
-            Application.Run(f);
+        // главное меню: «Создать договор», «Создать справку»
+        using (StartMenu m = new StartMenu(here, launch)) Application.Run(m);
+    }
+}
+
+// Главное меню: «Создать договор», «Создать справку». Окна договора и справки открываются вместо меню,
+// «Назад» (или крестик окна) - обратно в меню; закрыли меню - программа закрывается.
+public class StartMenu : Form {
+    readonly string here;
+    DogovorForm dog;
+    SpravkaForm spr;
+    readonly Tile dogTile, sprTile;
+
+    public StartMenu(string here, string launch) {
+        this.here = here;
+        Tag = launch;
+        Text = "Оформление договора электроснабжения";
+        Font = St.Base;
+        BackColor = St.Back;
+        StartPosition = FormStartPosition.CenterScreen;
+        ClientSize = new Size(640, 470);
+        FormBorderStyle = FormBorderStyle.FixedSingle;
+        MaximizeBox = false;
+        KeyPreview = true;
+        try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
+
+        Panel top = new Panel();
+        top.Dock = DockStyle.Top;
+        top.Height = 104;
+        top.BackColor = St.Nav;
+        Label title = new Label();
+        title.Text = "Оформление договора";
+        title.Font = new Font("Segoe UI", 18f, FontStyle.Bold);
+        title.ForeColor = Color.White;
+        title.AutoSize = true;
+        title.Location = new Point(34, 22);
+        Label sub = new Label();
+        sub.Text = "электроснабжения - договор и справка по шаблонам Word";
+        sub.Font = St.Base;
+        sub.ForeColor = St.NavText;
+        sub.AutoSize = true;
+        sub.Location = new Point(37, 62);
+        top.Controls.Add(title);
+        top.Controls.Add(sub);
+        Controls.Add(top);
+
+        dogTile = new Tile("Создать договор", "по шаблону Word; фото документов; проверка по базе", St.TintOf("Договор").Mark);
+        dogTile.SetBounds(34, 132, 572, 96);
+        dogTile.Click += delegate { OpenDogovor(); };
+        sprTile = new Tile("Создать справку", "данные прибора учёта - из договора или вручную", St.TintOf("Счётчики").Mark);
+        sprTile.SetBounds(34, 244, 572, 96);
+        sprTile.Click += delegate { OpenSpravka(this, null); };
+        Controls.Add(dogTile);
+        Controls.Add(sprTile);
+
+        int x = 34;
+        foreach (string[] l in new string[][] { new string[] { "Папка с договорами", "d" }, new string[] { "Папка со справками", "s" }, new string[] { "Справочники (списки)", "l" } }) {
+            LinkLabel link = new LinkLabel();
+            link.Text = l[0];
+            link.Font = St.Base;
+            link.AutoSize = true;
+            link.LinkColor = St.Accent;
+            link.Location = new Point(x, 372);
+            string what = l[1];
+            link.LinkClicked += delegate { OpenPlace(what); };
+            Controls.Add(link);
+            x += TextRenderer.MeasureText(l[0], St.Base).Width + 34;
         }
+        Label keys = new Label();
+        keys.Text = "Enter - создать договор, F2 - справка";
+        keys.Font = St.Small;
+        keys.ForeColor = St.Hint;
+        keys.AutoSize = true;
+        keys.Location = new Point(36, 420);
+        Controls.Add(keys);
+
+        KeyDown += delegate(object s, KeyEventArgs e) {
+            if (e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; OpenDogovor(); }
+            else if (e.KeyCode == Keys.F2) { e.SuppressKeyPress = true; OpenSpravka(this, null); }
+        };
+        Shown += delegate { RefreshTiles(); };
+        Activated += delegate { RefreshTiles(); };
+        FormClosing += delegate(object s, FormClosingEventArgs e) {
+            // выключение Windows - спрашивать некогда: договор уже в автосохранении
+            if (e.CloseReason == CloseReason.WindowsShutDown || e.CloseReason == CloseReason.TaskManagerClosing) { if (dog != null) dog.SaveForLater(); return; }
+            // несохранённый договор или справка - показать его и спросить (отмена - остаться в нём)
+            if (dog != null) {
+                if (dog.Unsaved) { dog.Show(); dog.Activate(); }
+                if (!dog.AskSaveBeforeExit()) { e.Cancel = true; Hide(); return; }
+            }
+            if (spr != null && spr.Unsaved) {
+                spr.Show();
+                spr.Activate();
+                if (!spr.AskSaveBeforeExit()) { e.Cancel = true; Hide(); }
+            }
+        };
+    }
+
+    string Settings { get { return Path.Combine(here, "nastroiki.txt"); } }
+
+    // несохранённый договор (после отключения света и т.п.) - откроется он
+    void RefreshTiles() {
+        bool auto = File.Exists(Path.Combine(here, "avtosohranenie.txt")) || dog != null && dog.Unsaved;
+        dogTile.Note = auto ? "есть несохранённый договор - откроется он" : "";
+        dogTile.Invalidate();
+        sprTile.Note = spr != null && spr.Unsaved ? "есть несохранённая справка - откроется она" : "";
+        sprTile.Invalidate();
+    }
+
+    public void OpenDogovor() {
+        if (dog == null || dog.IsDisposed) {
+            Cursor = Cursors.WaitCursor;
+            try { dog = new DogovorForm(here); dog.Home = this; dog.Tag = Tag; }
+            finally { Cursor = Cursors.Default; }
+        }
+        dog.Show();
+        if (dog.WindowState == FormWindowState.Minimized) dog.WindowState = FormWindowState.Normal;
+        dog.Activate();
+        Hide();
+    }
+
+    // справка; from - окно, куда вернётся «Назад»; data - данные договора (или null - как было)
+    public void OpenSpravka(Form from, Dictionary<string, string> data) {
+        if (spr == null || spr.IsDisposed) { spr = new SpravkaForm(here); spr.Home = this; }
+        spr.Back = from;
+        if (data != null) spr.FromContract(data);
+        spr.Show();
+        if (spr.WindowState == FormWindowState.Minimized) spr.WindowState = FormWindowState.Normal;
+        spr.Activate();
+        if (from != spr) from.Hide();
+    }
+
+    // окно договора или справки закрыли - показать то, откуда пришли
+    public void Return(Form to) {
+        if (to == null || to.IsDisposed || to == this) { RefreshTiles(); Show(); Activate(); return; }
+        to.Show();
+        to.Activate();
+    }
+
+    void OpenPlace(string what) {
+        Memory m = Memory.For(Settings);
+        string d = what == "d" ? DogovorForm.Folder(here, m) : what == "s" ? SpravkaForm.Folder(here) : Path.Combine(here, "spravochniki.txt");
+        try {
+            if (what == "l") {
+                if (!File.Exists(d)) new Lists(d);
+                Process.Start("notepad.exe", "\"" + d + "\"");
+            } else {
+                Directory.CreateDirectory(d);
+                Process.Start("explorer.exe", "\"" + d + "\"");
+            }
+        } catch (Exception ex) { MessageBox.Show(this, "Не открывается:\n" + d + "\n\n" + ex.Message, Text); }
+    }
+
+    // для проверки без окон
+    public DogovorForm Dogovor { get { return dog; } }
+    public SpravkaForm Spravka { get { return spr; } }
+}
+
+// Большая кнопка меню: название, пояснение, цветная полоска слева
+public class Tile : Control {
+    public string Title, Sub, Note = "";
+    readonly Color mark;
+    bool hover;
+
+    public Tile(string title, string sub, Color mark) {
+        Title = title;
+        Sub = sub;
+        this.mark = mark;
+        BackColor = Color.White;
+        Cursor = Cursors.Hand;
+        TabStop = true;
+        DoubleBuffered = true;
+        SetStyle(ControlStyles.ResizeRedraw | ControlStyles.Selectable, true);
+    }
+
+    protected override void OnPaint(PaintEventArgs e) {
+        Graphics g = e.Graphics;
+        using (SolidBrush b = new SolidBrush(hover ? Color.FromArgb(246, 249, 253) : Color.White)) g.FillRectangle(b, ClientRectangle);
+        using (SolidBrush b = new SolidBrush(mark)) g.FillRectangle(b, 0, 0, 8, Height);
+        using (Pen p = new Pen(hover || Focused ? St.Accent : St.Border, hover || Focused ? 2f : 1f)) g.DrawRectangle(p, 1, 1, Width - 2, Height - 2);
+        TextRenderer.DrawText(g, Title, new Font("Segoe UI", 15f, FontStyle.Bold), new Point(28, 14), St.Text);
+        TextRenderer.DrawText(g, Sub, St.Base, new Rectangle(30, 50, Width - 70, 22), St.Hint, TextFormatFlags.EndEllipsis);
+        if (Note.Length > 0) TextRenderer.DrawText(g, Note, St.Small, new Point(30, 72), Color.FromArgb(190, 105, 0));
+        // стрелка справа
+        using (Pen p = new Pen(St.Accent, 2.5f)) {
+            int cx = Width - 30, cy = Height / 2;
+            g.DrawLine(p, cx - 6, cy - 8, cx + 2, cy);
+            g.DrawLine(p, cx + 2, cy, cx - 6, cy + 8);
+        }
+    }
+
+    protected override void OnMouseEnter(EventArgs e) { base.OnMouseEnter(e); hover = true; Invalidate(); }
+    protected override void OnMouseLeave(EventArgs e) { base.OnMouseLeave(e); hover = false; Invalidate(); }
+    protected override void OnGotFocus(EventArgs e) { base.OnGotFocus(e); Invalidate(); }
+    protected override void OnLostFocus(EventArgs e) { base.OnLostFocus(e); Invalidate(); }
+    protected override void OnKeyDown(KeyEventArgs e) {
+        base.OnKeyDown(e);
+        if (e.KeyCode == Keys.Space) { e.SuppressKeyPress = true; OnClick(EventArgs.Empty); }
+    }
+}
+
+// Справка «Данные прибора учёта» - по шаблону spravka.docx (поля «ИМЯ», как в договоре).
+// Заполняется из договора (открытого или сохранённого) или вручную; сохраняется в папку «Справки».
+public class SpravkaForm : Form {
+    readonly string here, templateFile;
+    readonly Lists lists;
+    readonly Memory memory;
+    readonly Dictionary<string, Control> inp = new Dictionary<string, Control>();
+    readonly Dictionary<string, string> captions = new Dictionary<string, string>();
+    readonly List<Card> cards = new List<Card>();
+    readonly Panel content = new Panel();
+    readonly Label head = new Label(), headSub = new Label(), status = new Label();
+    readonly ToolTip tip = new ToolTip();
+    BoxPanel box2;
+    public StartMenu Home;
+    public Form Back;                     // куда «Назад»: меню или окно договора
+    bool loading, dirty;
+    string savedFile;
+    // части адреса из договора - для имени файла («Копище Авиационная 15-83»)
+    string fNp = "", fUlica = "", fDom = "", fKv = "", fromAdres = "";
+
+    public bool Unsaved { get { return dirty; } }
+
+    public static string Folder(string here) { return Path.Combine(here, "Справки"); }
+
+    public SpravkaForm(string here) {
+        this.here = here;
+        templateFile = Path.Combine(here, "spravka.docx");
+        lists = new Lists(Path.Combine(here, "spravochniki.txt"));
+        memory = Memory.For(Path.Combine(here, "nastroiki.txt"));
+
+        Text = "Справка - данные прибора учёта";
+        Font = St.Base;
+        BackColor = St.Back;
+        StartPosition = FormStartPosition.CenterScreen;
+        Rectangle wa = Screen.PrimaryScreen.WorkingArea;
+        Size = new Size(Math.Min(1180, wa.Width), Math.Min(860, wa.Height));
+        MinimumSize = new Size(860, 560);
+        KeyPreview = true;
+        try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
+
+        BuildCards();
+        content.Dock = DockStyle.Fill;
+        content.AutoScroll = true;
+        content.BackColor = St.Back;
+        foreach (Card c in cards) content.Controls.Add(c.Panel);
+        content.Resize += delegate { LayoutCards(); };
+        Controls.Add(content);
+        Controls.Add(BuildHeader());
+        Controls.Add(BuildBottom());
+        Controls.Add(BuildNav());
+
+        FillLists();
+        Clear();
+        Shown += delegate { LayoutCards(); FillLists(); };
+        Activated += delegate {
+            if (!lists.Changed()) return;
+            try { lists.Load(); FillLists(); } catch { }
+        };
+        KeyDown += delegate(object s, KeyEventArgs e) {
+            if (e.Control && e.KeyCode == Keys.S) { e.SuppressKeyPress = true; Save(true, true); }
+            else if (e.KeyCode == Keys.Escape) { e.SuppressKeyPress = true; GoBack(); }
+            else if (e.KeyCode == Keys.Enter && !e.Control && !e.Alt) {
+                Control a = ActiveControl;
+                if (a == null || (a is TextBox && ((TextBox)a).Multiline) || a is Button) return;
+                if (a is ComboBox && ((ComboBox)a).DroppedDown) return;
+                e.SuppressKeyPress = true;
+                SelectNextControl(a, true, true, true, true);
+            }
+        };
+        FormClosing += delegate(object s, FormClosingEventArgs e) {
+            // крестик окна - назад (в меню или к договору); справка остаётся как была
+            if (Home != null && e.CloseReason == CloseReason.UserClosing) { e.Cancel = true; GoBack(); }
+        };
+    }
+
+    // ---------- поля ----------
+
+    TextBox T(string key, string cue) {
+        TextBox t = Ui.Text(1);
+        Reg(key, t);
+        if (cue != null) t.HandleCreated += delegate { Ui.Cue(t, cue); };
+        return t;
+    }
+
+    Combo C(string key, bool wrap, string cue) {
+        Combo c = new Combo(true, wrap);
+        Reg(key, c);
+        if (cue != null) c.HandleCreated += delegate { Ui.Cue(c, cue); };
+        return c;
+    }
+
+    void Reg(string key, Control c) {
+        inp[key] = c;
+        c.Name = key;
+        EventHandler h = delegate { if (!loading) { dirty = true; RefreshState(); } };
+        if (c is Seg) ((Seg)c).Changed += delegate { Enable(); h(c, EventArgs.Empty); };
+        else if (c is ComboBox) { ((ComboBox)c).TextChanged += h; ((ComboBox)c).SelectedIndexChanged += h; }
+        else if (c is DateBox) ((DateBox)c).ValueChanged += h;
+        else c.TextChanged += h;
+        if (c is TextBox || c is ComboBox) {
+            c.Enter += delegate { c.BackColor = St.Focus; };
+            c.Leave += delegate { c.BackColor = c.Enabled ? Color.White : St.Disabled; };
+        }
+    }
+
+    public string V(string key) {
+        Control c = inp[key];
+        if (c is Seg) return ((Seg)c).Value;
+        if (c is DateBox) return ((DateBox)c).Text2;
+        return c.Text.Trim();
+    }
+
+    public void SetV(string key, string v) {
+        Control c;
+        if (!inp.TryGetValue(key, out c)) return;
+        v = v ?? "";
+        if (c is Seg) ((Seg)c).Value = v;
+        else if (c is DateBox) {
+            DateTime d;
+            if (DateTime.TryParseExact(v, "dd.MM.yyyy", CultureInfo.InvariantCulture, DateTimeStyles.None, out d)) ((DateBox)c).Value = d;
+        } else if (c is Combo) ((Combo)c).Value = v;
+        else c.Text = v;
+    }
+
+    // chars - ширина поля в знаках; 0 - во всю ширину раздела
+    Cell F(string caption, Control c, int chars) {
+        Cell x = Cell.F(caption, c, chars == 0 ? 4 : 1);
+        x.W = chars;
+        captions[c.Name] = caption;
+        return x;
+    }
+
+    // ---------- разделы ----------
+
+    void BuildCards() {
+        Card c = new Card("Справка", "дата и кто подписывает", 4);
+        cards.Add(c);
+        DateBox date = new DateBox();
+        Reg("data", date);
+        c.Grid.Row(F("Данные прибора учёта на (дата справки)", date, 14), F("Инженер по работе с потребителями", C("inzh", false, "Фамилия И.О."), 22),
+            F("Начальник ГРП", C("nach", false, "Фамилия И.О."), 22));
+
+        c = new Card("Абонент", "лицевой счёт, Ф.И.О., адрес", 4);
+        cards.Add(c);
+        c.Grid.Row(F("Лицевой счёт (номер в базе)", T("ls", "9 цифр"), 16), F("Фамилия, имя, отчество", T("fio", "Иванов Иван Иванович"), 0),
+            F("Телефон", T("tel", "+375..."), 18));
+        c.Grid.Row(F("Адрес (как в справке)", T("adres", "д. Боровляны, ул. Лесная, д. 7, кв. 2"), 0));
+
+        c = new Card("Прибор учёта", "тип, номер, показания, поверка", 4);
+        cards.Add(c);
+        Seg n = new Seg("1 счётчик", "2 счётчика");
+        n.Size = new Size(260, 30);
+        Reg("n", n);
+        c.AddExtra(n);
+        BoxPanel b1 = new BoxPanel();
+        b1.Title = "Счётчик 1";
+        b1.Mark = St.TintOf("Прибор учёта").Mark;
+        Grid g1 = new Grid(b1, 4);
+        g1.PadTop = 32;
+        g1.Row(Meter(1));
+        box2 = new BoxPanel();
+        box2.Title = "Счётчик 2";
+        box2.Mark = b1.Mark;
+        Grid g2 = new Grid(box2, 4);
+        g2.PadTop = 32;
+        g2.Row(Meter(2));
+        c.Grid.Row(Cell.G(g1, 4));
+        c.Grid.Row(Cell.G(g2, 4));
+        c.Grid.Row(F("Прибор учёта установлен", C("mesto", false, "в тамбуре"), 30), F("чьей собственности", C("prinadl", false, "собственности абонента"), 30));
+
+        c = new Card("Текст справки", "свидетельство, заключение, тарифная группа", 4);
+        cards.Add(c);
+        Combo vlad = C("vlad", false, null);
+        c.Grid.Row(F("Свидетельство (ЕГРНИ) №", T("svid", "например 600/D-123456"), 20), F("Владельцев", vlad, 14),
+            F("Регистрация", T("reg", "пусто - линия, вписать от руки"), 0));
+        c.Grid.Row(F("Заключение (в справке - жирным)", C("zakl", true, null), 0));
+        c.Grid.Row(F("Тарифная группа", C("gruppa", true, null), 0));
+    }
+
+    Cell[] Meter(int i) {
+        string p = "pu" + i + "_";
+        return new Cell[] { F("Тип", T(p + "tip", "CE 208 BY S51.145.1.JRQ"), 26), F("Номер", T(p + "zav", null), 14),
+            F("Показания", T(p + "pokaz", null), 12), F("Поверка (год-квартал)", T(p + "pov", "2025-2"), 10) };
+    }
+
+    void FillLists() {
+        bool was = loading;
+        loading = true;
+        try {
+            Items("inzh", lists.Get("Оформил"));
+            List<string> names = new List<string>();
+            foreach (string[] s in lists.Signers()) names.Add(s[0]);
+            Items("nach", names);
+            Items("mesto", With(lists.Get("Справка: где установлен прибор учёта"), memory.Hist("место справки")));
+            Items("prinadl", lists.Get("Справка: чья собственность"));
+            Items("vlad", new List<string>(new string[] { "1 владелец", "2 владельца", "3 владельца", "4 владельца", "5 владельцев" }));
+            Items("zakl", lists.Get("Справка: заключение"));
+            Items("gruppa", lists.Get("Тарифная группа"));
+        } finally { loading = was; }
+    }
+
+    void Items(string key, List<string> items) { Combo c = inp[key] as Combo; if (c != null) c.SetItems(items); }
+
+    static List<string> With(List<string> a, List<string> b) {
+        List<string> r = new List<string>(a);
+        foreach (string s in b) {
+            bool found = false;
+            foreach (string x in r) if (string.Compare(x, s, StringComparison.OrdinalIgnoreCase) == 0) found = true;
+            if (!found) r.Add(s);
+        }
+        return r;
+    }
+
+    void Enable() {
+        bool two = V("n") == "2 счётчика";
+        box2.Enabled = two;
+        foreach (string k in new string[] { "tip", "zav", "pokaz", "pov" }) {
+            Control c = inp["pu2_" + k];
+            c.BackColor = two ? Color.White : St.Disabled;
+        }
+        box2.Invalidate();
+    }
+
+    // ---------- окно ----------
+
+    Control BuildNav() {
+        Panel nav = new Panel();
+        nav.Dock = DockStyle.Left;
+        nav.Width = 252;
+        nav.BackColor = St.Nav;
+        Label title = new Label();
+        title.Text = "Справка";
+        title.Font = new Font("Segoe UI", 15f, FontStyle.Bold);
+        title.ForeColor = Color.White;
+        title.SetBounds(22, 22, 210, 34);
+        Label sub = new Label();
+        sub.Text = "данные прибора учёта";
+        sub.Font = St.Small;
+        sub.ForeColor = St.NavText;
+        sub.SetBounds(24, 58, 200, 20);
+        nav.Controls.Add(title);
+        nav.Controls.Add(sub);
+        NavItem back = new NavItem("← Назад", false);
+        back.SetBounds(0, 100, nav.Width, back.Height);
+        back.Click += delegate { GoBack(); };
+        nav.Controls.Add(back);
+        tip.SetToolTip(back, "Вернуться (справка не пропадёт) - Esc");
+        int y = 150;
+        foreach (Card c in cards) {
+            NavItem n = new NavItem(c.Name, false);
+            n.Mark = St.TintOf(c.Name).Mark;
+            n.SetBounds(0, y, nav.Width, n.Height);
+            Card card = c;
+            n.Click += delegate { content.AutoScrollPosition = new Point(0, Math.Max(0, card.Panel.Top - content.AutoScrollPosition.Y - 4)); };
+            nav.Controls.Add(n);
+            y += n.Height;
+        }
+        NavItem folder = new NavItem("Папка со справками", true);
+        folder.Click += delegate {
+            try { Directory.CreateDirectory(Folder(here)); Process.Start("explorer.exe", "\"" + Folder(here) + "\""); }
+            catch (Exception ex) { MessageBox.Show(this, ex.Message, Text); }
+        };
+        NavItem dirs = new NavItem("Справочники (списки)", true);
+        dirs.Click += delegate {
+            try { Process.Start("notepad.exe", "\"" + lists.File + "\""); } catch (Exception ex) { MessageBox.Show(this, ex.Message, Text); }
+        };
+        foreach (NavItem n in new NavItem[] { folder, dirs }) {
+            n.Anchor = AnchorStyles.Left | AnchorStyles.Bottom | AnchorStyles.Right;
+            nav.Controls.Add(n);
+        }
+        nav.Resize += delegate {
+            dirs.SetBounds(0, nav.ClientSize.Height - 20 - dirs.Height, nav.Width, dirs.Height);
+            folder.SetBounds(0, dirs.Top - folder.Height, nav.Width, folder.Height);
+        };
+        return nav;
+    }
+
+    Control BuildHeader() {
+        Panel p = new Panel();
+        p.Dock = DockStyle.Top;
+        p.Height = 74;
+        p.BackColor = St.Back;
+        head.Font = St.Big;
+        head.ForeColor = St.Text;
+        head.AutoSize = true;
+        head.Location = new Point(28, 14);
+        headSub.Font = St.Small;
+        headSub.ForeColor = St.Hint;
+        headSub.AutoSize = true;
+        headSub.Location = new Point(30, 46);
+        p.Controls.Add(head);
+        p.Controls.Add(headSub);
+        return p;
+    }
+
+    Control BuildBottom() {
+        Panel p = new Panel();
+        p.Dock = DockStyle.Bottom;
+        p.Height = 66;
+        p.BackColor = Color.White;
+        p.Paint += delegate(object s, PaintEventArgs e) {
+            using (Pen pen = new Pen(St.Border)) e.Graphics.DrawLine(pen, 0, 0, p.Width, 0);
+        };
+        Button from = Ui.Button("Заполнить из договора…", false);
+        from.SetBounds(24, 14, 210, 38);
+        from.Click += delegate { FromSaved(); };
+        tip.SetToolTip(from, "Взять лицевой, Ф.И.О., адрес и счётчики из сохранённого договора");
+        Button clear = Ui.Button("Очистить", false);
+        clear.SetBounds(244, 14, 110, 38);
+        clear.Click += delegate {
+            if (dirty && MessageBox.Show(this, "Очистить справку? Введённое пропадёт.", Text, MessageBoxButtons.YesNo, MessageBoxIcon.Question,
+                    MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
+            Clear();
+        };
+        Button save = Ui.Button("Сохранить справку", true);
+        save.Size = new Size(210, 40);
+        save.Anchor = AnchorStyles.Right | AnchorStyles.Top;
+        save.Click += delegate { Save(true, true); };
+        tip.SetToolTip(save, "Заполнить шаблон spravka.docx, сохранить в папку «Справки» и открыть в Word (Ctrl+S)");
+        status.AutoSize = false;
+        status.Font = St.Base;
+        status.TextAlign = ContentAlignment.MiddleLeft;
+        status.Anchor = AnchorStyles.Left | AnchorStyles.Top | AnchorStyles.Right;
+        p.Controls.Add(from);
+        p.Controls.Add(clear);
+        p.Controls.Add(save);
+        p.Controls.Add(status);
+        p.Resize += delegate {
+            save.Location = new Point(p.ClientSize.Width - 24 - save.Width, 13);
+            status.SetBounds(clear.Right + 24, 14, Math.Max(10, save.Left - clear.Right - 48), 38);
+        };
+        return p;
+    }
+
+    void LayoutCards() {
+        content.SuspendLayout();
+        int full = content.Width - SystemInformation.VerticalScrollBarWidth;
+        int w = Math.Max(600, Math.Min(full - 32, 1060));
+        int x = Math.Max(16, (full - w) / 2);
+        int y = 4 + content.AutoScrollPosition.Y;
+        foreach (Card c in cards) {
+            int h = c.Layout(w);
+            c.Panel.Location = new Point(x + content.AutoScrollPosition.X, y);
+            y += h + 10;
+        }
+        content.AutoScrollMinSize = new Size(0, y - content.AutoScrollPosition.Y + 6);
+        content.ResumeLayout();
+    }
+
+    public void GoBack() {
+        Hide();
+        if (Home != null) Home.Return(Back);
+        else if (Back != null && !Back.IsDisposed) { Back.Show(); Back.Activate(); }
+    }
+
+    // ---------- данные ----------
+
+    public void Clear() {
+        loading = true;
+        try {
+            foreach (KeyValuePair<string, Control> kv in inp) if (!(kv.Value is DateBox) && !(kv.Value is Seg)) SetV(kv.Key, "");
+            ((DateBox)inp["data"]).Value = DateTime.Today;
+            SetV("n", "1 счётчик");
+            SetV("inzh", memory.Get("СправкаИнженер", ""));
+            SetV("nach", memory.Get("СправкаНачальник", First(Names())));
+            SetV("vlad", "1 владелец");
+            SetV("prinadl", First(lists.Get("Справка: чья собственность")));
+            SetV("zakl", First(lists.Get("Справка: заключение")));
+            fNp = fUlica = fDom = fKv = fromAdres = "";
+            savedFile = null;
+        } finally { loading = false; }
+        dirty = false;
+        Enable();
+        head.Text = "Новая справка";
+        headSub.Text = "Данные прибора учёта для открытия лицевого счёта - заполните или возьмите из договора";
+        RefreshState();
+    }
+
+    List<string> Names() {
+        List<string> r = new List<string>();
+        foreach (string[] s in lists.Signers()) r.Add(s[0]);
+        return r;
+    }
+
+    static string First(List<string> l) { return l.Count > 0 ? l[0] : ""; }
+
+    static string Get(Dictionary<string, string> d, string k) {
+        string v;
+        return d.TryGetValue(k, out v) && v != null ? v.Trim() : "";
+    }
+
+    // из договора: лицевой (номер в базе), Ф.И.О., телефон, адрес, счётчики, место, принадлежность, группа, кто оформил
+    public void FromContract(Dictionary<string, string> d) {
+        loading = true;
+        try {
+            string ls = Get(d, "ls");
+            SetV("ls", ls.Length > 0 ? BaseLink.Nab(ls) : "");
+            SetV("fio", Get(d, "fio"));
+            SetV("tel", Get(d, "telefon"));
+            fNp = Get(d, "np");
+            fUlica = Get(d, "ulica");
+            fDom = Get(d, "dom");
+            fKv = Get(d, "kv");
+            fromAdres = AddressOf(d);
+            SetV("adres", fromAdres);
+            bool two = Get(d, "schetchikov") == "2 счётчика";
+            SetV("n", two ? "2 счётчика" : "1 счётчик");
+            for (int i = 1; i <= 2; i++) {
+                string p = "pu" + i + "_";
+                bool use = i == 1 || two;
+                SetV(p + "tip", use ? Get(d, p + "tip") : "");
+                SetV(p + "zav", use ? Get(d, p + "zav") : "");
+                SetV(p + "pokaz", use ? Get(d, p + "pokaz") : "");
+                SetV(p + "pov", use ? Get(d, p + "poverka") : "");
+            }
+            string m = Place(Get(d, "pu1_mesto"));
+            if (m.Length > 0) SetV("mesto", m);
+            string own = Get(d, "pu1_prinadl");
+            if (own.Length > 0) SetV("prinadl", own == "Потребитель" ? "собственности абонента" : "собственности " + own);
+            if (Get(d, "pu1_gruppa").Length > 0) SetV("gruppa", Get(d, "pu1_gruppa"));
+            if (Get(d, "oformil").Length > 0) SetV("inzh", Get(d, "oformil"));
+            if (Get(d, "podp").Length > 0) SetV("nach", Get(d, "podp"));
+            savedFile = null;
+        } finally { loading = false; }
+        dirty = true;
+        Enable();
+        head.Text = ("Справка " + V("ls") + " " + Short(V("fio"))).Trim();
+        headSub.Text = "Заполнено из договора - проверьте и допишите свидетельство (ЕГРНИ), владельцев, регистрацию";
+        RefreshState();
+    }
+
+    // «д. Копище, ул. Авиационная, д. 15, кв. 83» - из полей адреса договора; нет полей - строка адреса без сельсовета
+    static string AddressOf(Dictionary<string, string> d) {
+        List<string> p = new List<string>();
+        if (Get(d, "np").Length > 0) p.Add((Get(d, "np_tip") + " " + Get(d, "np")).Trim());
+        if (Get(d, "ulica").Length > 0) p.Add((Get(d, "ulica_tip") + " " + Get(d, "ulica")).Trim());
+        if (Get(d, "dom").Length > 0) p.Add("д. " + Get(d, "dom"));
+        if (Get(d, "korp").Length > 0) p.Add("корп. " + Get(d, "korp"));
+        if (Get(d, "kv").Length > 0) p.Add("кв. " + Get(d, "kv"));
+        if (p.Count > 0) return string.Join(", ", p.ToArray());
+        string a = Get(d, "adres");
+        int ss = a.LastIndexOf(" (");
+        return ss > 0 && a.EndsWith(" с/с)") ? a.Substring(0, ss) : a;
+    }
+
+    // место из договора - как в справке: «ЩУЭ на границе участка» -> «в ЩУЭ на границе участка»
+    static string Place(string m) {
+        if (m.Length == 0) return "";
+        string l = m.ToLowerInvariant();
+        if (l.StartsWith("в ") || l.StartsWith("во ") || l.StartsWith("на ") || l.StartsWith("за ") || l.StartsWith("у ")) return m;
+        return "в " + m;
+    }
+
+    static string Short(string fio) {
+        string[] w = fio.Split(new char[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+        if (w.Length == 0) return "";
+        string s = w[0];
+        for (int i = 1; i < w.Length && i < 3; i++) s += (i == 1 ? " " : "") + char.ToUpper(w[i][0]) + ".";
+        return s;
+    }
+
+    void FromSaved() {
+        string dir = Path.Combine(DogovorForm.Folder(here, memory), "данные");
+        if (!Directory.Exists(dir)) { MessageBox.Show(this, "Сохранённых договоров пока нет:\n" + dir, Text); return; }
+        if (dirty && MessageBox.Show(this, "Заменить введённое в справке данными договора?", Text, MessageBoxButtons.YesNo, MessageBoxIcon.Question,
+                MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
+        using (SavedDialog dlg = new SavedDialog(dir)) {
+            if (dlg.ShowDialog(this) != DialogResult.OK || dlg.Chosen == null) return;
+            try { FromContract(DogovorForm.ReadData(dlg.Chosen)); }
+            catch (Exception ex) { MessageBox.Show(this, "Не удалось открыть:\n" + ex.Message, Text); }
+        }
+    }
+
+    // значения полей шаблона
+    public Dictionary<string, string> Compose() {
+        Dictionary<string, string> v = new Dictionary<string, string>();
+        string line = "______________________________";
+        v["ДАТА"] = V("data");
+        string ls = V("ls");
+        v["ЛС"] = DigitsOnly(ls).Length == 13 ? BaseLink.Nab(ls) : ls;
+        v["ФИО"] = V("fio") + (V("tel").Length > 0 ? "\n(" + V("tel") + ")" : "");
+        v["АДРЕС"] = V("adres");
+        bool two = V("n") == "2 счётчика";
+        v["ТИП"] = V("pu1_tip");
+        v["НОМЕР"] = V("pu1_zav");
+        v["ПОКАЗАНИЯ"] = V("pu1_pokaz");
+        v["ПОВЕРКА"] = V("pu1_pov");
+        // второго счётчика нет - строка таблицы убирается (поле «¶ТИП2» пустое)
+        v["ТИП2"] = two ? (V("pu2_tip").Length > 0 ? V("pu2_tip") : "-") : "";
+        v["НОМЕР2"] = two ? V("pu2_zav") : "";
+        v["ПОКАЗАНИЯ2"] = two ? V("pu2_pokaz") : "";
+        v["ПОВЕРКА2"] = two ? V("pu2_pov") : "";
+        v["СВИДЕТЕЛЬСТВО"] = V("svid").Length > 0 ? V("svid") : "__________";
+        v["ВЛАДЕЛЬЦЫ"] = V("vlad").Length > 0 ? V("vlad") : "__ владелец";
+        v["МЕСТО"] = V("mesto").Length > 0 ? V("mesto") : "__________";
+        v["ПРИНАДЛЕЖНОСТЬ"] = V("prinadl").Length > 0 ? V("prinadl") : "собственности __________";
+        string z = V("zakl");
+        v["ЗАКЛЮЧЕНИЕ"] = z;
+        string g = V("gruppa");
+        v["ГРУППА"] = g.Length > 0 && !g.EndsWith(".") ? g + "." : g;
+        v["РЕГИСТРАЦИЯ"] = V("reg").Length > 0 ? V("reg") : line;
+        v["ИНЖЕНЕР"] = V("inzh");
+        v["НАЧАЛЬНИК"] = V("nach");
+        return v;
+    }
+
+    static string DigitsOnly(string s) {
+        StringBuilder sb = new StringBuilder();
+        foreach (char c in s) if (char.IsDigit(c)) sb.Append(c);
+        return sb.ToString();
+    }
+
+    // что не заполнено (справку всё равно можно сохранить - дописать в Word)
+    List<string> Missing() {
+        List<string> m = new List<string>();
+        foreach (string k in new string[] { "ls", "fio", "adres", "pu1_tip", "pu1_zav", "pu1_pokaz", "pu1_pov", "inzh", "nach" })
+            if (V(k).Length == 0) m.Add(k);
+        if (V("n") == "2 счётчика")
+            foreach (string k in new string[] { "pu2_tip", "pu2_zav" }) if (V(k).Length == 0) m.Add(k);
+        return m;
+    }
+
+    string Caption(string key) {
+        string c;
+        string p = key.StartsWith("pu2_") ? "счётчик 2: " : key.StartsWith("pu1_") ? "счётчик 1: " : "";
+        return p + (captions.TryGetValue(key, out c) ? c : key);
+    }
+
+    void RefreshState() {
+        List<string> m = Missing();
+        if (m.Count == 0) { status.Text = savedFile != null && !dirty ? "Справка сохранена" : "Всё основное заполнено"; status.ForeColor = St.Good; }
+        else {
+            List<string> names = new List<string>();
+            foreach (string k in m) names.Add(Caption(k));
+            status.Text = "Не заполнено: " + string.Join(", ", names.ToArray());
+            status.ForeColor = St.Bad;
+        }
+    }
+
+    // имя файла - как называли справки сами: «Копище Авиационная 15-83»
+    public string FileName() {
+        string name;
+        if (fromAdres.Length > 0 && V("adres") == fromAdres && (fNp.Length > 0 || fUlica.Length > 0))
+            name = (fNp + " " + fUlica + " " + fDom + (fKv.Length > 0 ? "-" + fKv : "")).Trim();
+        else name = AddressName(V("adres"));
+        if (name.Length == 0) name = ("Справка " + V("ls") + " " + Short(V("fio"))).Trim();
+        if (name == "Справка") name = "Справка " + DateTime.Now.ToString("yyyy-MM-dd HH-mm");
+        foreach (char ch in Path.GetInvalidFileNameChars()) name = name.Replace(ch, '_');
+        while (name.Contains("  ")) name = name.Replace("  ", " ");
+        return name.Trim().TrimEnd('.');
+    }
+
+    // «д. Копище, ул. Авиационная, д. 15, кв. 83» -> «Копище Авиационная 15-83»
+    static string AddressName(string a) {
+        string[] skip = { "г", "д", "аг", "п", "гп", "г.п", "пос", "ул", "пер", "пр", "пр-т", "просп", "б-р", "пл", "кв", "корп", "к", "дом", "с/с", "р-н", "обл" };
+        List<string> w = new List<string>();
+        bool kv = false;
+        foreach (string raw in a.Replace(",", " ").Split(new char[] { ' ' }, StringSplitOptions.RemoveEmptyEntries)) {
+            string t = raw.Trim('.', ' ');
+            string low = t.ToLowerInvariant();
+            if (low == "кв") { kv = true; continue; }
+            if (Array.IndexOf(skip, low) >= 0 || t.Length == 0) continue;
+            if (kv && w.Count > 0) { w[w.Count - 1] += "-" + t; kv = false; continue; }
+            w.Add(t);
+        }
+        return string.Join(" ", w.ToArray());
+    }
+
+    // ask - с вопросами; openWord - открыть в Word. Возвращает путь к справке или null
+    public string Save(bool openWord, bool ask) {
+        List<string> m = Missing();
+        if (ask && m.Count > 0) {
+            List<string> names = new List<string>();
+            foreach (string k in m) names.Add("  • " + Caption(k));
+            if (MessageBox.Show(this, "Не заполнено:\n" + string.Join("\n", names.ToArray()) + "\n\nВсё равно сохранить справку? (Незаполненное можно дописать в Word.)",
+                    "Проверка перед сохранением", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) != DialogResult.Yes) {
+                Control c;
+                if (inp.TryGetValue(m[0], out c)) c.Focus();
+                return null;
+            }
+        }
+        if (!File.Exists(templateFile)) {
+            MessageBox.Show(this, "Нет файла шаблона справки:\n" + templateFile + "\n\nОн должен лежать рядом с программой.", Text, MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return null;
+        }
+        string dir = Folder(here);
+        string docx = Path.Combine(dir, FileName() + ".docx");
+        try {
+            Directory.CreateDirectory(dir);
+            bool same = savedFile != null && string.Compare(savedFile, docx, StringComparison.OrdinalIgnoreCase) == 0;
+            if (ask && !same && File.Exists(docx) && MessageBox.Show(this, "Справка «" + Path.GetFileNameWithoutExtension(docx) + "» уже есть в папке.\n\nЗаменить её?", Text,
+                    MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2) != DialogResult.Yes) return null;
+            string tmp = docx + ".tmp";
+            List<string> missing = DocxTemplate.Fill(templateFile, tmp, Compose());
+            try {
+                if (File.Exists(docx)) File.Delete(docx);
+            } catch (IOException) {
+                File.Delete(tmp);
+                MessageBox.Show(this, "Справка «" + Path.GetFileNameWithoutExtension(docx) + "» сейчас открыта в Word.\nЗакройте её в Word и сохраните ещё раз.", Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return null;
+            }
+            File.Move(tmp, docx);
+            memory.Values["СправкаИнженер"] = V("inzh");
+            memory.Values["СправкаНачальник"] = V("nach");
+            memory.Remember("место справки", V("mesto"));
+            memory.Save();
+            savedFile = docx;
+            dirty = false;
+            head.Text = "Справка «" + Path.GetFileNameWithoutExtension(docx) + "»";
+            headSub.Text = "сохранена " + DateTime.Now.ToString("dd.MM.yyyy HH:mm") + " - " + docx;
+            RefreshState();
+            if (missing.Count > 0)
+                MessageBox.Show(this, "В шаблоне справки есть поля, которые программа не знает (остались пустыми):\n" + string.Join(", ", missing.ToArray()), Text);
+            if (openWord) {
+                try { Process.Start(docx); }
+                catch (Exception ex) { MessageBox.Show(this, "Справка сохранена:\n" + docx + "\n\nОткрыть в Word не получилось: " + ex.Message, Text); }
+            }
+            return docx;
+        } catch (Exception ex) {
+            MessageBox.Show(this, "Не удалось сохранить справку:\n" + ex.Message, Text, MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return null;
+        }
+    }
+
+    // перед выходом из программы: несохранённая справка - спросить. true - можно выходить
+    public bool AskSaveBeforeExit() {
+        if (!dirty) return true;
+        DialogResult r = MessageBox.Show(this, "Справка не сохранена. Сохранить её?\n\nДа - сохранить и выйти\nНет - выйти без сохранения\nОтмена - вернуться к справке", Text,
+            MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
+        if (r == DialogResult.Cancel) return false;
+        if (r == DialogResult.Yes) return Save(false, true) != null;
+        return true;
     }
 }
 '@
