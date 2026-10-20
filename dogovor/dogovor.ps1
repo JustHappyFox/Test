@@ -1953,6 +1953,15 @@ public static class Mrz {
         }
     }
 
+    // похоже ли найденное на строки паспорта: в строках «<<<» много заполнителей «<» (10-29 на пробных снимках),
+    // а у обычного текста (свидетельство, страница с Ф.И.О.), принятого за две строки, их почти нет (0-4)
+    public static bool Like(MrzResult r) {
+        if (r.Valid) return true;
+        int n = 0;
+        foreach (char c in r.Line1 + r.Line2) if (c == '<') n++;
+        return n >= 8;
+    }
+
     public static MrzResult Read(string path) {
         // строки ищем на уменьшенном снимке, а читаем по полному - мелкие знаки так чётче
         GrayImage g, full;
@@ -4825,6 +4834,7 @@ public static class PassportPage {
 
 public class CertResult {
     public bool Found;                                // это свидетельство и в нём нашёлся адрес
+    public bool Cert;                                 // похоже на свидетельство (узнаны слова заголовка), адреса может и не быть
     public string Address = "";                       // как в свидетельстве
     public string NpTip = "", Np = "", Selsovet = "", UlicaTip = "", Ulica = "", Dom = "", Korp = "", Kv = "";
     public bool Ok;                                   // всё прочитано уверенно
@@ -4882,7 +4892,7 @@ public static class CertPage {
         if (!r.Found) {
             GrayImage ff = PassportPage.Rotate180(full), sf = PassportPage.Rotate180(small);
             CertResult o = ReadPage(ff, PassportPage.Scale(PassportPage.FindLines(sf, true), f));
-            if (o.Found || o.Lines.Count > r.Lines.Count) r = o;
+            if (o.Found || !r.Cert && o.Cert || o.Lines.Count > r.Lines.Count && o.Cert == r.Cert) r = o;
         }
         return r;
     }
@@ -4920,6 +4930,7 @@ public static class CertPage {
         }
         string t = text.ToString().Replace('\n', ' ');
         if (!LooksLikeCert(t)) return r;
+        r.Cert = true;
         int s = Find(t, "по адресу", 0, 2);
         if (s < 0) { r.Info = "не найдено «по адресу»"; return r; }
         while (s < t.Length && (t[s] == ':' || t[s] == ' ' || t[s] == ';' || t[s] == '.')) s++;
@@ -5240,6 +5251,8 @@ public static class CertPage {
         for (int i = from; i < to && i < p.Count; i++)
             foreach (Glyph g in p[i].G) {
                 if (".-/\"«»".IndexOf(g.C) >= 0) continue;
+                // на смазанном или тёмном снимке слипшиеся буквы («ва», «та», «ст») уверенно читаются как «щ»
+                if (g.C == 'щ' || g.C == 'Щ') return false;
                 bool d = number && char.IsDigit(BestOf(g, Digits + Letters)) || number && char.IsDigit(g.C);
                 if (g.S < 0.5) return false;
                 if (Margin(g, d ? Digits : Letters) < (d ? 0.08 : 0.05)) return false;
@@ -6333,8 +6346,9 @@ public static class Photo {
 }
 
 public delegate void PhotoHandler(string path);
+public delegate void KindHandler(string path, string kind);
 
-// Миниатюры фото договора; щелчок - открыть, правая кнопка - меню
+// Миниатюры фото договора; щелчок - открыть, правая кнопка или щелчок по подписи - меню (что на фото, удалить)
 public class PhotoStrip : Control {
     public const int TW = 150, TH = 112, CapH = 22, Gap = 12;
     readonly List<string> files = new List<string>();
@@ -6346,8 +6360,18 @@ public class PhotoStrip : Control {
     int hover = -1;
     ContextMenuStrip menu;
     string menuFile;
+    ToolTip toolTip;
+    string lastTip = "";
     public string Hint = "";
     public event PhotoHandler OpenPhoto, RemovePhoto;
+    public event KindHandler SetKind;               // пользователь сказал, что на фото: mrz, page, cert, meter, other
+    // что бывает на фото - для меню
+    public static readonly string[][] Kinds = {
+        new string[] { "mrz", "паспорт - последняя страница (строки «<<<»)" },
+        new string[] { "page", "паспорт - страница с Ф.И.О." },
+        new string[] { "cert", "свидетельство о госрегистрации (адрес)" },
+        new string[] { "meter", "счётчик" },
+        new string[] { "other", "другое - не читать" } };
     public event EventHandler Resized;
 
     public PhotoStrip() {
@@ -6477,6 +6501,9 @@ public class PhotoStrip : Control {
         base.OnMouseMove(e);
         int h = At(e.Location);
         Cursor = h >= 0 ? Cursors.Hand : Cursors.Default;
+        // подсказка: по подписи - выбрать, что на фото
+        string tip = h >= 0 && e.Location.Y >= Tile(h).Bottom ? "Щёлкните, чтобы указать, что на фото" : "";
+        if (tip != lastTip) { lastTip = tip; if (toolTip == null) toolTip = new ToolTip(); toolTip.SetToolTip(this, tip); }
         if (h != hover) { hover = h; Invalidate(); }
     }
 
@@ -6487,17 +6514,31 @@ public class PhotoStrip : Control {
 
     protected override void OnMouseWheel(MouseEventArgs e) { Ui.Wheel(this, e); }
 
+    // меню фото с номером i - как щелчок по подписи под ним (для проверки программы)
+    public void MenuAt(int i) {
+        if (i >= files.Count) return;
+        Rectangle r = Tile(i);
+        OnMouseUp(new MouseEventArgs(MouseButtons.Left, 1, r.X + 20, r.Bottom + 8, 0));
+    }
+
     protected override void OnMouseUp(MouseEventArgs e) {
         base.OnMouseUp(e);
         int i = At(e.Location);
         if (i < 0) return;
         string f = files[i];
-        if (e.Button == MouseButtons.Left) { if (OpenPhoto != null) OpenPhoto(f); }
-        else if (e.Button == MouseButtons.Right) {
+        bool onCaption = e.Location.Y >= Tile(i).Bottom;
+        if (e.Button == MouseButtons.Left && !onCaption) { if (OpenPhoto != null) OpenPhoto(f); }
+        else if (e.Button == MouseButtons.Right || e.Button == MouseButtons.Left) {
             if (menu == null) {
                 menu = new ContextMenuStrip();
                 menu.Font = St.Base;
                 menu.Items.Add("Открыть", null, delegate { if (OpenPhoto != null) OpenPhoto(menuFile); });
+                menu.Items.Add(new ToolStripSeparator());
+                foreach (string[] k in Kinds) {
+                    string kind = k[0];
+                    menu.Items.Add("Это " + k[1], null, delegate { if (SetKind != null) SetKind(menuFile, kind); });
+                }
+                menu.Items.Add(new ToolStripSeparator());
                 menu.Items.Add("Удалить фото...", null, delegate { if (RemovePhoto != null) RemovePhoto(menuFile); });
             }
             menuFile = f;
@@ -6510,6 +6551,7 @@ public class PhotoStrip : Control {
             foreach (Bitmap b in thumbs.Values) b.Dispose();
             thumbs.Clear();
             if (menu != null) menu.Dispose();
+            if (toolTip != null) toolTip.Dispose();
         }
         base.Dispose(disposing);
     }
@@ -12082,7 +12124,10 @@ public class DogovorForm : Form {
     PageResult lastPage;
     string mrzWhere = "", pageWhere = "", importNote = "";
     string photoPersonal = "", photoFio = "";
-    bool photoFioOk, mrzWeak;
+    bool photoFioOk;
+    // по фото: строки «<<<» нечётко; не понятно, что на фото; указан вид, но прочитать не вышло (имя фото -> что сказать)
+    readonly Dictionary<string, bool> weakMrz = new Dictionary<string, bool>(), unknownPhotos = new Dictionary<string, bool>();
+    readonly Dictionary<string, string> failedPhotos = new Dictionary<string, string>();
     static readonly object mrzLock = new object();
 
     public DogovorForm(string here) {
@@ -13405,6 +13450,7 @@ public class DogovorForm : Form {
             "свидетельство и счётчик, подключите телефон кабелем и нажмите «Забрать фото с телефона». Личный номер, Ф.И.О., адрес объекта, номер и тип счётчика программа прочитает с фото сама.";
         strip.OpenPhoto += delegate(string f) { ShowPhoto(f); };
         strip.RemovePhoto += delegate(string f) { RemovePhoto(f); };
+        strip.SetKind += delegate(string f, string kind) { ReadPhotos(new List<string>(new string[] { f }), kind); };
         strip.Resized += delegate { LayoutCards(); };
         lichnyNote.Click += delegate { if (photoPersonal.Length > 0 && V("lichny") != photoPersonal) SetV("lichny", photoPersonal); };
         fioNote.Click += delegate { if (photoFio.Length > 0 && Same(V("fio")) != Same(photoFio)) SetV("fio", photoFio); };
@@ -13495,7 +13541,12 @@ public class DogovorForm : Form {
         try { File.Delete(f); }
         catch (Exception ex) { MessageBox.Show(this, "Не удалось удалить фото:\n" + ex.Message, Text); return; }
         strip.Mark(f, null, Color.Empty);
+        string n = Path.GetFileName(f);
+        weakMrz.Remove(n);
+        unknownPhotos.Remove(n);
+        failedPhotos.Remove(n);
         RefreshPhotos();
+        PhotosRead();
     }
 
     void AddFromFolder() {
@@ -13541,7 +13592,7 @@ public class DogovorForm : Form {
         importNote = note;
         RefreshPhotos();
         PhotoNote(note, color);
-        if (added.Count > 0) ReadPassport(added);
+        if (added.Count > 0) ReadPhotos(added, null);
     }
 
     // с какого времени фото на телефоне считаются новыми: после последнего забранного (в первый раз - за последний час)
@@ -13576,6 +13627,9 @@ public class DogovorForm : Form {
 
     // для проверки: открыть фото по номеру, что написано про фото
     public void ShowPhotoAt(int i) { List<string> f = strip.Files; if (i < f.Count) ShowPhoto(f[i]); }
+    // для проверки: указать, что на фото с номером i; открыть меню под ним
+    public void PhotoKindAt(int i, string kind) { List<string> f = strip.Files; if (i < f.Count) ReadPhotos(new List<string>(new string[] { f[i] }), kind); }
+    public void PhotoMenuAt(int i) { strip.MenuAt(i); }
     public string PhotoStatus { get { return photoNote.Text + " | " + lichnyNote.Text + " | " + fioNote.Text + " | " + certNote.Text + " | " + meterNotes[0].Text + " | " + meterNotes[1].Text + " | папка: " + PhotoRef(); } }
 
     void PhoneDone(PhoneResult r, string dir, DateTime since, int gen) {
@@ -13603,8 +13657,16 @@ public class DogovorForm : Form {
     }
 
     // с фото паспорта: личный номер - со строк «<<<» последней страницы, Ф.И.О. (и номер) - с предпоследней
-    void ReadPassport(List<string> files) {
+    // Фото документов: что на нём, программа решает сама - паспорт (строки «<<<» или страница с Ф.И.О.), свидетельство,
+    // счётчик; документы бывают в любом наборе. kind - пользователь сам указал (подпись под фото): читается только так
+    void ReadPhotos(List<string> files, string kind) {
         int gen = photoGen;
+        if (kind == "other") {
+            foreach (string f in files) { Forget(Path.GetFileName(f)); strip.Mark(f, "другое - не читается", St.Hint); }
+            ApplyPassport();
+            PhotosRead();
+            return;
+        }
         List<string> list = new List<string>(files);
         List<string> mtypes = new List<string>();
         foreach (MeterType mt in lists.Meters()) mtypes.Add(mt.Full);
@@ -13618,21 +13680,26 @@ public class DogovorForm : Form {
                     CertResult ce = null;
                     MeterResult me = null;
                     try {
-                        r = Mrz.Read(f);
-                        // строк «<<<» нет - может, это счётчик (штрихкод, табло, надпись типа)
-                        if (!r.Valid) me = MeterPhoto.Read(f, mtypes);
-                        bool meter = me != null && me.Found;
-                        // может, страница паспорта с Ф.И.О.
-                        if (!r.Valid && !meter) pg = PassportPage.Read(f);
-                        // и не она - может, свидетельство о госрегистрации (адрес)
-                        if (!r.Valid && !meter && (pg == null || !pg.Found)) ce = CertPage.Read(f);
+                        if (kind == null) {
+                            r = Mrz.Read(f);
+                            // строк «<<<» нет - может, это счётчик (штрихкод, табло, надпись типа)
+                            if (!r.Valid) me = MeterPhoto.Read(f, mtypes);
+                            bool meter = me != null && me.Found;
+                            // может, страница паспорта с Ф.И.О.
+                            if (!r.Valid && !meter) pg = PassportPage.Read(f);
+                            // и не она - может, свидетельство о госрегистрации (адрес)
+                            if (!r.Valid && !meter && (pg == null || !pg.Found)) ce = CertPage.Read(f);
+                        } else if (kind == "mrz") r = Mrz.Read(f);
+                        else if (kind == "page") pg = PassportPage.Read(f);
+                        else if (kind == "cert") ce = CertPage.Read(f);
+                        else if (kind == "meter") me = MeterPhoto.Read(f, mtypes);
                     } catch (Exception ex) { r = new MrzResult(); r.Info = "не открывается: " + ex.Message; pg = null; ce = null; me = null; }
                     string file = f;
                     MrzResult res = r;
                     PageResult page = pg;
                     CertResult cert = ce;
                     MeterResult mres = me;
-                    Post(delegate { if (gen == photoGen) PhotoRead(file, res, page, cert, mres); });
+                    Post(delegate { if (gen == photoGen) PhotoRead(file, res, page, cert, mres, kind); });
                 }
             }
             Post(delegate { mrzRunning--; if (gen == photoGen) PhotosRead(); });
@@ -13644,9 +13711,49 @@ public class DogovorForm : Form {
 
     static bool Blr(MrzResult r) { return r.Line2.Length == 44 && r.Line2.Substring(10, 3) == "BLR"; }
 
-    void PhotoRead(string f, MrzResult r, PageResult page, CertResult cert, MeterResult meter) {
+    // прочитанное раньше с этого фото - забыть (пользователь указал, что на нём другое)
+    void Forget(string name) {
+        if (mrzWhere == name) { lastMrz = null; mrzWhere = ""; photoPersonal = ""; }
+        if (pageWhere == name) { lastPage = null; pageWhere = ""; photoFio = ""; photoFioOk = false; photoPersonal = ""; }
+        if (certWhere == name) { lastCert = null; certWhere = ""; certSure = lastCertOk = false; CertNote(); }
+        for (int i = 1; i <= 2; i++)
+            if (meterWhere[i - 1] == name) { photoMeter[i - 1] = null; meterWhere[i - 1] = ""; if (lastMeterIdx == i) lastMeterIdx = 0; MeterNote(i); }
+        weakMrz.Remove(name);
+        unknownPhotos.Remove(name);
+        failedPhotos.Remove(name);
+    }
+
+    static readonly string Retake = "переснимите: лист целиком, ровно, при хорошем свете, без бликов";
+    bool lastCertOk;                                 // свидетельство, с которого адрес, прочитано уверенно
+
+    void PhotoRead(string f, MrzResult r, PageResult page, CertResult cert, MeterResult meter, string kind) {
         string name = Path.GetFileName(f);
         if (r != null && r.Info.StartsWith("не открывается")) { strip.Mark(f, "фото не открывается", St.Bad); return; }
+        Forget(name);
+        if (kind == "meter" && (meter == null || !meter.Found)) {
+            // указано, что это счётчик: прочитанное - подсказкой, даже если сам бы не узнал
+            if (meter != null && (meter.Serial.Length > 0 || meter.Type.Length > 0 || meter.Reading.Length > 0)) meter.Found = true;
+            else {
+                strip.Mark(f, "счётчик не прочитан", Warn);
+                failedPhotos[name] = "счётчик прочитать не удалось - переснимите ближе наклейку со штрихкодом и табло, без бликов";
+                return;
+            }
+        }
+        if (kind == "cert" && (cert == null || !cert.Found)) {
+            strip.Mark(f, "адрес не найден", Warn);
+            failedPhotos[name] = "адрес со свидетельства прочитать не удалось - " + Retake;
+            return;
+        }
+        if (kind == "page" && (page == null || !page.Found)) {
+            strip.Mark(f, "Ф.И.О. не прочитано", Warn);
+            failedPhotos[name] = "Ф.И.О. прочитать не удалось - " + Retake;
+            return;
+        }
+        if (kind == "mrz" && (r == null || r.Line2.Length == 0)) {
+            strip.Mark(f, "строки «<<<» не найдены", Warn);
+            failedPhotos[name] = "строки «<<<» не найдены - переснимите последнюю страницу паспорта ближе, ровно, без бликов";
+            return;
+        }
         if (meter != null && meter.Found) {
             int i = ApplyMeter(meter, name);
             bool sure = (meter.Serial.Length > 0) && (meter.Reading.Length == 0 || meter.ReadingOk) && (meter.Type.Length == 0 || meter.TypeOk);
@@ -13654,6 +13761,9 @@ public class DogovorForm : Form {
             return;
         }
         if (cert != null && cert.Found) {
+            // второе фото свидетельства: уверенно прочитанное раньше не заменяем неуверенным
+            if (lastCert != null && certWhere != name && lastCertOk && !cert.Ok) { strip.Mark(f, "адрес - см. «" + certWhere + "»", St.Hint); return; }
+            lastCertOk = cert.Ok;
             lastCert = cert;
             certWhere = name;
             ApplyCert();
@@ -13663,11 +13773,18 @@ public class DogovorForm : Form {
         if (page != null && page.Found) {
             lastPage = page;
             pageWhere = name;
-        } else if (r != null && r.Line2.Length > 0) {
-            if (!r.Valid) { strip.Mark(f, "строки паспорта нечётко", Warn); mrzWeak = true; }
+        } else if (r != null && r.Line2.Length > 0 && (kind == "mrz" || Mrz.Like(r))) {
+            if (!r.Valid) { strip.Mark(f, "строки паспорта нечётко", Warn); weakMrz[name] = true; }
             else if (!Blr(r)) strip.Mark(f, "паспорт не РБ", St.Hint);
             else { strip.Mark(f, "личный номер прочитан", St.Good); lastMrz = r; mrzWhere = name; }
-        } else strip.Mark(f, null, Color.Empty);
+        } else if (cert != null && cert.Cert) {
+            strip.Mark(f, "адрес не найден", Warn);
+            failedPhotos[name] = "похоже на свидетельство, но адрес («...по адресу: ...») прочитать не удалось - " + Retake;
+        } else {
+            // ни паспорт, ни свидетельство, ни счётчик не узнаны - не гадаем, спрашиваем
+            strip.Mark(f, "что на фото? - щёлкните", Warn);
+            unknownPhotos[name] = true;
+        }
         ApplyPassport();
     }
 
@@ -13695,7 +13812,7 @@ public class DogovorForm : Form {
         bool good = true;
         if (lastMrz != null) parts.Add("личный номер прочитан с фото «" + mrzWhere + "»");
         else if (lastPage != null && lastPage.IdOk) parts.Add("личный номер прочитан с фото «" + pageWhere + "»");
-        else if (mrzWeak) {
+        else if (weakMrz.Count > 0) {
             parts.Add("строки «<<<» прочитаны неуверенно - личный номер не подставлен: переснимите последнюю страницу ближе, ровно, без бликов");
             good = false;
         }
@@ -13717,6 +13834,13 @@ public class DogovorForm : Form {
         if (lastCert != null) {
             if (certSure) parts.Add("адрес объекта прочитан со свидетельства (фото «" + certWhere + "»)");
             else { parts.Add("адрес со свидетельства (фото «" + certWhere + "») прочитан неуверенно - проверьте подсказку под адресом"); good = false; }
+        }
+        foreach (KeyValuePair<string, string> kv in failedPhotos) { parts.Add("фото «" + kv.Key + "»: " + kv.Value); good = false; }
+        if (unknownPhotos.Count > 0) {
+            List<string> u = new List<string>(unknownPhotos.Keys);
+            parts.Add((u.Count == 1 ? "не понятно, что на фото «" + u[0] + "»" : "не понятно, что на фото: " + string.Join(", ", u.ToArray()))
+                + " - щёлкните подпись под фото и выберите (паспорт, свидетельство, счётчик)");
+            good = false;
         }
         if (parts.Count == 0) { PhotoNote(importNote, photoNote.ForeColor); return; }
         string s = string.Join("; ", parts.ToArray());
@@ -14130,7 +14254,10 @@ public class DogovorForm : Form {
         meterWhere[0] = meterWhere[1] = "";
         lastMeterIdx = 0;
         mrzWhere = pageWhere = importNote = photoPersonal = photoFio = certWhere = "";
-        photoFioOk = mrzWeak = certSure = false;
+        photoFioOk = certSure = lastCertOk = false;
+        weakMrz.Clear();
+        unknownPhotos.Clear();
+        failedPhotos.Clear();
         if (viewer != null && !viewer.IsDisposed) viewer.Close();
         strip.ClearMarks();
         RefreshPhotos();
