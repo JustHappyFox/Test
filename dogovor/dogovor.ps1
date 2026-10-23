@@ -23,6 +23,102 @@ using System.Windows.Forms;
 using System.Xml;
 using System;
 
+// Ошибки программы: вместо стандартного окна Windows - своё, с подробностями (их можно скопировать),
+// и запись в oshibki.txt рядом с программой - его можно прислать. Номера (лицевые и т.п.) и имена файлов
+// договоров в записи скрыты.
+public static class Crash {
+    static string log;
+    static bool showing;
+
+    public static string LogFile { get { return log; } }
+
+    public static void Install(string here) {
+        log = Path.Combine(here, "oshibki.txt");
+        try { Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException); } catch { }
+        Application.ThreadException += delegate(object s, System.Threading.ThreadExceptionEventArgs e) { Show(e.Exception, true); };
+        AppDomain.CurrentDomain.UnhandledException += delegate(object s, UnhandledExceptionEventArgs e) {
+            Exception ex = e.ExceptionObject as Exception;
+            Write(ex != null ? ex.ToString() : "" + e.ExceptionObject, "в фоне");
+        };
+    }
+
+    // что за компьютер: Windows, .NET, разрядность, память - без данных абонентов
+    public static string Environment2() {
+        StringBuilder sb = new StringBuilder();
+        sb.Append("Windows ").Append(Environment.OSVersion.Version).Append(" ").Append(Environment.OSVersion.ServicePack);
+        sb.Append(", .NET ").Append(Environment.Version).Append(", ").Append(IntPtr.Size == 8 ? "64" : "32").Append("-битный процесс");
+        try {
+            Process p = Process.GetCurrentProcess();
+            sb.Append(", память программы ").Append(p.WorkingSet64 / 1048576).Append(" МБ (пик ").Append(p.PeakWorkingSet64 / 1048576).Append(" МБ)");
+            sb.Append(", объектов GDI ").Append(GdiCount(p)).Append(", окон USER ").Append(UserCount(p));
+        } catch { }
+        return sb.ToString();
+    }
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    static extern int GetGuiResources(IntPtr process, int flags);
+
+    static string GdiCount(Process p) { try { return GetGuiResources(p.Handle, 0).ToString(); } catch { return "?"; } }
+    static string UserCount(Process p) { try { return GetGuiResources(p.Handle, 1).ToString(); } catch { return "?"; } }
+
+    // скрыть данные: длинные номера и имена файлов договоров/фото
+    public static string Clean(string s) {
+        s = Regex.Replace(s ?? "", @"\d{6,}", "######");
+        s = Regex.Replace(s, @"(Договоры|Справки|фото|данные)([\\/])[^\\/\r\n""']+", "$1$2…");
+        return s;
+    }
+
+    public static void Write(string text, string where) {
+        try {
+            File.AppendAllText(log, "=== " + DateTime.Now.ToString("dd.MM.yyyy HH:mm:ss") + " (" + where + ") ===\r\n" + Environment2() + "\r\n" + Clean(text) + "\r\n\r\n", new UTF8Encoding(true));
+        } catch { }
+    }
+
+    public static void Show(Exception ex, bool canContinue) {
+        Write(ex.ToString(), "окно");
+        if (showing) return;
+        showing = true;
+        try {
+            using (Form f = new Form()) {
+                f.Text = "Оформление договора - ошибка";
+                f.Font = St.Base;
+                f.BackColor = Color.White;
+                f.StartPosition = FormStartPosition.CenterScreen;
+                f.Size = new Size(760, 480);
+                f.TopMost = true;
+                Label l = new Label();
+                l.Text = "Произошла ошибка: " + Clean(ex.Message) + "\n\nПодробности записаны в файл " + log +
+                    " - пришлите его (или фото этого окна). Данные абонентов в нём скрыты.";
+                l.Font = St.Base;
+                l.SetBounds(16, 12, 712, 86);
+                TextBox t = new TextBox();
+                t.Multiline = true;
+                t.ReadOnly = true;
+                t.ScrollBars = ScrollBars.Both;
+                t.WordWrap = false;
+                t.Font = new Font("Consolas", 8.5f);
+                t.Text = Environment2() + "\r\n\r\n" + Clean(ex.ToString());
+                t.SetBounds(16, 104, 712, 268);
+                Button copy = Ui.Button("Скопировать", false);
+                copy.SetBounds(16, 384, 140, 36);
+                copy.Click += delegate { try { Clipboard.SetText(t.Text); } catch { } };
+                Button go = Ui.Button(canContinue ? "Продолжить" : "Закрыть", true);
+                go.SetBounds(canContinue ? 432 : 588, 384, 140, 36);
+                go.DialogResult = DialogResult.OK;
+                Button quit = Ui.Button("Закрыть программу", false);
+                quit.SetBounds(580, 384, 148, 36);
+                quit.Click += delegate { Environment.Exit(1); };
+                f.Controls.AddRange(new Control[] { l, t, copy, go });
+                if (canContinue) f.Controls.Add(quit);
+                f.AcceptButton = go;
+                f.ShowDialog();
+            }
+        } catch {
+            try { MessageBox.Show("Ошибка: " + Clean(ex.Message) + "\n\nПодробности - в " + log, "Оформление договора"); } catch { }
+        } finally { showing = false; }
+    }
+}
+
 // .docx - это ZIP-архив. Читаем и пишем его сами (Deflate есть в любом .NET), без Word и сторонних программ.
 public class ZipEntry {
     public string Name;
@@ -13282,11 +13378,13 @@ public class DogovorForm : Form {
         if (l.Text == text && l.ForeColor == color) return;
         l.Text = text;
         l.ForeColor = color;
-        l.Font = bold ? new Font(St.Small, FontStyle.Bold) : St.Small;
+        l.Font = bold ? SmallBold : St.Small;
         LayoutCards();
     }
 
     static readonly Color Warn = Color.FromArgb(190, 105, 0);
+    // один шрифт на все подсказки (новый шрифт на каждую подсказку - лишние объекты Windows)
+    static readonly Font SmallBold = new Font(St.Small, FontStyle.Bold);
 
     void CheckLs() {
         string ls = Digits(V("ls"));
@@ -14883,6 +14981,8 @@ public class SavedDialog : Form {
 
 public static class DogovorApp {
     public static void Run(string here, string launch) {
+        // ошибки - в своё окно с подробностями и в oshibki.txt (до создания окон)
+        Crash.Install(here);
         try { Application.EnableVisualStyles(); } catch { }
         // главное меню: «Создать договор», «Создать справку»
         using (StartMenu m = new StartMenu(here, launch)) Application.Run(m);
@@ -15075,6 +15175,7 @@ public class StartMenu : Form {
 public class Tile : Control {
     public string Title, Sub, Note = "";
     readonly Color mark;
+    static readonly Font TitleFont = new Font("Segoe UI", 15f, FontStyle.Bold);
     bool hover;
 
     public Tile(string title, string sub, Color mark) {
@@ -15093,7 +15194,7 @@ public class Tile : Control {
         using (SolidBrush b = new SolidBrush(hover ? Color.FromArgb(246, 249, 253) : Color.White)) g.FillRectangle(b, ClientRectangle);
         using (SolidBrush b = new SolidBrush(mark)) g.FillRectangle(b, 0, 0, 8, Height);
         using (Pen p = new Pen(hover || Focused ? St.Accent : St.Border, hover || Focused ? 2f : 1f)) g.DrawRectangle(p, 1, 1, Width - 2, Height - 2);
-        TextRenderer.DrawText(g, Title, new Font("Segoe UI", 15f, FontStyle.Bold), new Point(28, 14), St.Text);
+        TextRenderer.DrawText(g, Title, TitleFont, new Point(28, 14), St.Text);
         TextRenderer.DrawText(g, Sub, St.Base, new Rectangle(30, 50, Width - 70, 22), St.Hint, TextFormatFlags.EndEllipsis);
         if (Note.Length > 0) TextRenderer.DrawText(g, Note, St.Small, new Point(30, 72), Color.FromArgb(190, 105, 0));
         // стрелка справа
@@ -17433,13 +17534,29 @@ if (-not (Test-Ready)) {
     if ($splash -ne $null) { $splash.Close(); $splash.Dispose() }
 }
 
+# ошибка запуска - в oshibki.txt рядом с программой (что за Windows, PowerShell, .NET, памяти) - его можно прислать
+function Write-Crash($what, $text) {
+    try {
+        $mem = ''
+        try { $os = Get-WmiObject Win32_OperatingSystem; $mem = ', памяти свободно ' + [int]($os.FreePhysicalMemory / 1024) + ' из ' + [int]($os.TotalVisibleMemorySize / 1024) + ' МБ' } catch { }
+        $info = 'Windows ' + [Environment]::OSVersion.Version + ', PowerShell ' + $PSVersionTable.PSVersion + ', .NET ' + [Environment]::Version + ', ' + ([IntPtr]::Size * 8) + '-битный' + $mem
+        $text = [regex]::Replace("$text", '\d{6,}', '######')
+        $line = '=== ' + (Get-Date).ToString('dd.MM.yyyy HH:mm:ss') + ' (' + $what + ") ===`r`n" + $info + "`r`n" + $text + "`r`n`r`n"
+        [IO.File]::AppendAllText((Join-Path $here 'oshibki.txt'), $line, (New-Object System.Text.UTF8Encoding($true)))
+    } catch { }
+}
+
 if (-not (Test-Ready)) {
-    [void][System.Windows.Forms.MessageBox]::Show("Не удалось подготовить программу к запуску:`n`n" + ($errors -join "`n`n") + "`n`nСфотографируйте это окно и пришлите.", 'Оформление договора - ошибка')
+    Write-Crash 'сборка' ($errors -join "`r`n`r`n")
+    [void][System.Windows.Forms.MessageBox]::Show("Не удалось подготовить программу к запуску:`n`n" + ($errors -join "`n`n") + "`n`nПодробности - в файле oshibki.txt рядом с программой. Пришлите его (или фото этого окна).", 'Оформление договора - ошибка')
     exit
 }
 
 try {
     [DogovorApp]::Run($here, $launch)
 } catch {
-    [void][System.Windows.Forms.MessageBox]::Show("$_", 'Оформление договора - ошибка')
+    $ex = $_.Exception
+    while ($ex.InnerException -ne $null) { $ex = $ex.InnerException }
+    Write-Crash 'работа' $ex.ToString()
+    [void][System.Windows.Forms.MessageBox]::Show("Ошибка: " + $ex.Message + "`n`nПодробности - в файле oshibki.txt рядом с программой. Пришлите его (или фото этого окна).", 'Оформление договора - ошибка')
 }
