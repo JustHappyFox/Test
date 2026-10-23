@@ -1902,11 +1902,12 @@ public class Heaters : Panel {
 
 // Пломбы с местом установки (для договора и для отчёта по пломбам): строка «место | номер», «+» - ещё пломба.
 // В договор: «ДСТП 1234567; ИК 2345678». Места: КК - клеммная крышка, ВА - вводной автомат,
-// ДСТП - кнопка параметризации, ИК - испытательная колодка, ТТ - трансформаторы тока
+// ДСТП - кнопка параметризации, ИК - испытательная колодка, ТТ - трансформаторы тока, ФП - фальш панель
 public class Seals : Panel {
     public static readonly string[][] Places = {
         new string[] { "ДСТП", "кнопка параметризации" }, new string[] { "ИК", "испытательная колодка" },
-        new string[] { "ТТ", "трансформаторы тока" }, new string[] { "КК", "клеммная крышка" }, new string[] { "ВА", "вводной автомат" } };
+        new string[] { "ТТ", "трансформаторы тока" }, new string[] { "ФП", "фальш панель" }, new string[] { "КК", "клеммная крышка" },
+        new string[] { "ВА", "вводной автомат" } };
     class Row {
         public Combo Place;
         public TextBox Number;
@@ -12744,7 +12745,7 @@ public class DogovorForm : Form {
         Seals other = new Seals();
         Reg("plomba_drugoe", other);
         Row(c, F("Пломба на вводном аппарате (ВА)", T("plomba_vvod", 1, "пусто - прочерк"), 1), F("на клеммной крышке (КК)", T("plomba_klemm", 1, "пусто - прочерк"), 1),
-            F("другие пломбы: место (ДСТП, ИК, ТТ) и номер, «+» - ещё", other, 2));
+            F("другие пломбы: место (ДСТП, ИК, ТТ, ФП) и номер, «+» - ещё", other, 2));
         Row(c, F("Электроплита стационарная", S("plita", "да", "нет"), 1), F("Центр. газоснабжение", S("gaz", "да", "нет"), 1),
             F("Центр. теплоснабжение", S("teplo", "да", "нет"), 1), F("Центр. горячее водоснабжение", S("gvs", "да", "нет"), 1));
 
@@ -15810,7 +15811,7 @@ public class JurForm : Form {
         body.Padding = new Padding(24, 14, 24, 14);
 
         Label intro = Para("Квартира дома, которая числится за юр лицом, переходит к гражданину. Программа будет сама брать из базы юр лиц " +
-            "(по номеру договора юр лица и адресу) номер карточки и счётчик квартиры - тип и маркировку, номер, поверку, показания, " +
+            "(договор юр лица, например 11118, -> по адресу карточка «нераспроданные квартиры», например 255 -> точки учёта 11118/255) номер карточки и счётчик квартиры - тип и маркировку, номер, поверку, показания, " +
             "а из базы физ лиц - книгу лицевых дома (по соседним квартирам) и лицевой с контрольной цифрой, проверять копию " +
             "и переносить всё в договор. Чтобы это сделать, сначала нужно узнать, как устроена база юр лиц:", St.Text);
 
@@ -15829,10 +15830,12 @@ public class JurForm : Form {
             }
         };
         study.Click += delegate { Study(); };
+        Button search = Ui.Button("Поискать базу", false);
+        search.Click += delegate { Search(); };
         jurNote.AutoSize = false;
         jurNote.Font = St.Small;
         jurNote.ForeColor = St.Hint;
-        b1.Controls.AddRange(new Control[] { l1, folder, browse, study, jurNote });
+        b1.Controls.AddRange(new Control[] { l1, folder, browse, search, study, jurNote });
 
         BoxPanel b2 = Box("2. Лицевой счёт - контрольная цифра");
         Label l2 = Para("Лицевой 045671234: 0 - приставка, 4567 - книга, 123 - квартира, последняя цифра - контрольная. Программа найдёт правило " +
@@ -15856,9 +15859,10 @@ public class JurForm : Form {
             int iw = w - 28;
             l1.SetBounds(14, 34, iw, TextHeight(l1, iw));
             int yy = l1.Bottom + 8;
-            folder.SetBounds(14, yy + 2, iw - 120 - 190 - 20, 26);
+            folder.SetBounds(14, yy + 2, iw - 110 - 150 - 190 - 28, 26);
             browse.SetBounds(folder.Right + 8, yy, 110, 32);
-            study.SetBounds(browse.Right + 10, yy, 190, 32);
+            search.SetBounds(browse.Right + 8, yy, 150, 32);
+            study.SetBounds(search.Right + 10, yy, 190, 32);
             jurNote.SetBounds(14, yy + 40, iw, 40);
             b1.SetBounds(x, y, w, jurNote.Bottom + 10); y = b1.Bottom + 12;
             l2.SetBounds(14, 34, iw, TextHeight(l2, iw));
@@ -15934,6 +15938,74 @@ public class JurForm : Form {
         });
         th.IsBackground = true;
         th.Start();
+    }
+
+    // не знаете, где база: программа смотрит ярлыки и диски, где лежат таблицы .DBF
+    public void Search() {
+        jurNote.ForeColor = St.Hint;
+        jurNote.Text = "Ищу папки с таблицами: ярлыки на рабочем столе и в «Пуске», диски... (до минуты)";
+        string fiz = memory.Get("БазаПапка", "");
+        System.Threading.Thread th = new System.Threading.Thread(delegate() {
+            List<BaseFinder.Place> found = null;
+            try { found = BaseFinder.Find(fiz, delegate(string t) { Post(delegate { jurNote.Text = t; }); }); } catch { }
+            Post(delegate {
+                if (found == null || found.Count == 0) {
+                    jurNote.Text = "Папок с таблицами не нашлось. Посмотрите ярлык программы юр лиц: правой кнопкой - «Свойства» - «Рабочая папка» или «Объект».";
+                    jurNote.ForeColor = St.Bad;
+                    return;
+                }
+                jurNote.Text = "Найдено папок с таблицами: " + found.Count + " - выберите в списке.";
+                string pick = PickPlace(found);
+                if (pick != null) { folder.Text = pick; jurNote.Text = "Папка выбрана - нажмите «Изучить базу юр лиц»."; jurNote.ForeColor = St.Good; }
+            });
+        });
+        th.SetApartmentState(System.Threading.ApartmentState.STA);
+        th.IsBackground = true;
+        th.Start();
+    }
+
+    string PickPlace(List<BaseFinder.Place> found) {
+        using (Form f = new Form()) {
+            f.Text = "Где лежат таблицы - выберите папку базы юр лиц";
+            f.Font = St.Base;
+            f.StartPosition = FormStartPosition.CenterParent;
+            f.Size = new Size(860, 480);
+            f.ShowInTaskbar = false;
+            ListView lv = new ListView();
+            lv.View = View.Details;
+            lv.FullRowSelect = true;
+            lv.HideSelection = false;
+            lv.MultiSelect = false;
+            lv.Columns.Add("Папка", 430);
+            lv.Columns.Add("Таблиц", 70);
+            lv.Columns.Add("МБ", 70);
+            lv.Columns.Add("Где нашлась", 240);
+            foreach (BaseFinder.Place p in found) {
+                ListViewItem it = new ListViewItem(new string[] { p.Folder, p.Tables.ToString(), (p.Bytes / 1048576.0).ToString("0"), p.From });
+                it.Tag = p.Folder;
+                lv.Items.Add(it);
+            }
+            if (lv.Items.Count > 0) lv.Items[0].Selected = true;
+            Label l = Ui.Caption("Ярлыки программ - вверху. Папка базы физ лиц подписана. Двойной щелчок или «Выбрать».");
+            Button ok = Ui.Button("Выбрать", true);
+            ok.DialogResult = DialogResult.OK;
+            Button cancel = Ui.Button("Отмена", false);
+            cancel.DialogResult = DialogResult.Cancel;
+            lv.DoubleClick += delegate { f.DialogResult = DialogResult.OK; f.Close(); };
+            f.Controls.AddRange(new Control[] { lv, l, ok, cancel });
+            f.Resize += delegate {
+                lv.SetBounds(12, 12, f.ClientSize.Width - 24, f.ClientSize.Height - 74);
+                l.SetBounds(12, f.ClientSize.Height - 52, f.ClientSize.Width - 260, 40);
+                ok.SetBounds(f.ClientSize.Width - 226, f.ClientSize.Height - 50, 110, 36);
+                cancel.SetBounds(f.ClientSize.Width - 108, f.ClientSize.Height - 50, 96, 36);
+            };
+            f.AcceptButton = ok;
+            f.CancelButton = cancel;
+            f.PerformLayout();
+            f.Size = new Size(861, 480);
+            if (f.ShowDialog(this) != DialogResult.OK || lv.SelectedItems.Count == 0) return null;
+            return (string)lv.SelectedItems[0].Tag;
+        }
     }
 
     void Post(MethodInvoker m) { try { if (!IsDisposed && IsHandleCreated) BeginInvoke(m); } catch { } }
@@ -16335,6 +16407,95 @@ public static class JurReport {
     }
 }
 
+// Где может лежать база юр лиц: папки с таблицами .DBF - по ярлыкам (рабочий стол, меню «Пуск») и на дисках
+// (сетевые и локальные, две ступени вглубь). Ничего не открывает и не меняет - только смотрит, где сколько таблиц.
+public static class BaseFinder {
+    public class Place {
+        public string Folder = "", From = "";
+        public int Tables;
+        public long Bytes;
+    }
+
+    public static List<Place> Find(string fizFolder, JurReport.Progress progress) {
+        Dictionary<string, Place> found = new Dictionary<string, Place>(StringComparer.OrdinalIgnoreCase);
+        DateTime until = DateTime.Now.AddSeconds(40);
+        // 1. ярлыки: папка программы и её рабочая папка (и подпапки - таблицы бывают в DATA и т.п.)
+        List<string> links = new List<string>();
+        foreach (Environment.SpecialFolder sf in new Environment.SpecialFolder[] { Environment.SpecialFolder.DesktopDirectory, Environment.SpecialFolder.CommonDesktopDirectory,
+                Environment.SpecialFolder.Programs, Environment.SpecialFolder.CommonPrograms }) {
+            try {
+                string d = Environment.GetFolderPath(sf);
+                if (d.Length > 0 && Directory.Exists(d)) links.AddRange(Directory.GetFiles(d, "*.lnk", SearchOption.AllDirectories));
+            } catch { }
+            if (links.Count > 600) break;
+        }
+        object shell = null;
+        try { shell = Activator.CreateInstance(Type.GetTypeFromProgID("WScript.Shell")); } catch { }
+        if (shell != null) {
+            foreach (string l in links) {
+                if (DateTime.Now > until) break;
+                string target = "", work = "";
+                try {
+                    object s = shell.GetType().InvokeMember("CreateShortcut", System.Reflection.BindingFlags.InvokeMethod, null, shell, new object[] { l });
+                    target = "" + s.GetType().InvokeMember("TargetPath", System.Reflection.BindingFlags.GetProperty, null, s, null);
+                    work = "" + s.GetType().InvokeMember("WorkingDirectory", System.Reflection.BindingFlags.GetProperty, null, s, null);
+                } catch { continue; }
+                string from = "ярлык «" + Path.GetFileNameWithoutExtension(l) + "»";
+                foreach (string d in new string[] { work, target.Length > 0 ? SafeDir(target) : "" }) {
+                    if (d.Length == 0) continue;
+                    Look(found, d, from, 1, until);
+                }
+            }
+        }
+        // 2. диски: папки в корне и на ступень глубже
+        foreach (DriveInfo drv in DriveInfo.GetDrives()) {
+            if (DateTime.Now > until) break;
+            try {
+                if (drv.DriveType != DriveType.Network && drv.DriveType != DriveType.Fixed) continue;
+                if (progress != null) progress("Смотрю диск " + drv.Name + " ...");
+                if (!drv.IsReady) continue;
+                foreach (string d in Directory.GetDirectories(drv.RootDirectory.FullName)) {
+                    string n = Path.GetFileName(d).ToLowerInvariant();
+                    if (n == "windows" || n.StartsWith("program") || n == "users" || n == "documents and settings" || n.StartsWith("$") || n == "system volume information") continue;
+                    if (DateTime.Now > until) break;
+                    Look(found, d, "диск " + drv.Name, 1, until);
+                }
+            } catch { }
+        }
+        List<Place> r = new List<Place>(found.Values);
+        r.RemoveAll(delegate(Place p) { return p.Tables < 3; });
+        foreach (Place p in r)
+            if (fizFolder != null && fizFolder.Length > 0 && string.Compare(Path.GetFullPath(p.Folder).TrimEnd('\\', '/'), Path.GetFullPath(fizFolder).TrimEnd('\\', '/'), StringComparison.OrdinalIgnoreCase) == 0)
+                p.From = "база физ лиц (" + p.From + ")";
+        r.Sort(delegate(Place a, Place b) {
+            bool la = a.From.StartsWith("ярлык"), lb = b.From.StartsWith("ярлык");
+            if (la != lb) return la ? -1 : 1;
+            return b.Tables.CompareTo(a.Tables);
+        });
+        return r;
+    }
+
+    static string SafeDir(string path) { try { return Path.GetDirectoryName(path) ?? ""; } catch { return ""; } }
+
+    // папка и её подпапки (depth ступеней): сколько в них таблиц
+    static void Look(Dictionary<string, Place> found, string dir, string from, int depth, DateTime until) {
+        if (DateTime.Now > until) return;
+        try {
+            if (!Directory.Exists(dir)) return;
+            string[] dbf = Places.DbfFiles(dir);
+            if (dbf.Length > 0 && !found.ContainsKey(dir)) {
+                Place p = new Place();
+                p.Folder = dir;
+                p.From = from;
+                p.Tables = dbf.Length;
+                foreach (string f in dbf) { try { p.Bytes += new FileInfo(f).Length; } catch { } }
+                found[dir] = p;
+            }
+            if (depth > 0) foreach (string sub in Directory.GetDirectories(dir)) Look(found, sub, from, depth - 1, until);
+        } catch { }
+    }
+}
+
 // Отчёты по пломбам. Партия - выданные пломбы подряд (пластиковые по 100: 4830401 ... 4830500; наклейки - сколько выдали,
 // номера вида 0012345001). Пломбы из сохранённых договоров сами встают в строки партии по номеру; что не по договору
 // или чего нет в договоре (№ задания, причина снятия, снятая пломба) - дописывается в таблице. Печать - по форме
@@ -16439,16 +16600,8 @@ public class SealBatch {
 
 // пломбы из сохранённых договоров
 public static class SealRegistry {
-    // место пломбы - как пишут в отчёте (Примечание)
-    public static string Note(string code) {
-        switch (code.ToUpperInvariant()) {
-            case "ВА": return "В.А";
-            case "КК": return "К.К";
-            case "ИК": return "И.К";
-            case "ТТ": return "Т.Т";
-            default: return code;
-        }
-    }
+    // место пломбы - как пишут в отчёте (Примечание): заглавными, без точек - ВА, КК, ДСТП, ИК, ТТ, ФП
+    public static string Note(string code) { return code.Replace(".", "").Trim().ToUpperInvariant(); }
 
     // номера в тексте поля: числа от 5 цифр («45678801, 45678802»)
     public static List<string> Numbers(string text) {
