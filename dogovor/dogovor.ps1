@@ -774,6 +774,30 @@ public class MeterType {
 
     public static bool Same(string a, string b) { return string.Compare(a.Trim(), b.Trim(), StringComparison.OrdinalIgnoreCase) == 0; }
 
+    // разрядность табло по модели: СЕ 208 - 8 разрядов (00000000), СЕ 318 - 6 (000000); не знаем - 0
+    public static int Digits(string model) {
+        string u = model.ToUpperInvariant().Replace(" ", "");
+        if (u.Contains("208")) return 8;
+        if (u.Contains("318")) return 6;
+        return 0;
+    }
+
+    // разрядность по строке типа («CE208BY S7 145.1 JR.UVFL», «CE 208 BY S51.145.1.JRQ»): модель - в начале
+    public static int DigitsOfType(string type) {
+        string u = type.Replace(" ", "");
+        return Digits(u.Length > 8 ? u.Substring(0, 8) : u);
+    }
+
+    // показания для договора и справки: не вписаны - нули по разрядности табло; одни цифры, короче табло - с нулями впереди
+    public static string Reading(string value, string model) {
+        int n = Digits(model);
+        string v = value.Trim();
+        if (n == 0) return v;
+        if (v.Length == 0) return new string('0', n);
+        foreach (char c in v) if (!char.IsDigit(c)) return v;
+        return v.Length < n ? v.PadLeft(n, '0') : v;
+    }
+
     // СЕ 1xx, 2xx - однофазные, СЕ 3xx - трёхфазные
     public static string Phase(string model) {
         string m = model.Trim().ToUpper().Replace('С', 'C').Replace('Е', 'E');
@@ -968,6 +992,7 @@ public static class Ui {
         }
         if (c is CheckBox) return Math.Max(24, c.Font.Height + 8);
         if (c is Heaters) return ((Heaters)c).NeededHeight;
+        if (c is Seals) return ((Seals)c).NeededHeight;
         if (c is PhotoStrip) return ((PhotoStrip)c).HeightFor(width);
         if (c is ComboBox) return Math.Max(((ComboBox)c).PreferredHeight, c.Height);
         return InputHeightCached;
@@ -1119,6 +1144,9 @@ public class Seg : Panel {
     readonly RadioButton[] buttons;
     public event EventHandler Changed;
     bool missing;
+    // повторное нажатие на выбранный вариант снимает выбор (не хочу выбирать ни «да», ни «нет»)
+    public bool AllowNone;
+    bool wasChecked;
 
     public Seg(params string[] options) {
         BackColor = St.Field;
@@ -1138,6 +1166,15 @@ public class Seg : Panel {
             b.Font = St.Base;
             b.Cursor = Cursors.Hand;
             b.UseVisualStyleBackColor = false;
+            b.MouseDown += delegate(object s, MouseEventArgs e) { wasChecked = ((RadioButton)s).Checked; };
+            b.KeyDown += delegate(object s, KeyEventArgs e) { if (e.KeyCode == Keys.Space) wasChecked = ((RadioButton)s).Checked; };
+            b.Click += delegate(object s, EventArgs e) {
+                RadioButton r = (RadioButton)s;
+                if (!AllowNone || !wasChecked || !r.Checked) return;
+                wasChecked = false;
+                r.Checked = false;
+                if (Changed != null) Changed(this, EventArgs.Empty);
+            };
             b.CheckedChanged += delegate(object s, EventArgs e) {
                 RadioButton r = (RadioButton)s;
                 r.ForeColor = r.Checked ? Color.White : St.Text;
@@ -1182,6 +1219,9 @@ public class Seg : Panel {
     }
 
     public RadioButton Button(int i) { return buttons[i]; }
+
+    // нажатие на вариант (как мышью) - для проверки программы
+    public void Press(int i) { wasChecked = buttons[i].Checked; buttons[i].PerformClick(); }
 
     protected override void OnEnabledChanged(EventArgs e) {
         base.OnEnabledChanged(e);
@@ -1858,6 +1898,176 @@ public class Heaters : Panel {
     static string Plain(string s) { s = s.Trim(); return s == Own ? "" : s; }
 
     static readonly Regex Pattern = new Regex(@"^(?<k>.*?)\s*-?\s*(?:(?<n>\d+)\s*шт\.?)?\s*-?\s*(?:(?<p>\d+(?:[.,]\d+)?)\s*кВт)?$", RegexOptions.IgnoreCase);
+}
+
+// Пломбы с местом установки (для договора и для отчёта по пломбам): строка «место | номер», «+» - ещё пломба.
+// В договор: «ДСТП 1234567; ИК 2345678». Места: КК - клеммная крышка, ВА - вводной автомат,
+// ДСТП - кнопка параметризации, ИК - испытательная колодка, ТТ - трансформаторы тока
+public class Seals : Panel {
+    public static readonly string[][] Places = {
+        new string[] { "ДСТП", "кнопка параметризации" }, new string[] { "ИК", "испытательная колодка" },
+        new string[] { "ТТ", "трансформаторы тока" }, new string[] { "КК", "клеммная крышка" }, new string[] { "ВА", "вводной автомат" } };
+    class Row {
+        public Combo Place;
+        public TextBox Number;
+        public Button Remove;
+    }
+    readonly List<Row> rows = new List<Row>();
+    readonly Button add = new Button();
+    bool quiet;
+    public event EventHandler Changed;
+    public event EventHandler Resized;
+
+    public Seals() {
+        BackColor = Color.Transparent;
+        add.Text = "+";
+        add.Font = St.Bold;
+        add.FlatStyle = FlatStyle.Flat;
+        add.FlatAppearance.BorderColor = St.Accent;
+        add.ForeColor = St.Accent;
+        add.BackColor = Color.White;
+        add.UseVisualStyleBackColor = false;
+        add.Cursor = Cursors.Hand;
+        add.Click += delegate { AddRow(); Relayout(); rows[rows.Count - 1].Place.Focus(); };
+        Controls.Add(add);
+        AddRow();
+    }
+
+    int RowH { get { return Ui.InputHeightCached; } }
+    public int NeededHeight { get { return rows.Count * (RowH + 6) - 6; } }
+
+    static List<string> PlaceItems() {
+        List<string> l = new List<string>();
+        foreach (string[] p in Places) l.Add(p[0] + " - " + p[1]);
+        return l;
+    }
+
+    Row AddRow() {
+        Row r = new Row();
+        r.Place = new Combo(true, false);
+        r.Place.SetItems(PlaceItems());
+        r.Number = Ui.Text(1);
+        r.Remove = new Button();
+        r.Remove.Text = "×";
+        r.Remove.Font = St.Bold;
+        r.Remove.FlatStyle = FlatStyle.Flat;
+        r.Remove.FlatAppearance.BorderColor = St.InputBorder;
+        r.Remove.ForeColor = St.Hint;
+        r.Remove.BackColor = Color.White;
+        r.Remove.UseVisualStyleBackColor = false;
+        r.Remove.Cursor = Cursors.Hand;
+        r.Remove.TabStop = false;
+        Row row = r;
+        // из списка «ДСТП - кнопка параметризации» в поле остаётся только «ДСТП»
+        r.Place.SelectedIndexChanged += delegate {
+            if (quiet) return;
+            string t = r.Place.Text;
+            int d = t.IndexOf(" - ");
+            if (d > 0) r.Place.BeginInvoke((MethodInvoker)delegate { quiet = true; try { row.Place.Text = t.Substring(0, d); } finally { quiet = false; } Fire(); row.Number.Focus(); });
+            Fire();
+        };
+        r.Place.TextChanged += delegate { Fire(); };
+        r.Number.TextChanged += delegate { Fire(); };
+        r.Remove.Click += delegate { RemoveRow(row); };
+        foreach (Control c in new Control[] { r.Place, r.Number }) {
+            Control cc = c;
+            cc.Enter += delegate { cc.BackColor = St.Focus; };
+            cc.Leave += delegate { cc.BackColor = Color.White; };
+        }
+        rows.Add(r);
+        Controls.Add(r.Place);
+        Controls.Add(r.Number);
+        Controls.Add(r.Remove);
+        return r;
+    }
+
+    void RemoveRow(Row r) {
+        if (rows.Count == 1) {
+            quiet = true;
+            try { r.Place.Text = ""; r.Number.Text = ""; } finally { quiet = false; }
+        } else {
+            rows.Remove(r);
+            foreach (Control c in new Control[] { r.Place, r.Number, r.Remove }) { Controls.Remove(c); c.Dispose(); }
+            Relayout();
+        }
+        Fire();
+    }
+
+    void Relayout() {
+        PerformLayout();
+        if (Resized != null) Resized(this, EventArgs.Empty);
+    }
+
+    void Fire() { if (!quiet && Changed != null) Changed(this, EventArgs.Empty); }
+
+    protected override void OnLayout(LayoutEventArgs e) {
+        base.OnLayout(e);
+        if (rows == null || add == null) return;
+        int h = RowH, gap = 6, w = ClientSize.Width;
+        int bw = h, pw = 96;
+        int nw = Math.Max(60, w - pw - bw * 2 - gap * 3);
+        for (int i = 0; i < rows.Count; i++) {
+            Row r = rows[i];
+            int y = i * (h + gap), x = 0;
+            r.Place.SetBounds(x, y, pw, h); x += pw + gap;
+            r.Number.SetBounds(x, y, nw, h); x += nw + gap;
+            r.Remove.SetBounds(x, y, bw, h); x += bw + gap;
+            if (i == rows.Count - 1) add.SetBounds(x, y, bw, h);
+        }
+    }
+
+    // место - короткое обозначение заглавными («дстп» -> «ДСТП»)
+    static string Code(string s) {
+        s = s.Trim();
+        int d = s.IndexOf(" - ");
+        if (d > 0) s = s.Substring(0, d);
+        foreach (string[] p in Places) if (string.Compare(p[0], s, StringComparison.OrdinalIgnoreCase) == 0) return p[0];
+        return s;
+    }
+
+    public string Value {
+        get {
+            List<string> parts = new List<string>();
+            foreach (Row r in rows) {
+                string p = Code(r.Place.Text), n = r.Number.Text.Trim();
+                if (p.Length == 0 && n.Length == 0) continue;
+                parts.Add((p + " " + n).Trim());
+            }
+            return string.Join("; ", parts.ToArray());
+        }
+        set {
+            quiet = true;
+            try {
+                while (rows.Count > 1) { Row r = rows[rows.Count - 1]; rows.Remove(r); foreach (Control c in new Control[] { r.Place, r.Number, r.Remove }) { Controls.Remove(c); c.Dispose(); } }
+                rows[0].Place.Text = "";
+                rows[0].Number.Text = "";
+                bool used = false;
+                foreach (string[] item in Parse(value)) {
+                    Row r = used ? AddRow() : rows[0];
+                    used = true;
+                    r.Place.Text = item[0];
+                    r.Number.Text = item[1];
+                }
+            } finally { quiet = false; }
+            Relayout();
+        }
+    }
+
+    // «ДСТП 1234567; ИК 2345678» -> [место, номер]; старая запись без места - только номер
+    public static List<string[]> Parse(string value) {
+        List<string[]> r = new List<string[]>();
+        foreach (string part in (value ?? "").Split(new char[] { ';', '\n' })) {
+            string t = part.Trim().Trim(',');
+            if (t.Length == 0) continue;
+            int sp = t.IndexOf(' ');
+            string first = sp > 0 ? t.Substring(0, sp) : t, code = Code(first);
+            bool known = false;
+            foreach (string[] p in Places) if (p[0] == code) known = true;
+            if (known) r.Add(new string[] { code, sp > 0 ? t.Substring(sp + 1).Trim() : "" });
+            else r.Add(new string[] { "", t });
+        }
+        return r;
+    }
 }
 
 // Машиночитаемая зона паспорта (две строки по 44 знака с «<<<» внизу страницы с фото): своё распознавание,
@@ -12139,7 +12349,7 @@ public class DogovorForm : Form {
     int lastMeterIdx;
     string certWhere = "";
     bool certSure;
-    Button phoneButton, photoAdd, photoFolder;
+    Button phoneButton, photoAdd, photoFolder, smsFromTel;
     PhotoViewer viewer;
     bool phoneBusy;
     int photoGen;                                    // меняется с договором: ответы по фото прошлого договора не нужны
@@ -12230,6 +12440,15 @@ public class DogovorForm : Form {
 
     public StartMenu Home;                           // главное меню (нет - окно договора само по себе, как раньше)
     SpravkaForm ownSpravka;
+    CheckBox withSpravka;                            // сохранять вместе с договором и справку
+
+    // справка вместе с договором: заполняется из договора и сохраняется сама (без окна справки)
+    string SpravkaAlongside(bool openWord) {
+        using (SpravkaForm f = new SpravkaForm(here)) {
+            f.FromContract(Data());
+            return f.Save(openWord, false);
+        }
+    }
 
     public static string Folder(string here, Memory m) {
         string d = m.Get("ПапкаДоговоров", "");
@@ -12280,6 +12499,8 @@ public class DogovorForm : Form {
 
     Seg S(string key, params string[] options) {
         Seg s = new Seg(options);
+        // да/нет, согласен/отказ и т.п. - выбор снимается повторным нажатием; число счётчиков - всегда выбрано
+        s.AllowNone = key != "schetchikov";
         Reg(key, s);
         return s;
     }
@@ -12310,6 +12531,7 @@ public class DogovorForm : Form {
         else if (c is CheckBox) ((CheckBox)c).CheckedChanged += h;
         else if (c is DateBox) ((DateBox)c).ValueChanged += h;
         else if (c is Heaters) { ((Heaters)c).Changed += h; ((Heaters)c).Resized += delegate { LayoutCards(); }; }
+        else if (c is Seals) { ((Seals)c).Changed += h; ((Seals)c).Resized += delegate { LayoutCards(); }; }
         else c.TextChanged += h;
         // поле, в котором курсор, - светло-жёлтое: видно, где печатаешь
         if (c is TextBox || c is ComboBox) {
@@ -12339,6 +12561,7 @@ public class DogovorForm : Form {
         if (c is CheckBox) return ((CheckBox)c).Checked ? "1" : "";
         if (c is DateBox) return ((DateBox)c).Text2;
         if (c is Heaters) return ((Heaters)c).Value;
+        if (c is Seals) return ((Seals)c).Value;
         return c.Text.Trim();
     }
 
@@ -12353,6 +12576,7 @@ public class DogovorForm : Form {
             if (DateTime.TryParseExact(v, "dd.MM.yyyy", CultureInfo.InvariantCulture, DateTimeStyles.None, out d)) ((DateBox)c).Value = d;
         } else if (c is Combo) ((Combo)c).Value = v;
         else if (c is Heaters) ((Heaters)c).Value = v;
+        else if (c is Seals) ((Seals)c).Value = v;
         else c.Text = v;
     }
 
@@ -12444,7 +12668,7 @@ public class DogovorForm : Form {
         "fio=42", "potr_inic=18", "lichny=17", "telefon=18",
         "obekt=34", "moshn=8", "moshn_otopl=8", "np_tip=7", "np=28", "selsovet=18", "kadastr=22", "ulica_tip=7", "ulica=28",
         "dom=8", "korp=6", "kv=6", "dopusk_nom=12", "dopusk_data=14",
-        "plomba_vvod=16", "plomba_klemm=16", "plomba_drugoe=24", "plita=12", "gaz=12", "teplo=12", "gvs=12",
+        "plomba_vvod=18", "plomba_klemm=18", "plomba_drugoe=36", "plita=12", "gaz=12", "teplo=12", "gvs=12",
         "sms=22", "sms_tel=18", "utratil_nom=10", "utratil_ot=14",
         "pu_model=12", "pu_korpus=9", "pu_modif=24", "pu_zav=16", "pu_poverka=11", "pu_pokaz=14", "pu_faz=12", "pu_askue=12",
         "pu_plomba_gp=14", "pu_prinadl=22", "pu_modem=14", "pu_vvod_tip=16", "pu_vvod_i=8", "pu_zasch_tip=16", "pu_zasch_i=8",
@@ -12516,13 +12740,23 @@ public class DogovorForm : Form {
         cardOf["schetchikov"] = c;
 
         c = NewCard("Пломбы и оборудование", "", 4);
-        Row(c, F("Пломба на вводном аппарате", T("plomba_vvod", 1, "пусто - прочерк"), 1), F("на клеммной крышке", T("plomba_klemm", 1, "пусто - прочерк"), 1),
-            F("другие пломбы", T("plomba_drugoe", 1, "например ДСТП 1234567"), 2));
+        // места пломб - для отчёта по пломбам: ВА - вводной автомат, КК - клеммная крышка, другие - ДСТП, ИК, ТТ
+        Seals other = new Seals();
+        Reg("plomba_drugoe", other);
+        Row(c, F("Пломба на вводном аппарате (ВА)", T("plomba_vvod", 1, "пусто - прочерк"), 1), F("на клеммной крышке (КК)", T("plomba_klemm", 1, "пусто - прочерк"), 1),
+            F("другие пломбы: место (ДСТП, ИК, ТТ) и номер, «+» - ещё", other, 2));
         Row(c, F("Электроплита стационарная", S("plita", "да", "нет"), 1), F("Центр. газоснабжение", S("gaz", "да", "нет"), 1),
             F("Центр. теплоснабжение", S("teplo", "да", "нет"), 1), F("Центр. горячее водоснабжение", S("gvs", "да", "нет"), 1));
 
         c = NewCard("Дополнительно", "льгота, особые условия, СМС", 4);
-        Row(c, F("СМС-оповещение", S("sms", "согласен(а)", "отказ"), 1), F("Номер для СМС", T("sms_tel", 1, "+375 ..."), 1), F("Оформлена льгота", T("lgota", 1, "пусто - прочерк"), 2));
+        smsFromTel = Ui.Button("= телефон потребителя", false);
+        smsFromTel.Name = "smsFromTel";
+        smsFromTel.Click += delegate { if (V("telefon").Length > 0) { SetV("sms_tel", V("telefon")); FocusField(inp["sms_tel"]); } };
+        tip.SetToolTip(smsFromTel, "Взять номер из реквизитов: поле «Телефон» в разделе «Потребитель»");
+        Cell smsCell = F(" ", smsFromTel, 1);
+        smsCell.W = 22;
+        Row(c, F("СМС-оповещение", S("sms", "согласен(а)", "отказ"), 1), F("Номер для СМС", T("sms_tel", 1, "+375 ..."), 1), smsCell,
+            F("Оформлена льгота", T("lgota", 1, "пусто - прочерк"), 2));
         Row(c, F("Особые условия", T("osobye", 2, null), 4));
         Cell utr = F(" ", X("utratil", "Считать утратившим силу приложение к договору"), 2);
         utr.W = 46;
@@ -12710,6 +12944,16 @@ public class DogovorForm : Form {
         sp.Anchor = AnchorStyles.Right | AnchorStyles.Top;
         sp.Click += delegate { MakeSpravka(); };
         tip.SetToolTip(sp, "Справка (данные прибора учёта) по этому договору: лицевой, Ф.И.О., адрес и счётчики возьмутся отсюда");
+        withSpravka = new CheckBox();
+        withSpravka.Text = "+ справка";
+        withSpravka.Font = St.Base;
+        withSpravka.ForeColor = St.Text;
+        withSpravka.Cursor = Cursors.Hand;
+        withSpravka.Size = new Size(104, 38);
+        withSpravka.Anchor = AnchorStyles.Right | AnchorStyles.Top;
+        withSpravka.Checked = memory.Get("СправкаСДоговором", "") == "1";
+        withSpravka.CheckedChanged += delegate { memory.Values["СправкаСДоговором"] = withSpravka.Checked ? "1" : ""; memory.Save(); };
+        tip.SetToolTip(withSpravka, "Вместе с договором сохранить и справку (данные прибора учёта) - заполнится из договора, в папку «Справки»");
         Button create = Ui.Button("Сохранить договор", true);
         create.Size = new Size(210, 40);
         create.Anchor = AnchorStyles.Right | AnchorStyles.Top;
@@ -12724,11 +12968,12 @@ public class DogovorForm : Form {
         p.Controls.Add(nw);
         p.Controls.Add(open);
         p.Controls.Add(sp);
+        p.Controls.Add(withSpravka);
         p.Controls.Add(create);
         p.Controls.Add(status);
         p.Resize += delegate {
-            // узкое окно (рядом открыто фото) - короткие надписи
-            bool narrow = p.ClientSize.Width < 900;
+            // не очень широкое окно (или рядом открыто фото) - короткие надписи, чтобы осталось место для «не заполнено»
+            bool narrow = p.ClientSize.Width < 1150;
             nw.Text = narrow ? "Новый договор" : "Создать новый договор";
             nw.Width = narrow ? 140 : 200;
             open.Text = narrow ? "Открыть…" : "Открыть сохранённый…";
@@ -12737,7 +12982,8 @@ public class DogovorForm : Form {
             create.Location = new Point(p.ClientSize.Width - 24 - create.Width, 13);
             sp.Text = narrow ? "Справка" : "Создать справку";
             sp.Width = narrow ? 90 : 160;
-            sp.Location = new Point(create.Left - 10 - sp.Width, 14);
+            withSpravka.Location = new Point(create.Left - 8 - withSpravka.Width, 14);
+            sp.Location = new Point(withSpravka.Left - 10 - sp.Width, 14);
             status.SetBounds(open.Right + (narrow ? 14 : 24), 14, Math.Max(10, sp.Left - open.Right - (narrow ? 28 : 48)), 38);
             status.Font = narrow || status.Width < 300 ? St.Small : St.Base;
         };
@@ -12944,7 +13190,8 @@ public class DogovorForm : Form {
         for (int i = 1; i <= 2; i++)
             if (photoMeter[i - 1] != null && (key == "pu" + i + "_zav" || key == "pu" + i + "_tip" || key == "pu" + i + "_pokaz" || key == "pu" + i + "_poverka")) MeterNote(i);
         if (key == "adres" || key == "np_tip" || key == "np" || key == "ulica_tip" || key == "ulica" || key == "dom" || key == "korp" || key == "kv") Recheck(false, true);
-        if (key.EndsWith("tarif") || key.EndsWith("vvod_tip") || key == "schetchikov" || key == "sms" || key == "utratil" || key == "plita") Enable();
+        if (key.EndsWith("tarif") || key.EndsWith("vvod_tip") || key == "schetchikov" || key == "sms" || key == "utratil" || key == "plita"
+            || key == "telefon" || key.EndsWith("_model") || key.EndsWith("_tip")) Enable();
         RefreshState();
     }
 
@@ -12954,6 +13201,9 @@ public class DogovorForm : Form {
         meter2.BackColor = two ? Color.White : St.Disabled;
         meter2.Invalidate();
         inp["sms_tel"].Enabled = V("sms") == "согласен(а)";
+        if (smsFromTel != null) smsFromTel.Enabled = V("sms") == "согласен(а)" && V("telefon").Length > 0;
+        PokazCue(1);
+        PokazCue(2);
         inp["utratil_nom"].Enabled = inp["utratil_ot"].Enabled = V("utratil") == "1";
         for (int i = 1; i <= 2; i++) inp["pu" + i + "_vvod_i"].Enabled = !NoInput(V("pu" + i + "_vvod_tip"));
     }
@@ -13392,6 +13642,20 @@ public class DogovorForm : Form {
         return char.ToLower(s[0]) + s.Substring(1);
     }
 
+    string ModelOf(int i) {
+        string m = V("pu" + i + "_model");
+        if (m.Length > 0) return m;
+        int n = MeterType.DigitsOfType(V("pu" + i + "_tip"));
+        return n == 8 ? "208" : n == 6 ? "318" : "";
+    }
+
+    // подсказка в пустом поле показаний: сколько разрядов у табло этого счётчика
+    void PokazCue(int i) {
+        int n = MeterType.Digits(ModelOf(i));
+        Control c = inp["pu" + i + "_pokaz"];
+        if (c.IsHandleCreated) Ui.Cue(c, n > 0 ? new string('0', n) + " (" + n + " разрядов)" : "");
+    }
+
     public Dictionary<string, string> Compose() {
         Dictionary<string, string> v = new Dictionary<string, string>();
         v["ДАТА"] = V("data");
@@ -13460,7 +13724,8 @@ public class DogovorForm : Form {
             v[f + "МЕСТО"] = V(p + "mesto");
             v[f + "ПРИНАДЛ"] = V(p + "prinadl");
             v[f + "МОДЕМ"] = V(p + "modem");
-            v[f + "ПОКАЗ"] = V(p + "pokaz");
+            // не вписаны - нули по разрядности табло (СЕ 208 - 8, СЕ 318 - 6)
+            v[f + "ПОКАЗ"] = MeterType.Reading(V(p + "pokaz"), ModelOf(i));
             v[f + "ВВОД_ТИП"] = V(p + "vvod_tip");
             v[f + "ВВОД_I"] = NoInput(V(p + "vvod_tip")) ? Line(16, '-') : V(p + "vvod_i");
             v[f + "ЗАЩ_ТИП"] = V(p + "zasch_tip");
@@ -14169,6 +14434,10 @@ public class DogovorForm : Form {
             DropAuto();
             head.Text = Title();
             headSub.Text = "сохранён " + DateTime.Now.ToString("dd.MM.yyyy HH:mm") + " - " + docx;
+            if (withSpravka != null && withSpravka.Checked) {
+                string sp = SpravkaAlongside(openWord);
+                if (sp != null) headSub.Text += "; справка - " + sp;
+            }
             headSub.ForeColor = St.Hint;
             if (missing.Count > 0)
                 MessageBox.Show(this, "В шаблоне есть поля, которые программа не знает (остались пустыми):\n" + string.Join(", ", missing.ToArray()), Text);
@@ -14625,7 +14894,8 @@ public class StartMenu : Form {
     readonly string here;
     DogovorForm dog;
     SpravkaForm spr;
-    readonly Tile dogTile, sprTile;
+    readonly Tile dogTile, sprTile, jurTile;
+    JurForm jur;
 
     public StartMenu(string here, string launch) {
         this.here = here;
@@ -14634,7 +14904,7 @@ public class StartMenu : Form {
         Font = St.Base;
         BackColor = St.Back;
         StartPosition = FormStartPosition.CenterScreen;
-        ClientSize = new Size(640, 470);
+        ClientSize = new Size(640, 580);
         FormBorderStyle = FormBorderStyle.FixedSingle;
         MaximizeBox = false;
         KeyPreview = true;
@@ -14666,8 +14936,12 @@ public class StartMenu : Form {
         sprTile = new Tile("Создать справку", "данные прибора учёта - из договора или вручную", St.TintOf("Счётчики").Mark);
         sprTile.SetBounds(34, 244, 572, 96);
         sprTile.Click += delegate { OpenSpravka(this, null); };
+        jurTile = new Tile("Перевод из юр в физ", "квартира юр лица -> договор с гражданином: счётчик, карточка, лицевой", St.TintOf("Объект").Mark);
+        jurTile.SetBounds(34, 356, 572, 96);
+        jurTile.Click += delegate { OpenJur(); };
         Controls.Add(dogTile);
         Controls.Add(sprTile);
+        Controls.Add(jurTile);
 
         int x = 34;
         foreach (string[] l in new string[][] { new string[] { "Папка с договорами", "d" }, new string[] { "Папка со справками", "s" }, new string[] { "Справочники (списки)", "l" } }) {
@@ -14676,7 +14950,7 @@ public class StartMenu : Form {
             link.Font = St.Base;
             link.AutoSize = true;
             link.LinkColor = St.Accent;
-            link.Location = new Point(x, 372);
+            link.Location = new Point(x, 484);
             string what = l[1];
             link.LinkClicked += delegate { OpenPlace(what); };
             Controls.Add(link);
@@ -14687,7 +14961,7 @@ public class StartMenu : Form {
         keys.Font = St.Small;
         keys.ForeColor = St.Hint;
         keys.AutoSize = true;
-        keys.Location = new Point(36, 420);
+        keys.Location = new Point(36, 532);
         Controls.Add(keys);
 
         KeyDown += delegate(object s, KeyEventArgs e) {
@@ -14746,6 +15020,14 @@ public class StartMenu : Form {
         if (from != spr) from.Hide();
     }
 
+    public void OpenJur() {
+        if (jur == null || jur.IsDisposed) { jur = new JurForm(here); jur.Home = this; }
+        jur.Show();
+        if (jur.WindowState == FormWindowState.Minimized) jur.WindowState = FormWindowState.Normal;
+        jur.Activate();
+        Hide();
+    }
+
     // окно договора или справки закрыли - показать то, откуда пришли
     public void Return(Form to) {
         if (to == null || to.IsDisposed || to == this) { RefreshTiles(); Show(); Activate(); return; }
@@ -14770,6 +15052,7 @@ public class StartMenu : Form {
     // для проверки без окон
     public DogovorForm Dogovor { get { return dog; } }
     public SpravkaForm Spravka { get { return spr; } }
+    public JurForm Jur { get { return jur; } }
 }
 
 // Большая кнопка меню: название, пояснение, цветная полоска слева
@@ -15199,6 +15482,8 @@ public class SpravkaForm : Form {
         return r;
     }
 
+    static string Up(string s) { return s.Length == 0 ? s : char.ToUpper(s[0]) + s.Substring(1); }
+
     static string First(List<string> l) { return l.Count > 0 ? l[0] : ""; }
 
     static string Get(Dictionary<string, string> d, string k) {
@@ -15214,8 +15499,8 @@ public class SpravkaForm : Form {
             SetV("ls", ls.Length > 0 ? BaseLink.Nab(ls) : "");
             SetV("fio", Get(d, "fio"));
             SetV("tel", Get(d, "telefon"));
-            fNp = Get(d, "np");
-            fUlica = Get(d, "ulica");
+            fNp = Up(Get(d, "np"));
+            fUlica = Up(Get(d, "ulica"));
             fDom = Get(d, "dom");
             fKv = Get(d, "kv");
             fromAdres = AddressOf(d);
@@ -15249,8 +15534,8 @@ public class SpravkaForm : Form {
     // «д. Копище, ул. Авиационная, д. 15, кв. 83» - из полей адреса договора; нет полей - строка адреса без сельсовета
     static string AddressOf(Dictionary<string, string> d) {
         List<string> p = new List<string>();
-        if (Get(d, "np").Length > 0) p.Add((Get(d, "np_tip") + " " + Get(d, "np")).Trim());
-        if (Get(d, "ulica").Length > 0) p.Add((Get(d, "ulica_tip") + " " + Get(d, "ulica")).Trim());
+        if (Get(d, "np").Length > 0) p.Add((Get(d, "np_tip") + " " + Up(Get(d, "np"))).Trim());
+        if (Get(d, "ulica").Length > 0) p.Add((Get(d, "ulica_tip") + " " + Up(Get(d, "ulica"))).Trim());
         if (Get(d, "dom").Length > 0) p.Add("д. " + Get(d, "dom"));
         if (Get(d, "korp").Length > 0) p.Add("корп. " + Get(d, "korp"));
         if (Get(d, "kv").Length > 0) p.Add("кв. " + Get(d, "kv"));
@@ -15300,12 +15585,13 @@ public class SpravkaForm : Form {
         bool two = V("n") == "2 счётчика";
         v["ТИП"] = V("pu1_tip");
         v["НОМЕР"] = V("pu1_zav");
-        v["ПОКАЗАНИЯ"] = V("pu1_pokaz");
+        // не вписаны - нули по разрядности табло (СЕ 208 - 8, СЕ 318 - 6)
+        v["ПОКАЗАНИЯ"] = Reading(1);
         v["ПОВЕРКА"] = V("pu1_pov");
         // второго счётчика нет - строка таблицы убирается (поле «¶ТИП2» пустое)
         v["ТИП2"] = two ? (V("pu2_tip").Length > 0 ? V("pu2_tip") : "-") : "";
         v["НОМЕР2"] = two ? V("pu2_zav") : "";
-        v["ПОКАЗАНИЯ2"] = two ? V("pu2_pokaz") : "";
+        v["ПОКАЗАНИЯ2"] = two ? Reading(2) : "";
         v["ПОВЕРКА2"] = two ? V("pu2_pov") : "";
         v["СВИДЕТЕЛЬСТВО"] = V("svid").Length > 0 ? V("svid") : "__________";
         v["ВЛАДЕЛЬЦЫ"] = V("vlad").Length > 0 ? V("vlad") : "__ владелец";
@@ -15319,6 +15605,11 @@ public class SpravkaForm : Form {
         v["ИНЖЕНЕР"] = V("inzh");
         v["НАЧАЛЬНИК"] = V("nach");
         return v;
+    }
+
+    string Reading(int i) {
+        int n = MeterType.DigitsOfType(V("pu" + i + "_tip"));
+        return MeterType.Reading(V("pu" + i + "_pokaz"), n == 8 ? "208" : n == 6 ? "318" : "");
     }
 
     static string DigitsOnly(string s) {
@@ -15446,6 +15737,585 @@ public class SpravkaForm : Form {
             MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
         if (r == DialogResult.Cancel) return false;
         if (r == DialogResult.Yes) return Save(false, true) != null;
+        return true;
+    }
+}
+
+// «Перевод из юр в физ»: квартира многоквартирного дома, которая числится за юр лицом (нераспроданная), переходит
+// к гражданину. Нужно: из базы юр лиц - данные счётчика квартиры (тип, номер, поверка, показания) и номер карточки,
+// из базы физ лиц - книга лицевых дома (по соседним квартирам), лицевой 0 + книга + квартира + контрольная цифра.
+// Строение базы юр лиц пока не известно - сначала программа его изучает (отчёт без данных абонентов),
+// а контрольную цифру лицевого находит по лицевым физ базы.
+public class JurForm : Form {
+    readonly string here;
+    readonly Memory memory;
+    public StartMenu Home;
+    readonly TextBox folder = Ui.Text(1), first8 = Ui.Text(1);
+    readonly Label jurNote = new Label(), ruleNote = new Label(), lsOut = new Label();
+    readonly Button study = Ui.Button("Изучить базу юр лиц", true), learn = Ui.Button("Найти правило по физ базе", true);
+    CheckRule rule;
+
+    string ReportFile { get { return Path.Combine(here, "otchet_jur.txt"); } }
+
+    public JurForm(string here) {
+        this.here = here;
+        memory = Memory.For(Path.Combine(here, "nastroiki.txt"));
+        Text = "Перевод из юр в физ";
+        Font = St.Base;
+        BackColor = St.Back;
+        StartPosition = FormStartPosition.CenterScreen;
+        ClientSize = new Size(900, 690);
+        MinimumSize = new Size(760, 600);
+        try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
+
+        Panel top = new Panel();
+        top.Dock = DockStyle.Top;
+        top.Height = 92;
+        top.BackColor = St.Nav;
+        LinkLabel back = new LinkLabel();
+        back.Text = "← Назад в меню";
+        back.LinkColor = St.NavText;
+        back.ActiveLinkColor = Color.White;
+        back.Font = St.Base;
+        back.AutoSize = true;
+        back.Location = new Point(24, 10);
+        back.LinkClicked += delegate { GoBack(); };
+        Label title = new Label();
+        title.Text = "Перевод из юр в физ";
+        title.Font = new Font("Segoe UI", 16f, FontStyle.Bold);
+        title.ForeColor = Color.White;
+        title.AutoSize = true;
+        title.Location = new Point(22, 36);
+        top.Controls.Add(back);
+        top.Controls.Add(title);
+
+        Panel body = new Panel();
+        body.Dock = DockStyle.Fill;
+        body.AutoScroll = true;
+        body.Padding = new Padding(24, 14, 24, 14);
+
+        Label intro = Para("Квартира дома, которая числится за юр лицом, переходит к гражданину. Программа будет сама брать из базы юр лиц " +
+            "(по номеру договора юр лица и адресу) номер карточки и счётчик квартиры - тип и маркировку, номер, поверку, показания, " +
+            "а из базы физ лиц - книгу лицевых дома (по соседним квартирам) и лицевой с контрольной цифрой, проверять копию " +
+            "и переносить всё в договор. Чтобы это сделать, сначала нужно узнать, как устроена база юр лиц:", St.Text);
+
+        BoxPanel b1 = Box("1. База юр лиц - изучить строение");
+        Label l1 = Para("Укажите папку базы юр лиц и нажмите «Изучить». Программа только читает базу и пишет отчёт otchet_jur.txt (рядом с программой): " +
+            "какие в ней таблицы и поля, как выглядят значения (буквы - А/а, цифры - 9) и индексы. Данных абонентов в отчёте нет. Пришлите этот файл " +
+            "(или его фото) - по нему будет сделан поиск карточки, квартиры и счётчика.", St.Caption);
+        folder.Text = memory.Get("ЮрБазаПапка", "");
+        Ui.Cue(folder, @"например O:\BASAJUR");
+        Button browse = Ui.Button("Обзор…", false);
+        browse.Click += delegate {
+            using (FolderBrowserDialog d = new FolderBrowserDialog()) {
+                d.Description = "Папка базы юр лиц (где лежат её таблицы .DBF)";
+                if (Directory.Exists(folder.Text)) d.SelectedPath = folder.Text;
+                if (d.ShowDialog(this) == DialogResult.OK) folder.Text = d.SelectedPath;
+            }
+        };
+        study.Click += delegate { Study(); };
+        jurNote.AutoSize = false;
+        jurNote.Font = St.Small;
+        jurNote.ForeColor = St.Hint;
+        b1.Controls.AddRange(new Control[] { l1, folder, browse, study, jurNote });
+
+        BoxPanel b2 = Box("2. Лицевой счёт - контрольная цифра");
+        Label l2 = Para("Лицевой 045671234: 0 - приставка, 4567 - книга, 123 - квартира, последняя цифра - контрольная. Программа найдёт правило " +
+            "этой цифры по лицевым базы физ лиц (читает около 3000 записей вразброс, ничего не меняет) и проверит, ко скольким лицевым оно подходит.", St.Caption);
+        learn.Click += delegate { Learn(); };
+        ruleNote.AutoSize = false;
+        ruleNote.Font = St.Base;
+        ruleNote.ForeColor = St.Hint;
+        Label cap = Ui.Caption("Проверка: первые 8 цифр лицевого");
+        Ui.Cue(first8, "04567123");
+        first8.TextChanged += delegate { ShowLs(); };
+        lsOut.AutoSize = false;
+        lsOut.Font = St.Bold;
+        lsOut.ForeColor = St.Text;
+        b2.Controls.AddRange(new Control[] { l2, learn, ruleNote, cap, first8, lsOut });
+
+        body.Controls.AddRange(new Control[] { intro, b1, b2 });
+        body.Resize += delegate {
+            int w = Math.Max(500, body.ClientSize.Width - 48), x = 24, y = 14;
+            intro.SetBounds(x, y, w, TextHeight(intro, w)); y = intro.Bottom + 12;
+            int iw = w - 28;
+            l1.SetBounds(14, 34, iw, TextHeight(l1, iw));
+            int yy = l1.Bottom + 8;
+            folder.SetBounds(14, yy + 2, iw - 120 - 190 - 20, 26);
+            browse.SetBounds(folder.Right + 8, yy, 110, 32);
+            study.SetBounds(browse.Right + 10, yy, 190, 32);
+            jurNote.SetBounds(14, yy + 40, iw, 40);
+            b1.SetBounds(x, y, w, jurNote.Bottom + 10); y = b1.Bottom + 12;
+            l2.SetBounds(14, 34, iw, TextHeight(l2, iw));
+            yy = l2.Bottom + 8;
+            learn.SetBounds(14, yy, 240, 32);
+            ruleNote.SetBounds(learn.Right + 14, yy - 4, iw - 254, 44);
+            cap.SetBounds(14, yy + 50, 300, 18);
+            first8.SetBounds(14, yy + 70, 160, 26);
+            lsOut.SetBounds(186, yy + 72, iw - 172, 24);
+            b2.SetBounds(x, y, w, lsOut.Bottom + 14);
+        };
+        Controls.Add(body);
+        Controls.Add(top);
+
+        rule = CheckRule.Load(memory.Get("ЛицевойПравило", ""));
+        ShowRule(null);
+        FormClosing += delegate(object s, FormClosingEventArgs e) {
+            if (Home != null && e.CloseReason == CloseReason.UserClosing) { e.Cancel = true; GoBack(); }
+        };
+        KeyPreview = true;
+        KeyDown += delegate(object s, KeyEventArgs e) { if (e.KeyCode == Keys.Escape) { e.SuppressKeyPress = true; GoBack(); } };
+    }
+
+    static int TextHeight(Label l, int w) {
+        return TextRenderer.MeasureText(l.Text, l.Font, new Size(w, 0), TextFormatFlags.WordBreak).Height + 4;
+    }
+
+    static Label Para(string text, Color color) {
+        Label l = new Label();
+        l.Text = text;
+        l.Font = St.Base;
+        l.ForeColor = color;
+        l.AutoSize = false;
+        return l;
+    }
+
+    BoxPanel Box(string title) {
+        BoxPanel b = new BoxPanel();
+        b.Title = title;
+        b.Mark = St.TintOf("Счётчики").Mark;
+        return b;
+    }
+
+    public void GoBack() {
+        if (Home == null) return;
+        Hide();
+        Home.Return(null);
+    }
+
+    // ---------- база юр лиц: строение ----------
+
+    public void Study() {
+        string dir = folder.Text.Trim();
+        if (!Directory.Exists(dir)) { jurNote.Text = "Нет такой папки (или нет доступа): " + dir; jurNote.ForeColor = St.Bad; return; }
+        memory.Values["ЮрБазаПапка"] = dir;
+        memory.Save();
+        study.Enabled = false;
+        jurNote.ForeColor = St.Hint;
+        jurNote.Text = "Изучаю базу...";
+        string file = ReportFile;
+        System.Threading.Thread th = new System.Threading.Thread(delegate() {
+            string err = null;
+            int tables = 0;
+            try { tables = JurReport.Write(dir, file, delegate(string t) { Post(delegate { jurNote.Text = t; }); }); }
+            catch (Exception ex) { err = ex.Message; }
+            Post(delegate {
+                study.Enabled = true;
+                if (err != null) { jurNote.Text = "Не получилось: " + err; jurNote.ForeColor = St.Bad; return; }
+                jurNote.Text = "Готово: таблиц " + tables + ". Отчёт: " + file + " - пришлите его (данных абонентов в нём нет).";
+                jurNote.ForeColor = St.Good;
+                try { Process.Start("notepad.exe", "\"" + file + "\""); } catch { }
+            });
+        });
+        th.IsBackground = true;
+        th.Start();
+    }
+
+    void Post(MethodInvoker m) { try { if (!IsDisposed && IsHandleCreated) BeginInvoke(m); } catch { } }
+
+    // ---------- контрольная цифра лицевого ----------
+
+    public void Learn() {
+        learn.Enabled = false;
+        ruleNote.ForeColor = St.Hint;
+        ruleNote.Text = "Открываю базу физ лиц...";
+        Dictionary<string, string> settings = new Dictionary<string, string>(memory.Values);
+        System.Threading.Thread th = new System.Threading.Thread(delegate() {
+            string err = null;
+            CheckRule r = null;
+            int samples = 0;
+            try {
+                BaseLink b = new BaseLink();
+                b.Open(settings);
+                if (!b.Ready) throw new Exception("база физ лиц недоступна: " + b.Error);
+                DbfTable t = b.Base.SpreadSample(3000);
+                int f = t.FieldIndex("NAB");
+                if (f < 0) throw new Exception("в таблице " + b.Table + " нет поля NAB");
+                List<string> nabs = new List<string>();
+                for (int i = 0; i < t.Count; i++) {
+                    string v = DbfTable.Format(t.GetValue(i, f, null), true).Trim();
+                    if (v.Length == 9 && CheckRule.AllDigits(v)) nabs.Add(v);
+                }
+                samples = nabs.Count;
+                r = CheckRule.Learn(nabs);
+            } catch (Exception ex) { err = ex.Message; }
+            Post(delegate {
+                learn.Enabled = true;
+                if (err != null) { ruleNote.Text = "Не получилось: " + err; ruleNote.ForeColor = St.Bad; return; }
+                if (r == null || !r.Good) {
+                    ruleNote.Text = "Правило не найдено (лицевых из 9 цифр: " + samples + (r != null ? "; лучшее - " + r.Describe() : "") + ").";
+                    ruleNote.ForeColor = St.Bad;
+                    JurReport.Append(ReportFile, "Контрольная цифра лицевого: правило не найдено, лицевых из 9 цифр " + samples + (r != null ? "; лучшее: " + r.Describe() : ""));
+                    return;
+                }
+                rule = r;
+                memory.Values["ЛицевойПравило"] = r.Save();
+                memory.Save();
+                ShowRule(samples);
+                JurReport.Append(ReportFile, "Контрольная цифра лицевого: " + r.Describe());
+            });
+        });
+        th.IsBackground = true;
+        th.Start();
+    }
+
+    void ShowRule(object samples) {
+        if (rule == null) { ruleNote.Text = "Правило ещё не найдено - нажмите кнопку (нужен доступ к базе физ лиц)."; ruleNote.ForeColor = St.Hint; }
+        else { ruleNote.Text = "Правило: " + rule.Describe(); ruleNote.ForeColor = St.Good; }
+        ShowLs();
+    }
+
+    void ShowLs() {
+        string d = first8.Text.Trim();
+        if (d.Length == 0) { lsOut.Text = ""; return; }
+        if (d.Length != 8 || !CheckRule.AllDigits(d)) { lsOut.Text = "нужно 8 цифр"; lsOut.ForeColor = St.Hint; return; }
+        if (rule == null) { lsOut.Text = "сначала найдите правило"; lsOut.ForeColor = St.Hint; return; }
+        int c = rule.Digit(d);
+        lsOut.Text = c < 0 ? "для этого номера контрольной цифры нет (правило даёт 10)" : "лицевой: " + d + c + "   (сверьте с базой: «формирование лицевых счетов»)";
+        lsOut.ForeColor = c < 0 ? St.Bad : St.Text;
+    }
+
+    // для проверки
+    public void SetFolder(string f) { folder.Text = f; }
+    public void SetFirst8(string s) { first8.Text = s; }
+    public string RuleText { get { return ruleNote.Text + " | " + lsOut.Text + " | " + jurNote.Text; } }
+}
+
+// Правило контрольной (9-й) цифры лицевого: ищется по лицевым базы.
+// Пробуются: взвешенная сумма цифр по модулю 11 и по модулю 10 (веса подбираются сами - по самим лицевым),
+// и алгоритм Луна. Подходит, если верно для 90% и больше проверенных лицевых (у случайных цифр - около 10%).
+public class CheckRule {
+    public string Kind = "";      // "11", "10", "luhn", "luhn2"
+    public int[] W = new int[8];
+    public int K;                 // прибавка
+    public int Ten = -1;          // модуль 11: какая цифра ставится, когда выходит 10 (-1 - такого номера не дают)
+    public int Total, Hits;
+
+    public bool Good { get { return Total >= 100 && Hits >= Total * 0.9; } }
+
+    public static bool AllDigits(string s) {
+        foreach (char c in s) if (c < '0' || c > '9') return false;
+        return s.Length > 0;
+    }
+
+    // контрольная цифра к первым 8 цифрам; -1 - номер с такой цифрой не дают
+    public int Digit(string d8) {
+        int[] d = new int[8];
+        for (int i = 0; i < 8; i++) d[i] = d8[i] - '0';
+        if (Kind == "luhn" || Kind == "luhn2") {
+            int s = 0;
+            for (int i = 0; i < 8; i++) {
+                // luhn - удваивается последняя цифра и через одну влево; luhn2 - первая и через одну вправо
+                bool dbl = Kind == "luhn" ? (7 - i) % 2 == 0 : i % 2 == 0;
+                int v = dbl ? d[i] * 2 : d[i];
+                s += v > 9 ? v - 9 : v;
+            }
+            return (10 - s % 10) % 10;
+        }
+        int m = Kind == "11" ? 11 : 10, sum = K;
+        for (int i = 0; i < 8; i++) sum += W[i] * d[i];
+        int r = ((sum % m) + m) % m;
+        if (r == 10) return Ten;
+        return r;
+    }
+
+    public string Describe() {
+        string pct = Total > 0 ? (100.0 * Hits / Total).ToString("0.0") + "% (" + Hits + " из " + Total + ")" : "";
+        if (Kind.StartsWith("luhn")) return "алгоритм Луна" + (Kind == "luhn2" ? " (с первой цифры)" : "") + "; подходит к " + pct;
+        StringBuilder w = new StringBuilder();
+        foreach (int x in W) w.Append(x).Append(' ');
+        return "веса цифр " + w.ToString().Trim() + (K != 0 ? ", прибавка " + K : "") + ", остаток от деления на " + Kind
+            + (Kind == "11" ? (Ten >= 0 ? " (10 -> " + Ten + ")" : " (10 - номер не дают)") : "") + "; подходит к " + pct;
+    }
+
+    public string Save() {
+        StringBuilder sb = new StringBuilder(Kind + ";" + K + ";" + Ten + ";" + Total + ";" + Hits + ";");
+        for (int i = 0; i < 8; i++) sb.Append(W[i]).Append(i < 7 ? "," : "");
+        return sb.ToString();
+    }
+
+    public static CheckRule Load(string s) {
+        try {
+            string[] p = s.Split(';');
+            if (p.Length < 6 || p[0].Length == 0) return null;
+            CheckRule r = new CheckRule();
+            r.Kind = p[0]; r.K = int.Parse(p[1]); r.Ten = int.Parse(p[2]); r.Total = int.Parse(p[3]); r.Hits = int.Parse(p[4]);
+            string[] w = p[5].Split(',');
+            for (int i = 0; i < 8; i++) r.W[i] = int.Parse(w[i]);
+            return r;
+        } catch { return null; }
+    }
+
+    // ---------- поиск правила ----------
+
+    public static CheckRule Learn(List<string> nabs) {
+        List<int[]> rows = new List<int[]>();
+        foreach (string n in nabs) {
+            if (n.Length != 9 || !AllDigits(n)) continue;
+            int[] d = new int[9];
+            for (int i = 0; i < 9; i++) d[i] = n[i] - '0';
+            rows.Add(d);
+        }
+        if (rows.Count == 0) return null;
+        List<CheckRule> cands = new List<CheckRule>();
+        foreach (string k in new string[] { "luhn", "luhn2" }) { CheckRule r = new CheckRule(); r.Kind = k; cands.Add(r); }
+        CheckRule m11 = Linear(rows, 11);
+        if (m11 != null) cands.Add(m11);
+        CheckRule m10 = Mod10(rows);
+        if (m10 != null) cands.Add(m10);
+        CheckRule best = null;
+        foreach (CheckRule r in cands) {
+            r.Score(rows);
+            if (best == null || r.Hits > best.Hits) best = r;
+        }
+        return best;
+    }
+
+    void Score(List<int[]> rows) {
+        Total = rows.Count;
+        Hits = 0;
+        // модуль 11: что ставят вместо 10 - самое частое среди таких номеров
+        if (Kind == "11") {
+            int[] tens = new int[10];
+            int tenCount = 0;
+            foreach (int[] d in rows) if (Raw(d) == 10) { tens[d[8]]++; tenCount++; }
+            Ten = -1;
+            if (tenCount > 0) { int b = 0; for (int i = 1; i < 10; i++) if (tens[i] > tens[b]) b = i; Ten = b; }
+        }
+        foreach (int[] d in rows) {
+            StringBuilder s = new StringBuilder(8);
+            for (int i = 0; i < 8; i++) s.Append((char)('0' + d[i]));
+            if (Digit(s.ToString()) == d[8]) Hits++;
+        }
+    }
+
+    int Raw(int[] d) {
+        int sum = K;
+        for (int i = 0; i < 8; i++) sum += W[i] * d[i];
+        return ((sum % 11) + 11) % 11;
+    }
+
+    // c = Σ w·d + k (mod p), p простое: веса - решением системы по случайным наборам лицевых (ошибочные лицевые не мешают)
+    static CheckRule Linear(List<int[]> rows, int p) {
+        int[] sol = Solve(rows, p, delegate(int[] d) { return p == 11 && d[8] == 0 ? -1 : d[8] % p; });
+        if (sol == null) return null;
+        CheckRule r = new CheckRule();
+        r.Kind = p.ToString();
+        for (int i = 0; i < 8; i++) r.W[i] = sol[i];
+        r.K = sol[8];
+        return r;
+    }
+
+    // модуль 10 = модуль 2 и модуль 5 вместе (китайская теорема об остатках)
+    static CheckRule Mod10(List<int[]> rows) {
+        int[] a = Solve(rows, 2, delegate(int[] d) { return d[8] % 2; });
+        int[] b = Solve(rows, 5, delegate(int[] d) { return d[8] % 5; });
+        if (a == null || b == null) return null;
+        CheckRule r = new CheckRule();
+        r.Kind = "10";
+        for (int i = 0; i < 8; i++) r.W[i] = (a[i] * 5 + b[i] * 6) % 10;
+        r.K = (a[8] * 5 + b[8] * 6) % 10;
+        return r;
+    }
+
+    delegate int Target(int[] d);
+
+    // лучшее решение по 60 случайным наборам из 24 лицевых: то, что подходит к наибольшему числу лицевых
+    static int[] Solve(List<int[]> rows, int p, Target target) {
+        Random rnd = new Random(12345);
+        int[] best = null;
+        int bestHits = -1;
+        for (int trial = 0; trial < 60; trial++) {
+            List<int[]> eq = new List<int[]>();
+            for (int k = 0; k < 24 * 4 && eq.Count < 24; k++) {
+                int[] d = rows[rnd.Next(rows.Count)];
+                int t = target(d);
+                if (t < 0) continue;
+                int[] e = new int[10];
+                for (int i = 0; i < 8; i++) e[i] = d[i] % p;
+                e[8] = 1;
+                e[9] = t;
+                eq.Add(e);
+            }
+            int[] x = Gauss(eq, p);
+            if (x == null) continue;
+            int hits = 0;
+            foreach (int[] d in rows) {
+                int t = target(d);
+                if (t < 0) continue;
+                int s = x[8];
+                for (int i = 0; i < 8; i++) s += x[i] * d[i];
+                if (s % p == t) hits++;
+            }
+            if (hits > bestHits) { bestHits = hits; best = x; }
+        }
+        return best;
+    }
+
+    // система по модулю простого p: 9 неизвестных (8 весов и прибавка); свободные неизвестные - 0
+    static int[] Gauss(List<int[]> eq, int p) {
+        int n = 9, m = eq.Count;
+        int[][] a = new int[m][];
+        for (int i = 0; i < m; i++) a[i] = (int[])eq[i].Clone();
+        int[] where = new int[n];
+        for (int i = 0; i < n; i++) where[i] = -1;
+        int row = 0;
+        for (int col = 0; col < n && row < m; col++) {
+            int sel = -1;
+            for (int i = row; i < m; i++) if (a[i][col] % p != 0) { sel = i; break; }
+            if (sel < 0) continue;
+            int[] tmp = a[sel]; a[sel] = a[row]; a[row] = tmp;
+            int inv = Inverse(a[row][col], p);
+            for (int j = 0; j <= n; j++) a[row][j] = a[row][j] * inv % p;
+            for (int i = 0; i < m; i++) {
+                if (i == row || a[i][col] == 0) continue;
+                int f = a[i][col];
+                for (int j = 0; j <= n; j++) a[i][j] = ((a[i][j] - f * a[row][j]) % p + p) % p;
+            }
+            where[col] = row;
+            row++;
+        }
+        // противоречие (среди лицевых есть ошибочные) - этот набор не годится
+        for (int i = row; i < m; i++) if (a[i][n] % p != 0) return null;
+        int[] x = new int[n];
+        for (int col = 0; col < n; col++) x[col] = where[col] < 0 ? 0 : a[where[col]][n];
+        return x;
+    }
+
+    static int Inverse(int v, int p) {
+        v = ((v % p) + p) % p;
+        for (int x = 1; x < p; x++) if (v * x % p == 1) return x;
+        return 1;
+    }
+}
+
+// Отчёт о строении базы юр лиц: таблицы, поля, вид значений, индексы. Данных абонентов нет:
+// буквы заменены на А/а, цифры на 9; значения показываются, только если их мало разных и в них нет длинных чисел
+// (например, вид объекта «квартира», «нежилое помещение»)
+public static class JurReport {
+    public delegate void Progress(string text);
+
+    public static int Write(string dir, string file, Progress progress) {
+        StringBuilder sb = new StringBuilder();
+        sb.Append("=== Оформление договора: строение базы юр лиц, ").Append(DateTime.Now.ToString("dd.MM.yyyy HH:mm")).Append(" ===\r\n");
+        sb.Append("Данных абонентов в отчёте нет: только таблицы, поля, вид значений (буквы - А/а, цифры - 9), индексы.\r\n");
+        sb.Append("Папка: ").Append(dir).Append("\r\n\r\n");
+        // какие файлы есть (программа базы, формы, отчёты) - только имена и размеры
+        Dictionary<string, int> exts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        List<string> prog = new List<string>();
+        foreach (string f in Directory.GetFiles(dir)) {
+            string e = Path.GetExtension(f).ToLowerInvariant();
+            int n;
+            exts.TryGetValue(e, out n);
+            exts[e] = n + 1;
+            if (e == ".exe" || e == ".app" || e == ".prg" || e == ".fxp" || e == ".mpr" || e == ".mnx" || e == ".scx" || e == ".frx" || e == ".pjx")
+                prog.Add(Path.GetFileName(f) + " (" + (new FileInfo(f).Length / 1024) + " КБ)");
+        }
+        sb.Append("Файлы по типам: ");
+        List<string> el = new List<string>();
+        foreach (KeyValuePair<string, int> kv in exts) el.Add((kv.Key.Length > 0 ? kv.Key : "без расширения") + " - " + kv.Value);
+        el.Sort();
+        sb.Append(string.Join(", ", el.ToArray())).Append("\r\n");
+        if (prog.Count > 0) sb.Append("Программы и формы: ").Append(string.Join(", ", prog.ToArray())).Append("\r\n");
+        string[] sub = Directory.GetDirectories(dir);
+        if (sub.Length > 0) {
+            List<string> sn = new List<string>();
+            foreach (string s in sub) { int k = 0; try { k = Directory.GetFiles(s, "*.dbf").Length; } catch { } sn.Add(Path.GetFileName(s) + (k > 0 ? " (таблиц " + k + ")" : "")); }
+            sb.Append("Подпапки: ").Append(string.Join(", ", sn.ToArray())).Append("\r\n");
+        }
+        sb.Append("\r\n");
+        string[] files = Places.DbfFiles(dir);
+        int done = 0;
+        foreach (string f in files) {
+            done++;
+            if (progress != null) progress("Изучаю таблицу " + done + " из " + files.Length + ": " + Path.GetFileName(f));
+            try { Table(sb, f); }
+            catch (Exception ex) { sb.Append(Path.GetFileName(f)).Append(": не прочиталась - ").Append(ex.Message).Append("\r\n\r\n"); }
+        }
+        File.WriteAllText(file, sb.ToString(), new UTF8Encoding(true));
+        return files.Length;
+    }
+
+    public static void Append(string file, string line) {
+        try { File.AppendAllText(file, "\r\n" + DateTime.Now.ToString("dd.MM.yyyy HH:mm") + "  " + line + "\r\n", new UTF8Encoding(true)); } catch { }
+    }
+
+    static void Table(StringBuilder sb, string path) {
+        LiveBase b = LiveBase.Open(path);
+        FileInfo fi = new FileInfo(path);
+        sb.Append(Path.GetFileName(path)).Append(": записей ").Append(b.RecordCount).Append(", ").Append((fi.Length / 1024.0 / 1024).ToString("0.0"))
+            .Append(" МБ, изменена ").Append(fi.LastWriteTime.ToString("dd.MM.yyyy")).Append("\r\n");
+        DbfTable t = b.RecordCount > 3000 ? b.SpreadSample(2000) : DbfTable.Load(path, null, null, 3000);
+        foreach (DbfField fd in t.Fields) Field(sb, t, fd);
+        if (b.Tags.Count > 0) {
+            sb.Append("  индексы:\r\n");
+            foreach (IndexTag tag in b.Tags)
+                sb.Append("    ").Append(tag.FileName).Append(" ").Append(tag.Name).Append(" = ").Append(tag.Expr)
+                    .Append(tag.ForText != null && tag.ForText.Length > 0 ? " FOR " + tag.ForText : "").Append("\r\n");
+        }
+        sb.Append("\r\n");
+    }
+
+    static void Field(StringBuilder sb, DbfTable t, DbfField f) {
+        int j = t.FieldIndex(f.Name);
+        string head = "  " + (f.Name + "           ").Substring(0, 11) + (f.Type.ToString() + f.Length + (f.Decimals > 0 ? "," + f.Decimals : "") + "      ").Substring(0, 7);
+        if (f.Type == 'M' || f.Type == 'G' || f.Type == 'W') { sb.Append(head).Append("примечание/двоичное\r\n"); return; }
+        Dictionary<string, int> shapes = new Dictionary<string, int>(), values = new Dictionary<string, int>();
+        int filled = 0, n = t.Count;
+        // поля с именами людей и организаций: и короткие слова («д.», «п.» - могут быть инициалами) - тоже буквами А/а
+        string up = f.Name.ToUpperInvariant();
+        bool person = false;
+        foreach (string w in new string[] { "FIO", "FAM", "IMA", "IMJ", "OTCH", "NAIM", "NAME", "RUK", "DIR", "BUH", "KONT", "PODP" })
+            if (up.Contains(w)) person = true;
+        for (int r = 0; r < n; r++) {
+            string v;
+            try { v = DbfTable.Format(t.GetValue(r, j, null), true).Trim(); } catch { continue; }
+            if (v.Length == 0) continue;
+            filled++;
+            string sh = Report.Shape(v, !person);
+            int c;
+            shapes.TryGetValue(sh, out c);
+            shapes[sh] = c + 1;
+            if (values.Count <= 16) { values.TryGetValue(v, out c); values[v] = c + 1; }
+        }
+        List<KeyValuePair<string, int>> top = new List<KeyValuePair<string, int>>(shapes);
+        top.Sort(delegate(KeyValuePair<string, int> a, KeyValuePair<string, int> b) { return b.Value.CompareTo(a.Value); });
+        sb.Append(head).Append("заполнено ").Append(n == 0 ? 0 : filled * 100 / n).Append("%");
+        if (top.Count > 0) {
+            sb.Append(", вид: ");
+            for (int i = 0; i < top.Count && i < 3; i++) sb.Append(i > 0 ? " | " : "").Append(top[i].Key).Append(" (").Append(top[i].Value * 100 / Math.Max(1, filled)).Append("%)");
+            if (top.Count > 3) sb.Append(" | ещё видов: ").Append(top.Count - 3);
+        }
+        // мало разных значений (вид объекта, признак) - сами значения: в них нет данных абонентов
+        if (f.Type == 'C' && !person && filled >= 20 && values.Count <= 15 && Safe(values)) {
+            List<KeyValuePair<string, int>> vl = new List<KeyValuePair<string, int>>(values);
+            vl.Sort(delegate(KeyValuePair<string, int> a, KeyValuePair<string, int> b) { return b.Value.CompareTo(a.Value); });
+            sb.Append("; значения: ");
+            for (int i = 0; i < vl.Count; i++) sb.Append(i > 0 ? ", " : "").Append("«").Append(vl[i].Key).Append("» ").Append(vl[i].Value);
+        } else if (f.Type == 'L' || f.Type == 'N' && f.Length <= 2) {
+            List<string> vs = new List<string>(values.Keys);
+            if (vs.Count <= 15) sb.Append("; значения: ").Append(string.Join(", ", vs.ToArray()));
+        }
+        sb.Append("\r\n");
+    }
+
+    // значения - не номера и не имена: короткие, без чисел из 4 и более цифр, каждое встречается не раз
+    static bool Safe(Dictionary<string, int> values) {
+        foreach (KeyValuePair<string, int> kv in values) {
+            if (kv.Key.Length > 40 || kv.Value < 3) return false;
+            int run = 0;
+            foreach (char c in kv.Key) { run = char.IsDigit(c) ? run + 1 : 0; if (run >= 4) return false; }
+        }
         return true;
     }
 }
