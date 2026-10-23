@@ -14894,8 +14894,9 @@ public class StartMenu : Form {
     readonly string here;
     DogovorForm dog;
     SpravkaForm spr;
-    readonly Tile dogTile, sprTile, jurTile;
+    readonly Tile dogTile, sprTile, jurTile, plTile;
     JurForm jur;
+    PlombyForm pl;
 
     public StartMenu(string here, string launch) {
         this.here = here;
@@ -14904,7 +14905,7 @@ public class StartMenu : Form {
         Font = St.Base;
         BackColor = St.Back;
         StartPosition = FormStartPosition.CenterScreen;
-        ClientSize = new Size(640, 580);
+        ClientSize = new Size(640, 692);
         FormBorderStyle = FormBorderStyle.FixedSingle;
         MaximizeBox = false;
         KeyPreview = true;
@@ -14941,7 +14942,11 @@ public class StartMenu : Form {
         jurTile.Click += delegate { OpenJur(); };
         Controls.Add(dogTile);
         Controls.Add(sprTile);
+        plTile = new Tile("Мои отчёты пломб", "партии пломб, что поставлено по договорам, пропущенные, печать отчёта", St.TintOf("Пломбы и оборудование").Mark);
+        plTile.SetBounds(34, 468, 572, 96);
+        plTile.Click += delegate { OpenPlomby(); };
         Controls.Add(jurTile);
+        Controls.Add(plTile);
 
         int x = 34;
         foreach (string[] l in new string[][] { new string[] { "Папка с договорами", "d" }, new string[] { "Папка со справками", "s" }, new string[] { "Справочники (списки)", "l" } }) {
@@ -14950,7 +14955,7 @@ public class StartMenu : Form {
             link.Font = St.Base;
             link.AutoSize = true;
             link.LinkColor = St.Accent;
-            link.Location = new Point(x, 484);
+            link.Location = new Point(x, 596);
             string what = l[1];
             link.LinkClicked += delegate { OpenPlace(what); };
             Controls.Add(link);
@@ -14961,7 +14966,7 @@ public class StartMenu : Form {
         keys.Font = St.Small;
         keys.ForeColor = St.Hint;
         keys.AutoSize = true;
-        keys.Location = new Point(36, 532);
+        keys.Location = new Point(36, 644);
         Controls.Add(keys);
 
         KeyDown += delegate(object s, KeyEventArgs e) {
@@ -15020,6 +15025,15 @@ public class StartMenu : Form {
         if (from != spr) from.Hide();
     }
 
+    public void OpenPlomby() {
+        if (pl == null || pl.IsDisposed) { pl = new PlombyForm(here); pl.Home = this; }
+        else pl.Reload();
+        pl.Show();
+        if (pl.WindowState == FormWindowState.Minimized) pl.WindowState = FormWindowState.Normal;
+        pl.Activate();
+        Hide();
+    }
+
     public void OpenJur() {
         if (jur == null || jur.IsDisposed) { jur = new JurForm(here); jur.Home = this; }
         jur.Show();
@@ -15053,6 +15067,7 @@ public class StartMenu : Form {
     public DogovorForm Dogovor { get { return dog; } }
     public SpravkaForm Spravka { get { return spr; } }
     public JurForm Jur { get { return jur; } }
+    public PlombyForm Plomby { get { return pl; } }
 }
 
 // Большая кнопка меню: название, пояснение, цветная полоска слева
@@ -16316,6 +16331,817 @@ public static class JurReport {
             int run = 0;
             foreach (char c in kv.Key) { run = char.IsDigit(c) ? run + 1 : 0; if (run >= 4) return false; }
         }
+        return true;
+    }
+}
+
+// Отчёты по пломбам. Партия - выданные пломбы подряд (пластиковые по 100: 4830401 ... 4830500; наклейки - сколько выдали,
+// номера вида 0012345001). Пломбы из сохранённых договоров сами встают в строки партии по номеру; что не по договору
+// или чего нет в договоре (№ задания, причина снятия, снятая пломба) - дописывается в таблице. Печать - по форме
+// «Отчет об использовании номерных одноразовых пломб» (альбомный лист, по 27 строк).
+
+// одна строка отчёта
+public class SealRow {
+    public const int Cols = 7;   // дата, место установки (лицевой), № учёта, № задания, причина, снятая пломба, примечание
+    public string Number = "";
+    public int Index;            // № п/п в партии (с 1)
+    public string[] Auto = new string[Cols];     // из договора
+    public string[] Hand = new string[Cols];     // вписано в таблице (null - не трогали)
+    public string Source = "";                   // договор, из которого строка
+    public string Conflict = "";                 // пломба в двух договорах
+    public bool Paper;                           // до номера, с которого ведёт программа: записано на бумаге раньше
+
+    public SealRow() { for (int i = 0; i < Cols; i++) Auto[i] = ""; }
+
+    public string Get(int c) { return Hand[c] ?? Auto[c]; }
+    public bool Used { get { for (int i = 0; i < Cols; i++) if (Get(i).Length > 0) return true; return false; } }
+    public bool HandOnly { get { return Source.Length == 0 && Used; } }
+}
+
+public class SealBatch {
+    public string File = "";
+    public string Kind = "пластиковые";
+    public string First = "";
+    public int Count = 100;
+    public int Since = 1;        // № п/п, с которого партию ведёт программа (раньше - писали на бумаге)
+    public string Issued = "";
+    public string Fio = "", Post = "";
+    public readonly Dictionary<string, string[]> Hand = new Dictionary<string, string[]>();   // номер -> вписанное
+
+    public long FirstValue { get { long v; return long.TryParse(First, out v) ? v : 0; } }
+    public string Last { get { return Number(Count - 1); } }
+
+    // номер пломбы с порядковым i (с 0) - той же длины, что первый (нули впереди сохраняются)
+    public string Number(int i) { return (FirstValue + i).ToString().PadLeft(First.Length, '0'); }
+
+    // номер из договора относится к партии: то же число в пределах партии (нули впереди могли не написать)
+    public int IndexOf(string number) {
+        long v;
+        if (!long.TryParse(number, out v)) return -1;
+        long k = v - FirstValue;
+        return k >= 0 && k < Count ? (int)k : -1;
+    }
+
+    public string Title { get { return First + " - " + Last; } }
+
+    public static SealBatch Load(string file) {
+        SealBatch b = new SealBatch();
+        b.File = file;
+        foreach (string line in System.IO.File.ReadAllLines(file, Encoding.UTF8)) {
+            int eq = line.IndexOf('=');
+            if (eq <= 0 || line.StartsWith("#")) continue;
+            string k = line.Substring(0, eq).Trim(), v = Memory.Unescape(line.Substring(eq + 1));
+            if (k == "вид") b.Kind = v;
+            else if (k == "первый") b.First = v;
+            else if (k == "количество") int.TryParse(v, out b.Count);
+            else if (k == "ведёт_с") int.TryParse(v, out b.Since);
+            else if (k == "выдана") b.Issued = v;
+            else if (k == "фио") b.Fio = v;
+            else if (k == "должность") b.Post = v;
+            else if (k.StartsWith("пломба.")) {
+                string[] parts = v.Split('|');
+                string[] h = new string[SealRow.Cols];
+                for (int i = 0; i < SealRow.Cols; i++) h[i] = i < parts.Length && parts[i] != "\u0001" ? Memory.Unescape(parts[i].Replace("¦", "|")) : null;
+                b.Hand[k.Substring(7)] = h;
+            }
+        }
+        return b;
+    }
+
+    public void Save() {
+        StringBuilder sb = new StringBuilder();
+        sb.Append("# Партия пломб для отчёта (программа «Оформление договора»)\r\n");
+        sb.Append("вид=").Append(Memory.Escape(Kind)).Append("\r\n");
+        sb.Append("первый=").Append(First).Append("\r\n");
+        sb.Append("количество=").Append(Count).Append("\r\n");
+        sb.Append("ведёт_с=").Append(Since).Append("\r\n");
+        sb.Append("выдана=").Append(Memory.Escape(Issued)).Append("\r\n");
+        sb.Append("фио=").Append(Memory.Escape(Fio)).Append("\r\n");
+        sb.Append("должность=").Append(Memory.Escape(Post)).Append("\r\n");
+        List<string> keys = new List<string>(Hand.Keys);
+        keys.Sort(StringComparer.Ordinal);
+        foreach (string k in keys) {
+            string[] h = Hand[k];
+            List<string> parts = new List<string>();
+            bool any = false;
+            for (int i = 0; i < SealRow.Cols; i++) {
+                if (h[i] == null) parts.Add("\u0001");
+                else { parts.Add(Memory.Escape(h[i]).Replace("|", "¦")); any = true; }
+            }
+            if (any) sb.Append("пломба.").Append(k).Append('=').Append(string.Join("|", parts.ToArray())).Append("\r\n");
+        }
+        string tmp = File + ".tmp";
+        System.IO.File.WriteAllText(tmp, sb.ToString(), new UTF8Encoding(true));
+        if (System.IO.File.Exists(File)) System.IO.File.Replace(tmp, File, null);
+        else System.IO.File.Move(tmp, File);
+    }
+}
+
+// пломбы из сохранённых договоров
+public static class SealRegistry {
+    // место пломбы - как пишут в отчёте (Примечание)
+    public static string Note(string code) {
+        switch (code.ToUpperInvariant()) {
+            case "ВА": return "В.А";
+            case "КК": return "К.К";
+            case "ИК": return "И.К";
+            case "ТТ": return "Т.Т";
+            default: return code;
+        }
+    }
+
+    // номера в тексте поля: числа от 5 цифр («45678801, 45678802»)
+    public static List<string> Numbers(string text) {
+        List<string> r = new List<string>();
+        StringBuilder cur = new StringBuilder();
+        foreach (char c in (text ?? "") + " ") {
+            if (char.IsDigit(c)) { cur.Append(c); continue; }
+            if (cur.Length >= 5) r.Add(cur.ToString());
+            cur.Length = 0;
+        }
+        return r;
+    }
+
+    public class Use {
+        public string Number, Date, Ls, Meter, Note, Source;
+    }
+
+    public static List<Use> FromContracts(string dataDir) {
+        List<Use> r = new List<Use>();
+        if (!Directory.Exists(dataDir)) return r;
+        foreach (string f in Directory.GetFiles(dataDir, "*.txt")) {
+            Dictionary<string, string> d;
+            try { d = DogovorForm.ReadData(f); } catch { continue; }
+            string name = Path.GetFileNameWithoutExtension(f);
+            List<string[]> seals = new List<string[]>();
+            foreach (string n in Numbers(Get(d, "plomba_vvod"))) seals.Add(new string[] { n, "ВА" });
+            foreach (string n in Numbers(Get(d, "plomba_klemm"))) seals.Add(new string[] { n, "КК" });
+            foreach (string[] s in Seals.Parse(Get(d, "plomba_drugoe")))
+                foreach (string n in Numbers(s[1])) seals.Add(new string[] { n, s[0] });
+            string ls = Get(d, "ls");
+            foreach (string[] s in seals) {
+                Use u = new Use();
+                u.Number = s[0];
+                u.Note = Note(s[1]);
+                u.Date = Get(d, "data");
+                u.Ls = ls.Length > 0 ? BaseLink.Nab(ls) : "";
+                u.Meter = Get(d, "pu1_zav");
+                u.Source = name;
+                r.Add(u);
+            }
+        }
+        return r;
+    }
+
+    static string Get(Dictionary<string, string> d, string k) {
+        string v;
+        return d.TryGetValue(k, out v) && v != null ? v.Trim() : "";
+    }
+
+    // строки партии: из договоров и вписанное
+    public static List<SealRow> Rows(SealBatch b, List<Use> uses) {
+        List<SealRow> rows = new List<SealRow>();
+        for (int i = 0; i < b.Count; i++) {
+            SealRow r = new SealRow();
+            r.Index = i + 1;
+            r.Number = b.Number(i);
+            r.Paper = r.Index < b.Since;
+            string[] h;
+            if (b.Hand.TryGetValue(r.Number, out h)) r.Hand = (string[])h.Clone();
+            rows.Add(r);
+        }
+        foreach (Use u in uses) {
+            int k = b.IndexOf(u.Number);
+            if (k < 0) continue;
+            SealRow r = rows[k];
+            if (r.Source.Length > 0) { if (r.Source != u.Source) r.Conflict = r.Conflict.Length > 0 ? r.Conflict + ", " + u.Source : u.Source; continue; }
+            r.Source = u.Source;
+            r.Auto[0] = u.Date;
+            r.Auto[1] = u.Ls;
+            r.Auto[2] = u.Meter;
+            r.Auto[6] = u.Note;
+        }
+        return rows;
+    }
+
+    // пропущенные: не использованы, а пломбы с номерами дальше уже стоят
+    public static List<SealRow> Gaps(List<SealRow> rows) {
+        int last = -1;
+        for (int i = 0; i < rows.Count; i++) if (rows[i].Used) last = i;
+        List<SealRow> g = new List<SealRow>();
+        for (int i = 0; i < last; i++) if (!rows[i].Used && !rows[i].Paper) g.Add(rows[i]);
+        return g;
+    }
+}
+
+// печать: .docx по форме отчёта (альбомный лист, по 27 строк, шапка на каждом листе)
+public static class SealPrint {
+    const string W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+    public const int PerPage = 27;
+    static readonly int[] Widths = { 700, 1300, 1500, 1900, 1800, 1700, 1800, 1700, 1300 };   // твипы, сумма 13700... растягиваются
+
+    public static void Write(SealBatch b, List<SealRow> rows, string path) {
+        StringBuilder x = new StringBuilder();
+        x.Append("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>");
+        x.Append("<w:document xmlns:w=\"").Append(W).Append("\"><w:body>");
+        int pages = Math.Max(1, (rows.Count + PerPage - 1) / PerPage);
+        // листы до того, с которого ведёт программа, уже заполнены от руки - не печатаем
+        int start = Math.Min(pages - 1, Math.Max(0, (b.Since - 1) / PerPage));
+        for (int p = start; p < pages; p++) {
+            List<SealRow> part = rows.GetRange(p * PerPage, Math.Min(PerPage, rows.Count - p * PerPage));
+            Page(x, b, part, p + 1, p > start, p > start ? rows[p * PerPage - 1] : null);
+        }
+        // альбомный A4, поля 1-1,5 см
+        x.Append("<w:sectPr><w:pgSz w:w=\"16838\" w:h=\"11906\" w:orient=\"landscape\"/>");
+        x.Append("<w:pgMar w:top=\"454\" w:right=\"567\" w:bottom=\"340\" w:left=\"851\" w:header=\"0\" w:footer=\"0\" w:gutter=\"0\"/></w:sectPr>");
+        x.Append("</w:body></w:document>");
+        List<ZipEntry> e = new List<ZipEntry>();
+        e.Add(Entry("[Content_Types].xml", "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">" +
+            "<Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/><Default Extension=\"xml\" ContentType=\"application/xml\"/>" +
+            "<Override PartName=\"/word/document.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml\"/></Types>"));
+        e.Add(Entry("_rels/.rels", "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">" +
+            "<Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"word/document.xml\"/></Relationships>"));
+        e.Add(Entry("word/document.xml", x.ToString()));
+        Zip.Write(path, e);
+    }
+
+    static ZipEntry Entry(string name, string text) {
+        ZipEntry z = new ZipEntry();
+        z.Name = name;
+        DateTime t = DateTime.Now;
+        z.Time = (ushort)((t.Hour << 11) | (t.Minute << 5) | (t.Second / 2));
+        z.Date = (ushort)(((t.Year - 1980) << 9) | (t.Month << 5) | t.Day);
+        z.SetData(new UTF8Encoding(false).GetBytes(text));
+        return z;
+    }
+
+    static string Esc(string s) { return (s ?? "").Replace("&", "&amp;").Replace("<", "&lt;").Replace(">", "&gt;").Replace("\"", "&quot;"); }
+
+    // кусок текста: шрифт Times New Roman, размер в пунктах
+    static string Run(string text, double pt, bool bold, bool underline) {
+        int hs = (int)Math.Round(pt * 2);
+        return "<w:r><w:rPr><w:rFonts w:ascii=\"Times New Roman\" w:hAnsi=\"Times New Roman\" w:cs=\"Times New Roman\"/>" + (bold ? "<w:b/>" : "") +
+            (underline ? "<w:u w:val=\"single\"/>" : "") + "<w:sz w:val=\"" + hs + "\"/><w:szCs w:val=\"" + hs + "\"/></w:rPr><w:t xml:space=\"preserve\">" + Esc(text) + "</w:t></w:r>";
+    }
+
+    static string Para(string runs, string jc, bool pageBreak, string tabs) {
+        return "<w:p><w:pPr>" + (pageBreak ? "<w:pageBreakBefore/>" : "") + (tabs ?? "") + "<w:spacing w:before=\"0\" w:after=\"0\" w:line=\"240\" w:lineRule=\"auto\"/>" +
+            (jc != null ? "<w:jc w:val=\"" + jc + "\"/>" : "") + "</w:pPr>" + runs + "</w:p>";
+    }
+
+    static string Tab { get { return "<w:r><w:tab/></w:r>"; } }
+
+    static DateTime? Parse(string s) {
+        DateTime d;
+        if (DateTime.TryParseExact((s ?? "").Trim(), "dd.MM.yyyy", CultureInfo.InvariantCulture, DateTimeStyles.None, out d)) return d;
+        return null;
+    }
+
+    static void Page(StringBuilder x, SealBatch b, List<SealRow> rows, int page, bool brk, SealRow before) {
+        // период листа - по датам его строк
+        DateTime? from = null, to = null;
+        foreach (SealRow r in rows) {
+            DateTime? d = Parse(r.Get(0));
+            if (d == null) continue;
+            if (from == null || d < from) from = d;
+            if (to == null || d > to) to = d;
+        }
+        x.Append(Para(Run("№ пломбы с " + b.First, 12, false, false) + Tab + Run("по " + b.Last, 12, false, false), null, brk,
+            "<w:tabs><w:tab w:val=\"left\" w:pos=\"4200\"/></w:tabs>"));
+        x.Append(Para(Run("дата выдачи " + (b.Issued.Length > 0 ? b.Issued : "____________"), 12, false, false), null, false, null));
+        x.Append(Para(Run("Отчет", 13, false, false), "center", false, null));
+        string f = from != null ? from.Value.ToString("dd.MM.yyyy") : "__________", t = to != null ? to.Value.ToString("dd.MM.yyyy") : "__________";
+        x.Append(Para(Run("Об использовании номерных одноразовых пломб в ", 13, false, false) + Run(f, 13, false, true) + Run(" г. по ", 13, false, false) +
+            Run(t, 13, false, true) + Run(" г.", 13, false, false), "center", false, null));
+        // таблица: две строки шапки (Потребитель - над 6 колонками)
+        int total = 0;
+        foreach (int w in Widths) total += w;
+        double k = 15300.0 / total;
+        int[] ws = new int[Widths.Length];
+        for (int i = 0; i < ws.Length; i++) ws[i] = (int)(Widths[i] * k);
+        x.Append("<w:tbl><w:tblPr><w:tblW w:w=\"0\" w:type=\"auto\"/><w:jc w:val=\"center\"/><w:tblBorders>");
+        foreach (string s in new string[] { "top", "left", "bottom", "right", "insideH", "insideV" })
+            x.Append("<w:").Append(s).Append(" w:val=\"single\" w:sz=\"4\" w:space=\"0\" w:color=\"000000\"/>");
+        x.Append("</w:tblBorders><w:tblLayout w:type=\"fixed\"/><w:tblCellMar><w:left w:w=\"57\" w:type=\"dxa\"/><w:right w:w=\"57\" w:type=\"dxa\"/></w:tblCellMar></w:tblPr><w:tblGrid>");
+        foreach (int w in ws) x.Append("<w:gridCol w:w=\"").Append(w).Append("\"/>");
+        x.Append("</w:tblGrid>");
+        string[] head = { "№ п\\п", "Дата установки пломбы", "Номер установленной пломбы" };
+        string[] cons = { "Место установки", "№ учета", "№ задания, дата вып.работ", "Причина снятия пломбы", "Номер, тип снятой пломбы" };
+        // строка 1
+        x.Append("<w:tr><w:trPr><w:tblHeader/></w:trPr>");
+        for (int i = 0; i < 3; i++) Cell(x, ws[i], head[i], 9, false, "restart", 0, true);
+        Cell(x, ws[3] + ws[4] + ws[5] + ws[6] + ws[7], "Потребитель", 9, false, null, 5, true);
+        Cell(x, ws[8], "Примечание", 9, false, "restart", 0, true);
+        x.Append("</w:tr>");
+        // строка 2
+        x.Append("<w:tr><w:trPr><w:tblHeader/></w:trPr>");
+        for (int i = 0; i < 3; i++) Cell(x, ws[i], "", 10, false, "continue", 0, true);
+        for (int i = 0; i < 5; i++) Cell(x, ws[3 + i], cons[i], 9, false, null, 0, true);
+        Cell(x, ws[8], "", 10, false, "continue", 0, true);
+        x.Append("</w:tr>");
+        SealRow prev = before;
+        foreach (SealRow r in rows) {
+            // высота строки - как в бланке (27 строк на листе)
+            x.Append("<w:tr><w:trPr><w:cantSplit/><w:trHeight w:val=\"290\" w:hRule=\"exact\"/></w:trPr>");
+            bool same = prev != null && r.Source.Length > 0 && r.Source == prev.Source;
+            string date = r.Get(0);
+            if (prev != null && date.Length > 0 && date == prev.Get(0)) date = "-//-";
+            string[] v = new string[9];
+            v[0] = r.Index.ToString();
+            v[1] = date;
+            v[2] = r.Number;
+            for (int c = 1; c <= 5; c++) {
+                string s = r.Get(c);
+                // тот же договор, что строкой выше - «-//-», как пишут от руки
+                if (same && s.Length > 0 && s == prev.Get(c)) s = "-//-";
+                v[2 + c] = s;
+            }
+            v[8] = r.Get(6);
+            for (int i = 0; i < 9; i++) Cell(x, ws[i], v[i], 10, false, null, 0, i != 3 && i != 6 && i != 7);
+            x.Append("</w:tr>");
+            prev = r;
+        }
+        x.Append("</w:tbl>");
+        x.Append(Para(Run("Должность: " + b.Post, 12, false, false), null, false, null));
+        x.Append(Para(Run("Ф.И.О. " + b.Fio, 12, false, false) + Tab + Run("______________", 12, false, false) + Tab + Run("стр. " + page, 10, false, false), null, false,
+            "<w:tabs><w:tab w:val=\"left\" w:pos=\"6800\"/><w:tab w:val=\"right\" w:pos=\"15300\"/></w:tabs>"));
+    }
+
+    static void Cell(StringBuilder x, int w, string text, double pt, bool bold, string vmerge, int span, bool center) {
+        x.Append("<w:tc><w:tcPr><w:tcW w:w=\"").Append(w).Append("\" w:type=\"dxa\"/>");
+        if (span > 1) x.Append("<w:gridSpan w:val=\"").Append(span).Append("\"/>");
+        if (vmerge == "restart") x.Append("<w:vMerge w:val=\"restart\"/>");
+        else if (vmerge == "continue") x.Append("<w:vMerge/>");
+        x.Append("<w:vAlign w:val=\"center\"/></w:tcPr>");
+        x.Append(Para(text.Length > 0 ? Run(text, pt, bold, false) : "", center ? "center" : null, false, null));
+        x.Append("</w:tc>");
+    }
+}
+
+// окно «Мои отчёты пломб»
+public class PlombyForm : Form {
+    readonly string here, dir;
+    readonly Memory memory;
+    public StartMenu Home;
+    readonly ListBox list = new ListBox();
+    readonly DataGridView grid = new DataGridView();
+    readonly Label title = new Label(), summary = new Label();
+    readonly CheckBox onlyGaps = new CheckBox(), showPaper = new CheckBox();
+    readonly List<SealBatch> batches = new List<SealBatch>();
+    List<SealRegistry.Use> uses = new List<SealRegistry.Use>();
+    List<SealRow> rows = new List<SealRow>();
+    SealBatch cur;
+    bool filling;
+    static readonly string[] Heads = { "Дата", "Лицевой", "№ учёта", "№ задания", "Причина снятия", "Снятая пломба", "Место" };
+
+    public static string Folder(string here) { return Path.Combine(here, "Пломбы"); }
+
+    public PlombyForm(string here) {
+        this.here = here;
+        dir = Folder(here);
+        memory = Memory.For(Path.Combine(here, "nastroiki.txt"));
+        Text = "Мои отчёты пломб";
+        Font = St.Base;
+        BackColor = St.Back;
+        StartPosition = FormStartPosition.CenterScreen;
+        Rectangle wa = Screen.PrimaryScreen.WorkingArea;
+        Size = new Size(Math.Min(1340, wa.Width), Math.Min(860, wa.Height));
+        MinimumSize = new Size(980, 560);
+        KeyPreview = true;
+        try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
+
+        Panel top = new Panel();
+        top.Dock = DockStyle.Top;
+        top.Height = 78;
+        top.BackColor = St.Nav;
+        LinkLabel back = new LinkLabel();
+        back.Text = "← Назад в меню";
+        back.LinkColor = St.NavText;
+        back.ActiveLinkColor = Color.White;
+        back.AutoSize = true;
+        back.Location = new Point(24, 8);
+        back.LinkClicked += delegate { GoBack(); };
+        Label head = new Label();
+        head.Text = "Мои отчёты пломб";
+        head.Font = new Font("Segoe UI", 16f, FontStyle.Bold);
+        head.ForeColor = Color.White;
+        head.AutoSize = true;
+        head.Location = new Point(22, 32);
+        top.Controls.Add(back);
+        top.Controls.Add(head);
+
+        Panel left = new Panel();
+        left.Dock = DockStyle.Left;
+        left.Width = 330;
+        left.BackColor = Color.White;
+        left.Padding = new Padding(14);
+        Label lcap = Ui.Caption("Партии пломб (выданные)");
+        lcap.Font = St.Bold;
+        lcap.SetBounds(14, 12, 300, 22);
+        list.Font = St.Base;
+        list.IntegralHeight = false;
+        list.BorderStyle = BorderStyle.FixedSingle;
+        list.SelectedIndexChanged += delegate { if (!filling && list.SelectedIndex >= 0 && list.SelectedIndex < batches.Count) ShowBatch(batches[list.SelectedIndex]); };
+        Button add = Ui.Button("Новая партия…", true);
+        add.Click += delegate { NewBatch(); };
+        Button del = Ui.Button("Удалить партию", false);
+        del.Click += delegate { DeleteBatch(); };
+        left.Controls.AddRange(new Control[] { lcap, list, add, del });
+        left.Resize += delegate {
+            list.SetBounds(14, 38, left.ClientSize.Width - 28, left.ClientSize.Height - 38 - 100);
+            add.SetBounds(14, list.Bottom + 10, left.ClientSize.Width - 28, 38);
+            del.SetBounds(14, add.Bottom + 8, left.ClientSize.Width - 28, 34);
+        };
+
+        Panel main = new Panel();
+        main.Dock = DockStyle.Fill;
+        main.Padding = new Padding(16);
+        title.Font = St.Title;
+        title.ForeColor = St.Text;
+        title.AutoSize = false;
+        summary.Font = St.Base;
+        summary.AutoSize = false;
+        onlyGaps.Text = "только пропущенные";
+        onlyGaps.Font = St.Base;
+        onlyGaps.CheckedChanged += delegate { Fill(); };
+        showPaper.Text = "и записанные на бумаге";
+        showPaper.Font = St.Base;
+        showPaper.CheckedChanged += delegate { Fill(); };
+        Button refresh = Ui.Button("Обновить из договоров", false);
+        refresh.Click += delegate { Reload(); };
+        Button sinceBtn = Ui.Button("Ведёт с номера…", false);
+        sinceBtn.Click += delegate { AskSince(); };
+        Button print = Ui.Button("Распечатать отчёт", true);
+        print.Click += delegate { Print(true); };
+        Label hint = Ui.Caption("Из договоров - сами (дата, лицевой, № учёта, место). № задания, причину, снятую пломбу и пломбы не по договору " +
+            "впишите в таблицу - сохраняется само. Красные - пропущенные.");
+        hint.TextAlign = ContentAlignment.TopLeft;
+        SetupGrid();
+        main.Controls.AddRange(new Control[] { title, summary, onlyGaps, showPaper, refresh, sinceBtn, print, hint, grid });
+        main.Resize += delegate {
+            int w = main.ClientSize.Width - 32;
+            title.SetBounds(16, 12, w, 28);
+            summary.SetBounds(16, 42, w, 40);
+            hint.SetBounds(16, 84, w - 650, 40);
+            onlyGaps.SetBounds(w - 620, 76, 190, 24);
+            showPaper.SetBounds(w - 620, 100, 200, 24);
+            sinceBtn.SetBounds(w - 420, 82, 190, 38);
+            refresh.SetBounds(w - 220, 44, 236, 34);
+            print.SetBounds(w - 220, 82, 236, 38);
+            grid.SetBounds(16, 128, w, main.ClientSize.Height - 144);
+        };
+
+        Controls.Add(main);
+        Controls.Add(left);
+        Controls.Add(top);
+        FormClosing += delegate(object s, FormClosingEventArgs e) {
+            if (Home != null && e.CloseReason == CloseReason.UserClosing) { e.Cancel = true; GoBack(); }
+        };
+        KeyDown += delegate(object s, KeyEventArgs e) { if (e.KeyCode == Keys.Escape && !grid.IsCurrentCellInEditMode) { e.SuppressKeyPress = true; GoBack(); } };
+        Shown += delegate { Reload(); };
+    }
+
+    void SetupGrid() {
+        grid.AllowUserToAddRows = false;
+        grid.AllowUserToDeleteRows = false;
+        grid.AllowUserToResizeRows = false;
+        grid.RowHeadersVisible = false;
+        grid.SelectionMode = DataGridViewSelectionMode.CellSelect;
+        grid.BackgroundColor = Color.White;
+        grid.BorderStyle = BorderStyle.FixedSingle;
+        grid.Font = St.Base;
+        grid.ColumnHeadersDefaultCellStyle.Font = St.Bold;
+        grid.ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.AutoSize;
+        grid.ColumnHeadersDefaultCellStyle.WrapMode = DataGridViewTriState.True;
+        grid.EnableHeadersVisualStyles = false;
+        grid.ColumnHeadersDefaultCellStyle.BackColor = St.TintOf("Пломбы и оборудование").Head;
+        grid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
+        Col("№", 40, true);
+        Col("Пломба", 95, true);
+        int[] fw = { 90, 100, 95, 100, 90, 95, 80 };
+        for (int i = 0; i < Heads.Length; i++) Col(Heads[i], fw[i], false);
+        Col("Откуда", 150, true);
+        grid.CellEndEdit += delegate(object s, DataGridViewCellEventArgs e) { Edited(e.RowIndex, e.ColumnIndex); };
+    }
+
+    void Col(string name, int weight, bool ro) {
+        DataGridViewTextBoxColumn c = new DataGridViewTextBoxColumn();
+        c.HeaderText = name;
+        c.FillWeight = weight;
+        c.ReadOnly = ro;
+        c.SortMode = DataGridViewColumnSortMode.NotSortable;
+        if (ro) c.DefaultCellStyle.ForeColor = St.Caption;
+        grid.Columns.Add(c);
+    }
+
+    public void GoBack() {
+        if (Home == null) return;
+        if (grid.IsCurrentCellInEditMode) grid.EndEdit();
+        Hide();
+        Home.Return(null);
+    }
+
+    // ---------- партии ----------
+
+    public void Reload() {
+        string keep = cur != null ? cur.File : memory.Get("ПломбыПартия", "");
+        batches.Clear();
+        try {
+            if (Directory.Exists(dir))
+                foreach (string f in Directory.GetFiles(dir, "*.txt")) {
+                    try { SealBatch b = SealBatch.Load(f); if (b.First.Length > 0 && b.Count > 0) batches.Add(b); } catch { }
+                }
+        } catch { }
+        batches.Sort(delegate(SealBatch a, SealBatch b) {
+            int c = a.First.Length.CompareTo(b.First.Length);
+            return c != 0 ? c : a.FirstValue.CompareTo(b.FirstValue);
+        });
+        try { uses = SealRegistry.FromContracts(Path.Combine(DogovorForm.Folder(here, memory), "данные")); } catch { uses = new List<SealRegistry.Use>(); }
+        list.BeginUpdate();
+        list.Items.Clear();
+        int sel = -1;
+        for (int i = 0; i < batches.Count; i++) {
+            SealBatch b = batches[i];
+            List<SealRow> r = SealRegistry.Rows(b, uses);
+            int used = 0;
+            foreach (SealRow x in r) if (x.Used) used++;
+            int gaps = SealRegistry.Gaps(r).Count;
+            list.Items.Add(b.Title + "  (" + used + "/" + b.Count + (gaps > 0 ? ", пропущено " + gaps : "") + ")");
+            if (b.File == keep) sel = i;
+        }
+        list.EndUpdate();
+        if (batches.Count == 0) { cur = null; rows.Clear(); title.Text = "Партий пока нет - «Новая партия…»"; summary.Text = ""; Fill(); return; }
+        list.SelectedIndex = sel >= 0 ? sel : batches.Count - 1;
+    }
+
+    void ShowBatch(SealBatch b) {
+        cur = b;
+        memory.Values["ПломбыПартия"] = b.File;
+        rows = SealRegistry.Rows(b, uses);
+        title.Text = "Пломбы " + b.Title + " (" + b.Kind + ", " + b.Count + " шт.)" + (b.Issued.Length > 0 ? ", выданы " + b.Issued : "");
+        Summary();
+        Fill();
+    }
+
+    void Summary() {
+        if (cur == null) { summary.Text = ""; return; }
+        int used = 0;
+        foreach (SealRow r in rows) if (r.Used) used++;
+        List<SealRow> gaps = SealRegistry.Gaps(rows);
+        List<string> g = new List<string>();
+        foreach (SealRow r in gaps) { if (g.Count == 12) { g.Add("..."); break; } g.Add(r.Number); }
+        List<string> conf = new List<string>();
+        foreach (SealRow r in rows) if (r.Conflict.Length > 0) conf.Add(r.Number);
+        int paper = 0;
+        foreach (SealRow r in rows) if (r.Paper && !r.Used) paper++;
+        summary.Text = "Использовано " + used + (paper > 0 ? " (и раньше, на бумаге, " + paper + ")" : "") + " из " + cur.Count + ", свободно " + (cur.Count - used - paper) +
+            (gaps.Count > 0 ? ". Пропущено " + gaps.Count + ": " + string.Join(", ", g.ToArray()) : ". Пропущенных нет") +
+            (conf.Count > 0 ? ". В двух договорах: " + string.Join(", ", conf.ToArray()) : "");
+        summary.ForeColor = gaps.Count > 0 || conf.Count > 0 ? St.Bad : St.Good;
+    }
+
+    void Fill() {
+        filling = true;
+        try {
+            grid.Rows.Clear();
+            Dictionary<SealRow, bool> gaps = new Dictionary<SealRow, bool>();
+            foreach (SealRow r in SealRegistry.Gaps(rows)) gaps[r] = true;
+            foreach (SealRow r in rows) {
+                if (onlyGaps.Checked && !gaps.ContainsKey(r)) continue;
+                // записанное раньше на бумаге - по галочке
+                if (r.Paper && !r.Used && !showPaper.Checked) continue;
+                object[] v = new object[10];
+                v[0] = r.Index;
+                v[1] = r.Number;
+                for (int c = 0; c < SealRow.Cols; c++) v[2 + c] = r.Get(c);
+                v[9] = r.Conflict.Length > 0 ? "! и в " + r.Conflict : r.Source.Length > 0 ? "договор " + r.Source : r.Used ? "вписано" : r.Paper ? "на бумаге (раньше)" : "";
+                int i = grid.Rows.Add(v);
+                DataGridViewRow gr = grid.Rows[i];
+                gr.Tag = r;
+                if (gaps.ContainsKey(r)) gr.DefaultCellStyle.BackColor = St.Missing;
+                else if (r.Conflict.Length > 0) gr.DefaultCellStyle.BackColor = Color.FromArgb(255, 236, 200);
+                else if (r.HandOnly) gr.DefaultCellStyle.BackColor = Color.FromArgb(255, 250, 222);
+                else if (r.Paper && !r.Used) { gr.DefaultCellStyle.ForeColor = St.Hint; gr.DefaultCellStyle.BackColor = St.Disabled; }
+                else if (!r.Used) gr.DefaultCellStyle.ForeColor = St.Hint;
+                // вписанное поверх договора - синим
+                for (int c = 0; c < SealRow.Cols; c++) if (r.Hand[c] != null && r.Hand[c] != r.Auto[c] && r.Source.Length > 0) gr.Cells[2 + c].Style.ForeColor = St.Accent;
+            }
+        } finally { filling = false; }
+    }
+
+    void Edited(int row, int col) {
+        if (filling || cur == null || row < 0 || col < 2 || col > 8) return;
+        SealRow r = grid.Rows[row].Tag as SealRow;
+        if (r == null) return;
+        object o = grid.Rows[row].Cells[col].Value;
+        string v = o == null ? "" : o.ToString().Trim();
+        int c = col - 2;
+        // как в договоре - вписанное не нужно
+        r.Hand[c] = v == r.Auto[c] ? null : v;
+        string[] h;
+        if (!cur.Hand.TryGetValue(r.Number, out h)) { h = new string[SealRow.Cols]; cur.Hand[r.Number] = h; }
+        h[c] = r.Hand[c];
+        bool any = false;
+        foreach (string s in h) if (s != null) any = true;
+        if (!any) cur.Hand.Remove(r.Number);
+        try { cur.Save(); } catch (Exception ex) { MessageBox.Show(this, "Не сохранилось: " + ex.Message, Text); }
+        Summary();
+        BeginInvoke((MethodInvoker)delegate { int first = grid.FirstDisplayedScrollingRowIndex; Fill(); RefreshList(); if (first >= 0 && first < grid.Rows.Count) grid.FirstDisplayedScrollingRowIndex = first; });
+    }
+
+    void RefreshList() {
+        int i = list.SelectedIndex;
+        if (i < 0 || cur == null) return;
+        int used = 0;
+        foreach (SealRow x in rows) if (x.Used) used++;
+        int gaps = SealRegistry.Gaps(rows).Count;
+        filling = true;
+        try { list.Items[i] = cur.Title + "  (" + used + "/" + cur.Count + (gaps > 0 ? ", пропущено " + gaps : "") + ")"; } finally { filling = false; }
+    }
+
+    public void NewBatch() {
+        using (BatchDialog d = new BatchDialog(memory, new Lists(Path.Combine(here, "spravochniki.txt")).Get("Оформил"))) {
+            if (d.ShowDialog(this) != DialogResult.OK) return;
+            AddBatch(d.Kind, d.First, d.Count, d.Issued, d.Fio, d.Post, d.SinceNumber);
+        }
+    }
+
+    // для проверки без окна тоже
+    public void AddBatch(string kind, string first, int count, string issued, string fio, string post, string sinceNumber) {
+        SealBatch b = new SealBatch();
+        b.Kind = kind; b.First = first; b.Count = count; b.Issued = issued; b.Fio = fio; b.Post = post;
+        b.Since = sinceNumber.Length > 0 && b.IndexOf(sinceNumber) >= 0 ? b.IndexOf(sinceNumber) + 1 : 1;
+        foreach (SealBatch o in batches)
+            if (o.First.Length == b.First.Length && o.FirstValue < b.FirstValue + b.Count && b.FirstValue < o.FirstValue + o.Count)
+                MessageBox.Show(this, "Номера пересекаются с партией " + o.Title + ". Партия всё равно создана - проверьте номера.", Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        Directory.CreateDirectory(dir);
+        b.File = Path.Combine(dir, b.First + "-" + b.Last + ".txt");
+        b.Save();
+        memory.Values["ПломбыФИО"] = fio;
+        memory.Values["ПломбыДолжность"] = post;
+        memory.Save();
+        cur = b;
+        Reload();
+    }
+
+    // партия начата раньше, на бумаге: с какого номера её ведёт программа
+    void AskSince() {
+        if (cur == null) return;
+        using (Form f = new Form()) {
+            f.Text = "С какого номера ведёт программа";
+            f.Font = St.Base;
+            f.BackColor = Color.White;
+            f.FormBorderStyle = FormBorderStyle.FixedDialog;
+            f.StartPosition = FormStartPosition.CenterParent;
+            f.MaximizeBox = f.MinimizeBox = false;
+            f.ShowInTaskbar = false;
+            f.ClientSize = new Size(460, 150);
+            Label l = Ui.Caption("Номера раньше - записаны на бумаге (не пропущенные, на печать - с листа, где этот номер):");
+            l.SetBounds(16, 12, 430, 40);
+            l.TextAlign = ContentAlignment.TopLeft;
+            TextBox t = Ui.Text(1);
+            t.Text = cur.Number(Math.Max(0, cur.Since - 1));
+            t.SetBounds(16, 58, 200, 26);
+            Button ok = Ui.Button("OK", true);
+            ok.SetBounds(250, 100, 90, 36);
+            ok.DialogResult = DialogResult.OK;
+            Button cancel = Ui.Button("Отмена", false);
+            cancel.SetBounds(350, 100, 94, 36);
+            cancel.DialogResult = DialogResult.Cancel;
+            f.Controls.AddRange(new Control[] { l, t, ok, cancel });
+            f.AcceptButton = ok;
+            f.CancelButton = cancel;
+            if (f.ShowDialog(this) != DialogResult.OK) return;
+            int k = cur.IndexOf(t.Text.Trim());
+            if (k < 0) { MessageBox.Show(this, "Такого номера нет в партии " + cur.Title + ".", Text); return; }
+            cur.Since = k + 1;
+            cur.Save();
+            Reload();
+        }
+    }
+
+    void DeleteBatch() {
+        if (cur == null) return;
+        if (MessageBox.Show(this, "Удалить партию " + cur.Title + "?\n\nВписанное в таблицу пропадёт (договоры не трогаются).", Text,
+                MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
+        try { File.Delete(cur.File); } catch (Exception ex) { MessageBox.Show(this, ex.Message, Text); return; }
+        cur = null;
+        Reload();
+    }
+
+    public string Print(bool open) {
+        if (cur == null) return null;
+        if (grid.IsCurrentCellInEditMode) grid.EndEdit();
+        string file = Path.Combine(dir, "Отчёт пломбы " + cur.Title.Replace(" ", "") + ".docx");
+        try {
+            SealPrint.Write(cur, rows, file);
+            if (open) Process.Start(file);
+            return file;
+        } catch (IOException ex) {
+            MessageBox.Show(this, "Не получилось записать отчёт (может, он открыт в Word - закройте):\n" + ex.Message, Text);
+        } catch (Exception ex) {
+            MessageBox.Show(this, "Отчёт: " + file + "\n\n" + ex.Message, Text);
+        }
+        return null;
+    }
+
+    // для проверки
+    public string Status { get { return title.Text + " | " + summary.Text; } }
+    public void SetCell(int index, int col, string v) {
+        foreach (DataGridViewRow gr in grid.Rows)
+            if (((SealRow)gr.Tag).Index == index) { gr.Cells[col].Value = v; Edited(gr.Index, col); return; }
+    }
+}
+
+// новая партия пломб
+public class BatchDialog : Form {
+    readonly Seg kind = new Seg("пластиковые", "наклейки");
+    readonly TextBox first = Ui.Text(1), count = Ui.Text(1), post = Ui.Text(1), since = Ui.Text(1);
+    readonly DateBox issued = new DateBox();
+    readonly Combo fio = new Combo(true, false);
+    readonly Label note = new Label();
+    public string Kind { get { return kind.Value; } }
+    public string First { get { return first.Text.Trim(); } }
+    public int Count { get { int n; return int.TryParse(count.Text.Trim(), out n) ? n : 0; } }
+    public string Issued { get { return issued.Text2; } }
+    public string Fio { get { return fio.Text.Trim(); } }
+    public string Post { get { return post.Text.Trim(); } }
+    public string SinceNumber { get { return since.Text.Trim(); } }
+
+    public BatchDialog(Memory memory, List<string> names) {
+        Text = "Новая партия пломб";
+        Font = St.Base;
+        BackColor = Color.White;
+        StartPosition = FormStartPosition.CenterParent;
+        FormBorderStyle = FormBorderStyle.FixedDialog;
+        MaximizeBox = MinimizeBox = false;
+        ShowInTaskbar = false;
+        ClientSize = new Size(520, 476);
+        kind.Value = "пластиковые";
+        count.Text = "100";
+        kind.Changed += delegate {
+            // пластиковые - по 100, наклейки - обычно 20 (могут дать и меньше - поправьте)
+            if (count.Text == "100" || count.Text == "20" || count.Text.Length == 0) count.Text = kind.Value == "наклейки" ? "20" : "100";
+            Check();
+        };
+        fio.SetItems(names);
+        fio.Text = memory.Get("ПломбыФИО", memory.Get("oformil", ""));
+        post.Text = memory.Get("ПломбыДолжность", "");
+        Ui.Cue(first, "например 4830401 или 0012345001");
+        first.TextChanged += delegate { Check(); };
+        count.TextChanged += delegate { Check(); };
+        int y = 16;
+        Add("Вид пломб", kind, ref y, 260);
+        Add("Первый номер партии", first, ref y, 220);
+        Add("Сколько выдали, шт.", count, ref y, 100);
+        Add("Дата выдачи", issued, ref y, 150);
+        Add("Ф.И.О. (внизу отчёта)", fio, ref y, 260);
+        Add("Должность (внизу отчёта)", post, ref y, 480);
+        Ui.Cue(since, "пусто - с первого номера");
+        since.TextChanged += delegate { Check(); };
+        Add("Партия начата раньше, на бумаге? Программа ведёт с номера:", since, ref y, 220);
+        note.SetBounds(20, y, 480, 40);
+        note.Font = St.Base;
+        Controls.Add(note);
+        Button ok = Ui.Button("Создать", true);
+        ok.SetBounds(300, ClientSize.Height - 54, 100, 38);
+        ok.Click += delegate { if (Check()) { DialogResult = DialogResult.OK; Close(); } };
+        Button cancel = Ui.Button("Отмена", false);
+        cancel.SetBounds(408, ClientSize.Height - 54, 96, 38);
+        cancel.Click += delegate { DialogResult = DialogResult.Cancel; Close(); };
+        Controls.Add(ok);
+        Controls.Add(cancel);
+        AcceptButton = ok;
+        CancelButton = cancel;
+        Check();
+    }
+
+    void Add(string caption, Control c, ref int y, int w) {
+        Label l = Ui.Caption(caption);
+        l.SetBounds(20, y, 300, 18);
+        c.SetBounds(20, y + 20, w, c is Seg ? 30 : 26);
+        Controls.Add(l);
+        Controls.Add(c);
+        y += 56;
+    }
+
+    bool Check() {
+        string f = First;
+        bool digits = f.Length >= 4;
+        foreach (char ch in f) if (!char.IsDigit(ch)) digits = false;
+        if (!digits) { note.Text = "Первый номер - только цифры (от 4)."; note.ForeColor = St.Bad; return false; }
+        int n = Count;
+        if (n < 1 || n > 1000) { note.Text = "Сколько выдали - от 1 до 1000."; note.ForeColor = St.Bad; return false; }
+        SealBatch b = new SealBatch();
+        b.First = f;
+        b.Count = n;
+        note.Text = "Номера: " + b.First + " ... " + b.Last + " (" + n + " шт.)";
+        if (SinceNumber.Length > 0) {
+            int k = b.IndexOf(SinceNumber);
+            if (k < 0) { note.Text = "Номер «ведёт с» - не из этой партии (" + b.First + " ... " + b.Last + ")."; note.ForeColor = St.Bad; return false; }
+            note.Text += "; до " + SinceNumber + " - уже на бумаге";
+        }
+        note.ForeColor = St.Good;
         return true;
     }
 }
