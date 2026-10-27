@@ -18396,6 +18396,13 @@ public class JurAbon {
     public int Kp, Nab, Score, Flats;
     public bool House;      // адрес карточки - этот дом (улица и номер дома)
     public string Name = "", Address = "", Contract = "";
+    public readonly List<string> FlatList = new List<string>();   // квартиры в точках учёта карточки («22», «31»...)
+
+    // «22, 31, 65, 99, 110»; много - начало и сколько всего
+    public string FlatText(int max) {
+        if (FlatList.Count <= max) return string.Join(", ", FlatList.ToArray());
+        return string.Join(", ", FlatList.GetRange(0, max).ToArray()) + "... (всего " + FlatList.Count + ")";
+    }
 }
 
 public class JurPoint {
@@ -18516,7 +18523,16 @@ public class JurBase {
         }
         foreach (JurAbon a in cards.Values) {
             a.Flats = 0;
-            foreach (JurPoint p in r.Points) if (p.Kp == a.Kp && p.Nab == a.Nab && p.Flat) a.Flats++;
+            foreach (JurPoint p in r.Points) {
+                if (p.Kp != a.Kp || p.Nab != a.Nab) continue;
+                if (p.Flat) a.Flats++;
+                string f = FlatNo(p.Name);
+                if (f.Length > 0 && !a.FlatList.Contains(f)) a.FlatList.Add(f);
+            }
+            a.FlatList.Sort(delegate(string x, string y) {
+                int c = Lead(x).CompareTo(Lead(y));
+                return c != 0 ? c : string.Compare(x, y, StringComparison.Ordinal);
+            });
             a.Score = (a.House ? 10 : 0) + (a.Name.ToLowerInvariant().Contains("нераспрод") ? 2 : 0) + (a.Flats > 0 ? 3 : 0);
             r.Cards.Add(a);
         }
@@ -18560,7 +18576,25 @@ public class JurBase {
         return Regex.IsMatch(text.ToLowerInvariant(), @"(?<![\dа-яa-z])" + Regex.Escape(n) + @"(?![\dа-я])");
     }
 
-    // наименование ТУ - квартира kv: «кв.15», «кв 15», «квартира 15» или одно число «15»
+    // номер квартиры в наименовании ТУ: «кв.15», «кв 15», «квартира 15», «15 квартира», «110 квартир», «15»; нет - пусто
+    public static string FlatNo(string name) {
+        string n = name.Trim().ToLowerInvariant();
+        Match m = Regex.Match(n, @"кв[а-я]*\.?\s*(\d+[а-я]?)\b");
+        if (m.Success) return m.Groups[1].Value;
+        m = Regex.Match(n, @"^(\d+[а-я]?)\s*\.?\s*кв");
+        if (m.Success) return m.Groups[1].Value;
+        m = Regex.Match(n, @"^(\d+[а-я]?)$");
+        return m.Success ? m.Groups[1].Value : "";
+    }
+
+    // число в начале (для порядка квартир: 9 раньше 10)
+    static int Lead(string s) {
+        int n = 0, i = 0;
+        while (i < s.Length && char.IsDigit(s[i]) && n < 100000) n = n * 10 + (s[i++] - '0');
+        return n;
+    }
+
+    // наименование ТУ - квартира kv: «кв.15», «кв 15», «квартира 15», «15 квартира» или одно число «15»
     public static bool IsFlat(string name, string kv) {
         string k = kv.Trim().ToLowerInvariant();
         if (k.Length == 0) return false;
@@ -18817,8 +18851,8 @@ public class JurPick : Form {
         abCap = Ui.Caption("Найдено в базе юр лиц: карточки этого дома");
         ptCap = Ui.Caption("Точки учёта карточки");
         nearCap = Ui.Caption("Лицевые соседей (база физ лиц)");
-        Columns(abons, new string[] { "Договор", "Наименование договора", "Код", "Наименование абонента", "Адрес абонента", "Квартира" },
-            new int[] { 70, 250, 50, 240, 300, 90 });
+        Columns(abons, new string[] { "Договор", "Наименование договора", "Код", "Наименование абонента", "Адрес абонента", "Квартиры в точках учёта" },
+            new int[] { 70, 220, 50, 200, 230, 330 });
         Columns(points, new string[] { "Наим. ТУ", "№ счётчика", "Тип", "Поверка", "Показания", "Пред. показ.", "Фазы", "Шкала", "Вид" },
             new int[] { 150, 130, 230, 80, 100, 100, 55, 60, 110 });
         points.MultiSelect = true;      // два счётчика - Ctrl+щелчок по второй строке
@@ -18872,8 +18906,8 @@ public class JurPick : Form {
             }
             find.SetBounds(cx + 4, y + 17, Math.Max(100, Math.Min(160, body.ClientSize.Width - 24 - cx - 4)), 32);
             y += 54;
-            status.SetBounds(x, y, w, 40);
-            y += 44;
+            status.SetBounds(x, y, w, 58);
+            y += 62;
             int bottom = 212, free = body.ClientSize.Height - y - bottom;
             abCap.SetBounds(x, y, w, 18);
             abons.SetBounds(x, y + 20, w, Math.Max(70, free * 2 / 5 - 22));
@@ -19011,11 +19045,18 @@ public class JurPick : Form {
         abCap.Text = "Найдено в базе юр лиц: карточки " + (kp > 0 ? "договора " + kp : "этого дома") + " - " + abList.Count;
         string text;
         if (kv.Length == 0) text = "Дом найден: карточек " + abList.Count + ". Впишите квартиру - найдётся её счётчик.";
-        else if (withFlat.Count == 0) text = "Дом найден (карточек " + abList.Count + "), а квартиры " + kv + " среди точек учёта нет - выберите строку сами или проверьте в «Долгах район».";
+        else if (withFlat.Count == 0) {
+            // квартиры нет в точках учёта (продана и уже переведена, или не внесли) - какие квартиры там есть
+            List<string> have = new List<string>();
+            foreach (JurAbon a in abList) if (a.FlatList.Count > 0) have.Add(a.Kp + "/" + a.Nab + ": " + a.FlatText(30));
+            text = "Дом найден (карточек " + abList.Count + "), но квартиры " + kv + " в его точках учёта нет - возможно, уже переведена или не внесли. " +
+                (have.Count > 0 ? "Квартиры в точках учёта: " + string.Join("; ", have.ToArray()) + "." : "В точках учёта карточек номеров квартир нет.");
+        }
         else text = "Квартира " + kv + " найдена: договор/карточка " + string.Join(", ", withFlat.ToArray()) + ".";
         Status(text + when, old || kv.Length > 0 && withFlat.Count == 0 ? St.Bad : St.Good);
         foreach (JurAbon a in abList) {
-            ListViewItem it = new ListViewItem(new string[] { a.Kp.ToString(), a.Contract, a.Nab.ToString(), a.Name, a.Address, a.Flats > 0 ? "есть" : "" });
+            ListViewItem it = new ListViewItem(new string[] { a.Kp.ToString(), a.Contract, a.Nab.ToString(), a.Name, a.Address,
+                (a.Flats > 0 ? "есть кв. " + kv + "; " : "") + a.FlatText(40) });
             if (a.Flats > 0) it.BackColor = FlatBack;
             else if (!a.House) it.BackColor = OtherBack;
             abons.Items.Add(it);
