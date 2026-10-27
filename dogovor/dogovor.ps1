@@ -7093,12 +7093,17 @@ public class PhotoViewer : Form {
 
 public delegate object ShellMaker();
 public delegate void TextHandler(string text);
+// забранное фото: в какую папку его перенести (с телефона оно удаляется) или null - оставить на телефоне
+public delegate string PhotoSorter(string copied);
 
 public class PhoneResult {
     public string Error;                                   // ничего не вышло (нет телефона, закрыт и т.п.)
     public string Device = "";
     public readonly List<string> Copied = new List<string>();
     public readonly List<string> Failed = new List<string>();
+    public readonly List<string> Moved = new List<string>();      // перенесены с телефона (sorter): где лежат теперь
+    public readonly List<string> NotRemoved = new List<string>(); // скопированы в папку, но с телефона не удалились
+    public int Left;                                       // новые фото, до которых не дошла очередь (больше max)
     public bool NoneNew;                                   // новых фото нет
     public DateTime Newest = DateTime.MinValue;            // время самого нового забранного фото (по телефону)
     public int Total;                                      // фото на телефоне всего
@@ -7169,7 +7174,12 @@ public static class Phone {
     }
 
     // забрать с телефона: новые фото (снятые позже since) или, если last > 0, последние last фото
-    public static PhoneResult Take(string dir, DateTime since, int last, TextHandler progress) {
+    public static PhoneResult Take(string dir, DateTime since, int last, TextHandler progress) { return Take(dir, since, last, MaxNew, null, progress); }
+
+    // sorter - разобрать забранное: фото копируются в dir по одному, sorter говорит, куда его перенести (с телефона
+    // оно тогда удаляется - «вырезать и вставить»), копия из dir убирается; null - фото остаётся на телефоне, копия убирается.
+    // С sorter новые фото берутся от старых к новым (больше max - остальные в следующий раз, r.Left)
+    public static PhoneResult Take(string dir, DateTime since, int last, int max, PhotoSorter sorter, TextHandler progress) {
         PhoneResult r = new PhoneResult();
         try {
             object shell = MakeShell();
@@ -7247,7 +7257,11 @@ public static class Phone {
             if (last > 0) for (int i = Math.Max(0, pics.Count - last); i < pics.Count; i++) take.Add(pics[i]);
             else {
                 foreach (Pic p in pics) if (p.Date > since) take.Add(p);
-                if (take.Count > MaxNew) take.RemoveRange(0, take.Count - MaxNew);
+                if (take.Count > max) {
+                    r.Left = sorter != null ? take.Count - max : 0;
+                    if (sorter != null) take.RemoveRange(max, take.Count - max);
+                    else take.RemoveRange(0, take.Count - max);
+                }
             }
             if (take.Count == 0) { r.NoneNew = true; return r; }
 
@@ -7258,13 +7272,20 @@ public static class Phone {
                 Pic p = take[i];
                 if (p.Date > r.Newest) r.Newest = p.Date;
                 // уже забрано раньше в эту папку
-                if (File.Exists(Path.Combine(dir, p.Name))) continue;
+                if (sorter == null && File.Exists(Path.Combine(dir, p.Name))) continue;
                 if (progress != null) progress("Копирую с телефона фото " + (i + 1) + " из " + take.Count + "...");
                 Dictionary<string, bool> before = Snapshot(dir);
+                DateTime t0 = DateTime.Now;
                 Call(target, "CopyHere", p.Item, 4 | 16 | 512 | 1024);   // без вопросов и окон
-                string got = WaitNew(dir, before, p.Size);
-                if (got != null) r.Copied.Add(got);
-                else r.Failed.Add(p.Name);
+                string got = WaitNew(dir, before, p.Size, CopySeconds);
+                if (got == null) { r.Failed.Add(p.Name); continue; }
+                if (sorter == null) { r.Copied.Add(got); continue; }
+                if (progress != null) progress("Смотрю фото " + (i + 1) + " из " + take.Count + "...");
+                string to = null;
+                try { to = sorter(got); } catch { to = null; }
+                if (to == null) { TryDelete(got); continue; }
+                // перенос - это ещё раз копирование с телефона: ждём втрое дольше, чем шло первое (не меньше 20 с)
+                Move(shell, p, got, to, r, progress, i, take.Count, Math.Max(20, (int)((DateTime.Now - t0).TotalSeconds * 3)));
             }
         } catch (Exception ex) {
             Exception e = ex is System.Reflection.TargetInvocationException && ex.InnerException != null ? ex.InnerException : ex;
@@ -7273,6 +7294,33 @@ public static class Phone {
         return r;
     }
 
+    // «вырезать и вставить»: оболочка переносит фото с телефона в папку to (на телефоне его больше нет);
+    // не вышло - в папку кладётся уже скопированное фото, а на телефоне оно остаётся (r.NotRemoved)
+    static void Move(object shell, Pic p, string copy, string to, PhoneResult r, TextHandler progress, int i, int n, int seconds) {
+        string final = null;
+        try {
+            Directory.CreateDirectory(to);
+            object folder = Call(shell, "NameSpace", to);
+            string same = Path.Combine(to, Path.GetFileName(copy));
+            if (folder != null && !File.Exists(same)) {
+                if (progress != null) progress("Переношу с телефона фото " + (i + 1) + " из " + n + "...");
+                Dictionary<string, bool> before = Snapshot(to);
+                Call(folder, "MoveHere", p.Item, 4 | 16 | 512 | 1024);
+                final = WaitNew(to, before, p.Size, seconds);
+            }
+        } catch { final = null; }
+        if (final != null) { TryDelete(copy); r.Moved.Add(final); return; }
+        try {
+            string dst = Path.Combine(to, Path.GetFileName(copy));
+            if (File.Exists(dst)) TryDelete(copy);
+            else File.Move(copy, dst);
+            r.Moved.Add(dst);
+            r.NotRemoved.Add(Path.GetFileName(copy));
+        } catch { r.Failed.Add(p.Name); }
+    }
+
+    static void TryDelete(string f) { try { File.Delete(f); } catch { } }
+
     static Dictionary<string, bool> Snapshot(string dir) {
         Dictionary<string, bool> d = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
         foreach (string f in Directory.GetFiles(dir)) d[f] = true;
@@ -7280,8 +7328,8 @@ public static class Phone {
     }
 
     // копирование с телефона идёт в фоне: ждём новый файл, пока он не допишется (размер не растёт и файл свободен)
-    static string WaitNew(string dir, Dictionary<string, bool> before, long size) {
-        DateTime end = DateTime.Now.AddSeconds(CopySeconds);
+    static string WaitNew(string dir, Dictionary<string, bool> before, long size, int seconds) {
+        DateTime end = DateTime.Now.AddSeconds(seconds);
         string cand = null;
         long len = -1;
         int same = 0;
@@ -15053,9 +15101,10 @@ public class StartMenu : Form {
     readonly string here;
     DogovorForm dog;
     SpravkaForm spr;
-    readonly Tile dogTile, sprTile, jurTile, plTile;
+    readonly Tile dogTile, sprTile, jurTile, plTile, logTile;
     JurForm jur;
     PlombyForm pl;
+    SpravkaLogForm log;
 
     public StartMenu(string here, string launch) {
         this.here = here;
@@ -15064,7 +15113,7 @@ public class StartMenu : Form {
         Font = St.Base;
         BackColor = St.Back;
         StartPosition = FormStartPosition.CenterScreen;
-        ClientSize = new Size(640, 692);
+        ClientSize = new Size(640, 690);
         FormBorderStyle = FormBorderStyle.FixedSingle;
         MaximizeBox = false;
         KeyPreview = true;
@@ -15091,18 +15140,22 @@ public class StartMenu : Form {
         Controls.Add(top);
 
         dogTile = new Tile("Создать договор", "по шаблону Word; фото документов; проверка по базе", St.TintOf("Договор").Mark);
-        dogTile.SetBounds(34, 132, 572, 96);
+        dogTile.SetBounds(34, 122, 572, 86);
         dogTile.Click += delegate { OpenDogovor(); };
         sprTile = new Tile("Создать справку", "данные прибора учёта - из договора или вручную", St.TintOf("Счётчики").Mark);
-        sprTile.SetBounds(34, 244, 572, 96);
+        sprTile.SetBounds(34, 218, 572, 86);
         sprTile.Click += delegate { OpenSpravka(this, null); };
+        logTile = new Tile("Журнал справок", "вернувшиеся ответы - зелёным; забрать ответы с телефона", St.TintOf("Счётчики").Mark);
+        logTile.SetBounds(34, 314, 572, 86);
+        logTile.Click += delegate { OpenLog(this); };
         jurTile = new Tile("Перевод из юр в физ", "квартира юр лица -> договор с гражданином: счётчик, карточка, лицевой", St.TintOf("Объект").Mark);
-        jurTile.SetBounds(34, 356, 572, 96);
+        jurTile.SetBounds(34, 410, 572, 86);
         jurTile.Click += delegate { OpenJur(); };
         Controls.Add(dogTile);
         Controls.Add(sprTile);
+        Controls.Add(logTile);
         plTile = new Tile("Мои отчёты пломб", "партии пломб, что поставлено по договорам, пропущенные, печать отчёта", St.TintOf("Пломбы и оборудование").Mark);
-        plTile.SetBounds(34, 468, 572, 96);
+        plTile.SetBounds(34, 506, 572, 86);
         plTile.Click += delegate { OpenPlomby(); };
         Controls.Add(jurTile);
         Controls.Add(plTile);
@@ -15114,7 +15167,7 @@ public class StartMenu : Form {
             link.Font = St.Base;
             link.AutoSize = true;
             link.LinkColor = St.Accent;
-            link.Location = new Point(x, 596);
+            link.Location = new Point(x, 612);
             string what = l[1];
             link.LinkClicked += delegate { OpenPlace(what); };
             Controls.Add(link);
@@ -15125,7 +15178,7 @@ public class StartMenu : Form {
         keys.Font = St.Small;
         keys.ForeColor = St.Hint;
         keys.AutoSize = true;
-        keys.Location = new Point(36, 644);
+        keys.Location = new Point(36, 650);
         Controls.Add(keys);
 
         KeyDown += delegate(object s, KeyEventArgs e) {
@@ -15159,6 +15212,9 @@ public class StartMenu : Form {
         dogTile.Invalidate();
         sprTile.Note = spr != null && spr.Unsaved ? "есть несохранённая справка - откроется она" : "";
         sprTile.Invalidate();
+        int wait = SpravkaJournal.Waiting(here);
+        logTile.Note = wait > 0 ? "ждём ответа: " + wait : "";
+        logTile.Invalidate();
     }
 
     public void OpenDogovor() {
@@ -15182,6 +15238,17 @@ public class StartMenu : Form {
         if (spr.WindowState == FormWindowState.Minimized) spr.WindowState = FormWindowState.Normal;
         spr.Activate();
         if (from != spr) from.Hide();
+    }
+
+    // журнал справок; from - куда вернётся «Назад»
+    public void OpenLog(Form from) {
+        if (log == null || log.IsDisposed) { log = new SpravkaLogForm(here); log.Home = this; }
+        else log.Reload();
+        log.Back = from;
+        log.Show();
+        if (log.WindowState == FormWindowState.Minimized) log.WindowState = FormWindowState.Normal;
+        log.Activate();
+        if (from != log) from.Hide();
     }
 
     public void OpenPlomby() {
@@ -15227,6 +15294,7 @@ public class StartMenu : Form {
     public SpravkaForm Spravka { get { return spr; } }
     public JurForm Jur { get { return jur; } }
     public PlombyForm Plomby { get { return pl; } }
+    public SpravkaLogForm Log { get { return log; } }
 }
 
 // Большая кнопка меню: название, пояснение, цветная полоска слева
@@ -15252,9 +15320,9 @@ public class Tile : Control {
         using (SolidBrush b = new SolidBrush(hover ? Color.FromArgb(246, 249, 253) : Color.White)) g.FillRectangle(b, ClientRectangle);
         using (SolidBrush b = new SolidBrush(mark)) g.FillRectangle(b, 0, 0, 8, Height);
         using (Pen p = new Pen(hover || Focused ? St.Accent : St.Border, hover || Focused ? 2f : 1f)) g.DrawRectangle(p, 1, 1, Width - 2, Height - 2);
-        TextRenderer.DrawText(g, Title, TitleFont, new Point(28, 14), St.Text);
-        TextRenderer.DrawText(g, Sub, St.Base, new Rectangle(30, 50, Width - 70, 22), St.Hint, TextFormatFlags.EndEllipsis);
-        if (Note.Length > 0) TextRenderer.DrawText(g, Note, St.Small, new Point(30, 72), Color.FromArgb(190, 105, 0));
+        TextRenderer.DrawText(g, Title, TitleFont, new Point(28, 10), St.Text);
+        TextRenderer.DrawText(g, Sub, St.Base, new Rectangle(30, 43, Width - 70, 22), St.Hint, TextFormatFlags.EndEllipsis);
+        if (Note.Length > 0) TextRenderer.DrawText(g, Note, St.Small, new Point(30, 63), Color.FromArgb(190, 105, 0));
         // стрелка справа
         using (Pen p = new Pen(St.Accent, 2.5f)) {
             int cx = Width - 30, cy = Height / 2;
@@ -15289,7 +15357,7 @@ public class SpravkaForm : Form {
     public StartMenu Home;
     public Form Back;                     // куда «Назад»: меню или окно договора
     bool loading, dirty;
-    string savedFile;
+    string savedFile, savedId;
     // части адреса из договора - для имени файла («Копище Авиационная 15-83»)
     string fNp = "", fUlica = "", fDom = "", fKv = "", fromAdres = "";
 
@@ -15530,6 +15598,16 @@ public class SpravkaForm : Form {
             nav.Controls.Add(n);
             y += n.Height;
         }
+        NavItem logItem = new NavItem("Журнал справок", true);
+        logItem.Click += delegate {
+            if (Home != null) Home.OpenLog(this);
+            else {
+                SpravkaLogForm f = new SpravkaLogForm(here);
+                f.Back = this;
+                f.Show();
+                Hide();
+            }
+        };
         NavItem folder = new NavItem("Папка со справками", true);
         folder.Click += delegate {
             try { Directory.CreateDirectory(Folder(here)); Process.Start("explorer.exe", "\"" + Folder(here) + "\""); }
@@ -15539,13 +15617,14 @@ public class SpravkaForm : Form {
         dirs.Click += delegate {
             try { Process.Start("notepad.exe", "\"" + lists.File + "\""); } catch (Exception ex) { MessageBox.Show(this, ex.Message, Text); }
         };
-        foreach (NavItem n in new NavItem[] { folder, dirs }) {
+        foreach (NavItem n in new NavItem[] { logItem, folder, dirs }) {
             n.Anchor = AnchorStyles.Left | AnchorStyles.Bottom | AnchorStyles.Right;
             nav.Controls.Add(n);
         }
         nav.Resize += delegate {
             dirs.SetBounds(0, nav.ClientSize.Height - 20 - dirs.Height, nav.Width, dirs.Height);
             folder.SetBounds(0, dirs.Top - folder.Height, nav.Width, folder.Height);
+            logItem.SetBounds(0, folder.Top - logItem.Height, nav.Width, logItem.Height);
         };
         return nav;
     }
@@ -15643,6 +15722,7 @@ public class SpravkaForm : Form {
             SetV("zakl", First(lists.Get("Справка: заключение")));
             fNp = fUlica = fDom = fKv = fromAdres = "";
             savedFile = null;
+            savedId = null;
         } finally { loading = false; }
         dirty = false;
         Enable();
@@ -15698,6 +15778,7 @@ public class SpravkaForm : Form {
             if (Get(d, "oformil").Length > 0) SetV("inzh", Get(d, "oformil"));
             if (Get(d, "podp").Length > 0) SetV("nach", Get(d, "podp"));
             savedFile = null;
+            savedId = null;
         } finally { loading = false; }
         dirty = true;
         Enable();
@@ -15875,6 +15956,16 @@ public class SpravkaForm : Form {
                     MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2) != DialogResult.Yes) return null;
             string tmp = docx + ".tmp";
             List<string> missing = DocxTemplate.Fill(templateFile, tmp, Compose());
+            // номер справки (та же справка - прежний номер) и QR-код с ним в правом верхнем углу
+            string name = Path.GetFileNameWithoutExtension(docx), id = null, qrError = null;
+            try {
+                id = SpravkaJournal.IdFor(here, name);
+                SpravkaQr.AddTo(tmp, id);
+            } catch (Exception ex) {
+                qrError = ex.Message;
+                id = null;
+                DocxTemplate.Fill(templateFile, tmp, Compose());
+            }
             try {
                 if (File.Exists(docx)) File.Delete(docx);
             } catch (IOException) {
@@ -15883,15 +15974,29 @@ public class SpravkaForm : Form {
                 return null;
             }
             File.Move(tmp, docx);
+            if (id != null) {
+                SpravkaRec rec = new SpravkaRec();
+                rec.Id = id;
+                rec.Saved = DateTime.Now.ToString("dd.MM.yyyy HH:mm");
+                rec.Name = name;
+                rec.Ls = V("ls");
+                rec.Fio = V("fio");
+                rec.Address = V("adres");
+                try { SpravkaJournal.Put(here, rec); } catch (Exception ex) { qrError = "журнал справок не записался: " + ex.Message; }
+            }
+            savedId = id;
             memory.Values["СправкаИнженер"] = V("inzh");
             memory.Values["СправкаНачальник"] = V("nach");
             memory.Remember("место справки", V("mesto"));
             memory.Save();
             savedFile = docx;
             dirty = false;
-            head.Text = "Справка «" + Path.GetFileNameWithoutExtension(docx) + "»";
+            head.Text = "Справка «" + Path.GetFileNameWithoutExtension(docx) + "»" + (id != null ? " № " + id : "");
             headSub.Text = "сохранена " + DateTime.Now.ToString("dd.MM.yyyy HH:mm") + " - " + docx;
             RefreshState();
+            if (qrError != null && ask)
+                MessageBox.Show(this, "Справка сохранена, но QR-код на неё не поставлен:\n" + qrError + "\n\nОтвет на неё можно будет добавить в журнал справок только вручную.", Text,
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
             if (missing.Count > 0)
                 MessageBox.Show(this, "В шаблоне справки есть поля, которые программа не знает (остались пустыми):\n" + string.Join(", ", missing.ToArray()), Text);
             if (openWord) {
@@ -15906,6 +16011,8 @@ public class SpravkaForm : Form {
     }
 
     // перед выходом из программы: несохранённая справка - спросить. true - можно выходить
+    public string SavedId { get { return savedId; } }
+
     public bool AskSaveBeforeExit() {
         if (!dirty) return true;
         DialogResult r = MessageBox.Show(this, "Справка не сохранена. Сохранить её?\n\nДа - сохранить и выйти\nНет - выйти без сохранения\nОтмена - вернуться к справке", Text,
@@ -15913,6 +16020,697 @@ public class SpravkaForm : Form {
         if (r == DialogResult.Cancel) return false;
         if (r == DialogResult.Yes) return Save(false, true) != null;
         return true;
+    }
+}
+
+// Справки с QR-кодом. У каждой справки свой номер («S261027-01»: дата и порядковый за день) - он в QR-коде в правом
+// верхнем углу справки и подписью под кодом. Журнал «Справки\журнал справок.txt»: номер, когда сохранена, имя справки,
+// лицевой, Ф.И.О., адрес. Вернувшуюся справку фотографируют телефоном: «Забрать ответы с телефона» ищет код справки
+// на новых фото и переносит такие фото (с телефона - вырезает) в папку «Справки\<имя справки> - ответ».
+// Фото без кода справки остаются на телефоне. Справка вернулась - в папке ответа есть файлы (в журнале - зелёным).
+
+public class SpravkaRec {
+    public string Id = "", Saved = "", Name = "", Ls = "", Fio = "", Address = "";
+}
+
+public class AnswerResult {
+    public PhoneResult Phone;
+    public readonly List<string> Got = new List<string>();        // имена справок, к которым легли фото
+    public readonly List<string> Unknown = new List<string>();    // код справки есть, но в журнале её нет
+    public int NoCode;                                            // новые фото без кода справки (остались на телефоне)
+}
+
+public static class SpravkaJournal {
+    static readonly Regex IdRx = new Regex(@"^S\d{6}-\d{2,4}$");
+
+    public static string FileOf(string here) { return Path.Combine(SpravkaForm.Folder(here), "журнал справок.txt"); }
+
+    public static bool IsId(string s) { return s != null && IdRx.IsMatch(s); }
+
+    public static List<SpravkaRec> Load(string here) {
+        List<SpravkaRec> r = new List<SpravkaRec>();
+        string f = FileOf(here);
+        if (!File.Exists(f)) return r;
+        foreach (string line in File.ReadAllLines(f, Encoding.UTF8)) {
+            if (line.StartsWith("#") || line.Trim().Length == 0) continue;
+            string[] p = line.Split('\t');
+            if (p.Length < 3 || !IsId(p[0].Trim())) continue;
+            SpravkaRec x = new SpravkaRec();
+            x.Id = p[0].Trim();
+            x.Saved = p[1].Trim();
+            x.Name = p[2].Trim();
+            if (p.Length > 3) x.Ls = p[3].Trim();
+            if (p.Length > 4) x.Fio = p[4].Trim();
+            if (p.Length > 5) x.Address = p[5].Trim();
+            r.Add(x);
+        }
+        return r;
+    }
+
+    static string Clean(string s) { return (s ?? "").Replace('\t', ' ').Replace('\r', ' ').Replace('\n', ' ').Trim(); }
+
+    // запись через временный файл: свет погас при записи - старый журнал цел
+    static void Write(string here, List<SpravkaRec> list) {
+        StringBuilder sb = new StringBuilder();
+        sb.Append("# Журнал справок (ведёт программа «Оформление договора»): номер, сохранена, справка, лицевой, Ф.И.О., адрес - через табуляцию\r\n");
+        sb.Append("# Номер - в QR-коде на справке. Ответ - фото в папке «<справка> - ответ» рядом со справкой\r\n");
+        foreach (SpravkaRec x in list)
+            sb.Append(Clean(x.Id)).Append('\t').Append(Clean(x.Saved)).Append('\t').Append(Clean(x.Name)).Append('\t')
+              .Append(Clean(x.Ls)).Append('\t').Append(Clean(x.Fio)).Append('\t').Append(Clean(x.Address)).Append("\r\n");
+        string f = FileOf(here), tmp = f + ".tmp";
+        Directory.CreateDirectory(Path.GetDirectoryName(f));
+        File.WriteAllText(tmp, sb.ToString(), new UTF8Encoding(true));
+        if (File.Exists(f)) File.Delete(f);
+        File.Move(tmp, f);
+    }
+
+    public static SpravkaRec Find(List<SpravkaRec> list, string id) {
+        foreach (SpravkaRec x in list) if (x.Id == id) return x;
+        return null;
+    }
+
+    public static SpravkaRec ByName(List<SpravkaRec> list, string name) {
+        for (int i = list.Count - 1; i >= 0; i--)
+            if (string.Compare(list[i].Name, name, StringComparison.OrdinalIgnoreCase) == 0) return list[i];
+        return null;
+    }
+
+    // номер новой справки: S + ггММдд + «-» + порядковый за день (01, 02 ...)
+    public static string NewId(List<SpravkaRec> list, DateTime day) {
+        string pre = "S" + day.ToString("yyMMdd", CultureInfo.InvariantCulture) + "-";
+        int max = 0;
+        foreach (SpravkaRec x in list) {
+            if (!x.Id.StartsWith(pre)) continue;
+            int n;
+            if (int.TryParse(x.Id.Substring(pre.Length), out n) && n > max) max = n;
+        }
+        return pre + (max + 1).ToString("00");
+    }
+
+    // номер для справки с этим именем: ту же справку пересохранили - прежний номер (на распечатанной он уже стоит)
+    public static string IdFor(string here, string name) {
+        List<SpravkaRec> list = Load(here);
+        SpravkaRec x = ByName(list, name);
+        return x != null ? x.Id : NewId(list, DateTime.Now);
+    }
+
+    public static void Put(string here, SpravkaRec rec) {
+        List<SpravkaRec> list = Load(here);
+        int i = list.FindIndex(delegate(SpravkaRec x) { return x.Id == rec.Id; });
+        if (i >= 0) list[i] = rec;
+        else list.Add(rec);
+        Write(here, list);
+    }
+
+    public static string AnswerDir(string here, string name) { return Path.Combine(SpravkaForm.Folder(here), name + " - ответ"); }
+
+    // файлы ответа (фото, скан)
+    public static List<string> Answers(string here, string name) {
+        List<string> r = new List<string>();
+        string d = AnswerDir(here, name);
+        if (!Directory.Exists(d)) return r;
+        foreach (string f in Directory.GetFiles(d)) {
+            string n = Path.GetFileName(f).ToLowerInvariant();
+            if (n == "thumbs.db" || n == "desktop.ini" || n.EndsWith(".tmp")) continue;
+            r.Add(f);
+        }
+        return r;
+    }
+
+    // код справки на фото: номер или null
+    public static string ReadPhoto(string path) {
+        GrayImage g;
+        lock (Mrz.Gdi)
+        using (Bitmap b = Mrz.Load(path, 2600)) g = GrayImage.FromBitmap(b);
+        Qr.Found f = Qr.Decode(g);
+        if (f == null) return null;
+        string t = f.Text.Trim();
+        return IsId(t) ? t : null;
+    }
+
+    // справки, ответа на которые ещё нет
+    public static int Waiting(string here) {
+        int n = 0;
+        try { foreach (SpravkaRec x in Load(here)) if (Answers(here, x.Name).Count == 0) n++; } catch { }
+        return n;
+    }
+
+    // с какого времени смотреть фото на телефоне: после прошлого забора, но не раньше самой старой справки без ответа
+    public static DateTime Since(string here, Memory memory) {
+        DateTime last = DateTime.MinValue, oldest = DateTime.MaxValue;
+        DateTime.TryParseExact(memory.Get("ТелефонОтветыДо", ""), new string[] { "yyyy-MM-dd HH:mm:ss.fff", "yyyy-MM-dd HH:mm:ss" }, CultureInfo.InvariantCulture, DateTimeStyles.None, out last);
+        foreach (SpravkaRec x in Load(here)) {
+            DateTime d;
+            if (Answers(here, x.Name).Count == 0 && DateTime.TryParseExact(x.Saved, "dd.MM.yyyy HH:mm", CultureInfo.InvariantCulture, DateTimeStyles.None, out d) && d < oldest) oldest = d;
+        }
+        if (oldest != DateTime.MaxValue) {
+            oldest = oldest.AddMinutes(-5);
+            return last > oldest ? last : oldest;
+        }
+        return last != DateTime.MinValue ? last : DateTime.Now.AddDays(-1);
+    }
+
+    public const int MaxPhotos = 25;      // за раз смотреть не больше стольких новых фото
+
+    // забрать ответы с телефона: новые фото копируются во временную папку, на каждом ищется код справки;
+    // с кодом - фото переносится с телефона в папку ответа, без кода - остаётся на телефоне
+    public static AnswerResult TakeFromPhone(string here, DateTime since, TextHandler progress) {
+        AnswerResult a = new AnswerResult();
+        List<SpravkaRec> list = Load(here);
+        string tmp = Path.Combine(SpravkaForm.Folder(here), "_с телефона");
+        a.Phone = Phone.Take(tmp, since, 0, MaxPhotos, delegate(string copied) {
+            string id = ReadPhoto(copied);
+            if (id == null) { a.NoCode++; return null; }
+            SpravkaRec rec = Find(list, id);
+            if (rec == null) { if (!a.Unknown.Contains(id)) a.Unknown.Add(id); return null; }
+            if (!a.Got.Contains(rec.Name)) a.Got.Add(rec.Name);
+            return AnswerDir(here, rec.Name);
+        }, progress);
+        try { if (Directory.Exists(tmp) && Directory.GetFileSystemEntries(tmp).Length == 0) Directory.Delete(tmp); } catch { }
+        return a;
+    }
+
+    // положить файл в папку ответа справки (копия; имя - свободное)
+    public static string AddAnswer(string here, string name, string file) {
+        string d = AnswerDir(here, name);
+        Directory.CreateDirectory(d);
+        string to = Photo.Free(d, Path.GetFileName(file));
+        File.Copy(file, to);
+        return to;
+    }
+}
+
+// QR-код справки в .docx: картинка в правом верхнем углу листа, поверх полей - текст справки не сдвигается
+public static class SpravkaQr {
+    public const int Module = 12;           // точек на модуль в картинке
+    public const double ModuleMm = 0.75;    // модуль на бумаге, мм (код 21 модуль - около 16 мм)
+    const int Quiet = 2;                    // тихая зона, модулей (вокруг и так поле листа)
+    const string Rel = "rIdSpravkaQr", Media = "media/spravka_qr.png";
+
+    public static Bitmap Picture(string id) {
+        QrCode q = Qr.Code(id, Qr.H);
+        return Qr.Draw(q, Module, Quiet, id);
+    }
+
+    public static void AddTo(string docx, string id) {
+        byte[] png;
+        int w, h;
+        lock (Mrz.Gdi)
+        using (Bitmap b = Picture(id)) {
+            w = b.Width;
+            h = b.Height;
+            using (MemoryStream ms = new MemoryStream()) { b.Save(ms, ImageFormat.Png); png = ms.ToArray(); }
+        }
+        long cx = (long)Math.Round(w / (double)Module * ModuleMm * 36000), cy = cx * h / w;   // EMU: 36000 на мм
+        List<ZipEntry> entries = Zip.Read(docx);
+        bool doc = false, rels = false;
+        ushort time, date;
+        DosTime(DateTime.Now, out time, out date);
+        for (int i = entries.Count - 1; i >= 0; i--) if (entries[i].Name == "word/" + Media) entries.RemoveAt(i);
+        foreach (ZipEntry e in entries) {
+            if (e.Name == "[Content_Types].xml") {
+                string s = Text(e);
+                if (s.IndexOf("Extension=\"png\"", StringComparison.OrdinalIgnoreCase) < 0) {
+                    int k = s.IndexOf('>', s.IndexOf("<Types")) + 1;
+                    e.SetData(Encoding.UTF8.GetBytes(s.Insert(k, "<Default Extension=\"png\" ContentType=\"image/png\"/>")));
+                }
+            } else if (e.Name == "word/_rels/document.xml.rels") {
+                string s = Text(e);
+                if (s.IndexOf("Id=\"" + Rel + "\"") < 0) {
+                    s = s.Replace("</Relationships>", "<Relationship Id=\"" + Rel + "\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/image\" Target=\"" +
+                        Media + "\"/></Relationships>");
+                    e.SetData(Encoding.UTF8.GetBytes(s));
+                }
+                rels = true;
+            } else if (e.Name == "word/document.xml") {
+                e.SetData(Anchor(e.GetData(), id, cx, cy));
+                doc = true;
+            }
+        }
+        if (!doc || !rels) throw new InvalidDataException("в шаблоне справки нет нужных частей документа Word");
+        ZipEntry img = new ZipEntry();
+        img.Name = "word/" + Media;
+        img.Time = time;
+        img.Date = date;
+        img.SetData(png);
+        entries.Add(img);
+        Zip.Write(docx, entries);
+    }
+
+    static string Text(ZipEntry e) {
+        string s = Encoding.UTF8.GetString(e.GetData());
+        return s.Length > 0 && s[0] == '﻿' ? s.Substring(1) : s;
+    }
+
+    static void DosTime(DateTime t, out ushort time, out ushort date) {
+        time = (ushort)((t.Hour << 11) | (t.Minute << 5) | (t.Second / 2));
+        date = (ushort)(((t.Year - 1980) << 9) | (t.Month << 5) | t.Day);
+    }
+
+    const string W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+
+    // картинка «плавает» у первого абзаца: справа по краю поля текста, сверху - от края листа
+    static byte[] Anchor(byte[] xml, string id, long cx, long cy) {
+        XmlDocument d = new XmlDocument();
+        d.PreserveWhitespace = true;
+        using (MemoryStream ms = new MemoryStream(xml)) d.Load(ms);
+        XmlNamespaceManager ns = new XmlNamespaceManager(d.NameTable);
+        ns.AddNamespace("w", W);
+        XmlNode p = d.SelectSingleNode("/w:document/w:body/w:p", ns);
+        if (p == null) throw new InvalidDataException("в справке нет абзацев");
+        string run =
+            "<w:r xmlns:w=\"" + W + "\"><w:drawing>" +
+            "<wp:anchor xmlns:wp=\"http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing\" distT=\"0\" distB=\"0\" distL=\"0\" distR=\"0\" " +
+            "simplePos=\"0\" relativeHeight=\"251659264\" behindDoc=\"0\" locked=\"0\" layoutInCell=\"1\" allowOverlap=\"1\">" +
+            "<wp:simplePos x=\"0\" y=\"0\"/>" +
+            "<wp:positionH relativeFrom=\"margin\"><wp:align>right</wp:align></wp:positionH>" +
+            "<wp:positionV relativeFrom=\"page\"><wp:posOffset>" + (6 * 36000) + "</wp:posOffset></wp:positionV>" +
+            "<wp:extent cx=\"" + cx + "\" cy=\"" + cy + "\"/>" +
+            "<wp:effectExtent l=\"0\" t=\"0\" r=\"0\" b=\"0\"/>" +
+            "<wp:wrapNone/>" +
+            "<wp:docPr id=\"4242\" name=\"QR справки\" descr=\"" + id + "\"/>" +
+            "<wp:cNvGraphicFramePr><a:graphicFrameLocks xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" noChangeAspect=\"1\"/></wp:cNvGraphicFramePr>" +
+            "<a:graphic xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\">" +
+            "<a:graphicData uri=\"http://schemas.openxmlformats.org/drawingml/2006/picture\">" +
+            "<pic:pic xmlns:pic=\"http://schemas.openxmlformats.org/drawingml/2006/picture\">" +
+            "<pic:nvPicPr><pic:cNvPr id=\"0\" name=\"spravka_qr.png\"/><pic:cNvPicPr/></pic:nvPicPr>" +
+            "<pic:blipFill><a:blip xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\" r:embed=\"" + Rel + "\"/>" +
+            "<a:stretch><a:fillRect/></a:stretch></pic:blipFill>" +
+            "<pic:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"" + cx + "\" cy=\"" + cy + "\"/></a:xfrm>" +
+            "<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></pic:spPr>" +
+            "</pic:pic></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>";
+        XmlDocument f = new XmlDocument();
+        f.LoadXml(run);
+        XmlNode r = d.ImportNode(f.DocumentElement, true);
+        XmlNode pPr = null;
+        foreach (XmlNode c in p.ChildNodes) if (c.LocalName == "pPr" && c.NamespaceURI == W) pPr = c;
+        if (pPr != null) p.InsertAfter(r, pPr);
+        else p.PrependChild(r);
+        using (MemoryStream ms = new MemoryStream()) {
+            XmlWriterSettings ws = new XmlWriterSettings();
+            ws.Encoding = new UTF8Encoding(false);
+            using (XmlWriter xw = XmlWriter.Create(ms, ws)) d.Save(xw);
+            return ms.ToArray();
+        }
+    }
+}
+
+// Окно «Журнал справок»: все справки папки «Справки» - номер, когда сохранена, лицевой, Ф.И.О., вернулся ли ответ
+// (вернувшиеся - зелёным); забрать ответы с телефона, добавить фото ответа из папки, открыть справку или ответ.
+public class SpravkaLogForm : Form {
+    readonly string here;
+    readonly Memory memory;
+    public StartMenu Home;
+    public Form Back;
+    readonly ListView list = new ListView();
+    readonly Seg filter = new Seg("Все", "Ждут ответа", "Вернулись");
+    readonly TextBox find = Ui.Text(1);
+    readonly Label count = new Label(), status = new Label();
+    readonly Button take = Ui.Button("Забрать ответы с телефона", true), add = Ui.Button("Добавить фото ответа…", false),
+        openDoc = Ui.Button("Открыть справку", false), openAns = Ui.Button("Папка ответа", false);
+    readonly ToolTip tip = new ToolTip();
+    bool busy;
+    public bool NoQuestions;                          // для проверки без окон: на вопросы - «да»
+
+    static readonly Color Returned = Color.FromArgb(214, 241, 219);
+
+    class Row {
+        public SpravkaRec Rec;
+        public string Docx;
+        public List<string> Answers;
+        public DateTime When, AnswerTime;
+    }
+    readonly List<Row> rows = new List<Row>();
+
+    public SpravkaLogForm(string here) {
+        this.here = here;
+        memory = Memory.For(Path.Combine(here, "nastroiki.txt"));
+        Text = "Журнал справок";
+        Font = St.Base;
+        BackColor = St.Back;
+        StartPosition = FormStartPosition.CenterScreen;
+        Rectangle wa = Screen.PrimaryScreen.WorkingArea;
+        Size = new Size(Math.Min(1180, wa.Width), Math.Min(760, wa.Height));
+        MinimumSize = new Size(860, 520);
+        KeyPreview = true;
+        try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
+
+        Panel top = new Panel();
+        top.Dock = DockStyle.Top;
+        top.Height = 92;
+        top.BackColor = St.Nav;
+        LinkLabel back = new LinkLabel();
+        back.Text = "← Назад";
+        back.LinkColor = St.NavText;
+        back.ActiveLinkColor = Color.White;
+        back.Font = St.Base;
+        back.AutoSize = true;
+        back.Location = new Point(24, 10);
+        back.LinkClicked += delegate { GoBack(); };
+        Label title = new Label();
+        title.Text = "Журнал справок";
+        title.Font = new Font("Segoe UI", 16f, FontStyle.Bold);
+        title.ForeColor = Color.White;
+        title.AutoSize = true;
+        title.Location = new Point(22, 36);
+        Label sub = new Label();
+        sub.Text = "у каждой справки QR-код с номером; сфотографируйте вернувшуюся справку телефоном и нажмите «Забрать ответы с телефона» - вернувшиеся зелёным";
+        sub.Font = St.Small;
+        sub.ForeColor = St.NavText;
+        sub.AutoSize = true;
+        sub.Location = new Point(26, 68);
+        top.Controls.Add(back);
+        top.Controls.Add(title);
+        top.Controls.Add(sub);
+
+        Panel bar = new Panel();
+        bar.Dock = DockStyle.Top;
+        bar.Height = 52;
+        bar.BackColor = St.Back;
+        filter.Size = new Size(360, 30);
+        filter.Location = new Point(24, 12);
+        filter.Index = 0;
+        filter.Changed += delegate { Fill(); };
+        find.Location = new Point(400, 12);
+        find.Width = 300;
+        find.HandleCreated += delegate { Ui.Cue(find, "поиск: адрес, лицевой, Ф.И.О., номер"); };
+        find.TextChanged += delegate { Fill(); };
+        count.AutoSize = true;
+        count.Font = St.Base;
+        count.ForeColor = St.Caption;
+        count.Location = new Point(716, 16);
+        bar.Controls.Add(filter);
+        bar.Controls.Add(find);
+        bar.Controls.Add(count);
+
+        list.Dock = DockStyle.Fill;
+        list.View = View.Details;
+        list.FullRowSelect = true;
+        list.HideSelection = false;
+        list.MultiSelect = false;
+        list.GridLines = true;
+        list.Font = St.Base;
+        foreach (string[] c in new string[][] { new string[] { "Номер", "100" }, new string[] { "Сохранена", "130" }, new string[] { "Справка", "290" },
+                new string[] { "Лицевой", "100" }, new string[] { "Ф.И.О.", "210" }, new string[] { "Ответ", "250" } })
+            list.Columns.Add(c[0], int.Parse(c[1]));
+        list.DoubleClick += delegate { Row r = Selected(); if (r != null) { if (r.Answers.Count > 0) OpenAnswer(); else OpenDoc(); } };
+        list.SelectedIndexChanged += delegate { Enable(); };
+        ContextMenu menu = new ContextMenu();
+        menu.MenuItems.Add("Открыть справку", delegate { OpenDoc(); });
+        menu.MenuItems.Add("Открыть папку ответа", delegate { OpenAnswer(); });
+        menu.MenuItems.Add("Добавить фото ответа…", delegate { AddFromFolder(); });
+        list.ContextMenu = menu;
+        Panel mid = new Panel();
+        mid.Dock = DockStyle.Fill;
+        mid.Padding = new Padding(24, 0, 24, 8);
+        mid.Controls.Add(list);
+
+        Panel bottom = new Panel();
+        bottom.Dock = DockStyle.Bottom;
+        bottom.Height = 112;
+        bottom.BackColor = Color.White;
+        bottom.Paint += delegate(object s, PaintEventArgs e) { using (Pen pen = new Pen(St.Border)) e.Graphics.DrawLine(pen, 0, 0, bottom.Width, 0); };
+        take.SetBounds(24, 14, 260, 40);
+        take.Click += delegate { TakeFromPhone(); };
+        tip.SetToolTip(take, "Новые фото с телефона: на каждом ищется QR-код справки; такие фото переносятся (с телефона - удаляются) в папку «<справка> - ответ»; остальные фото остаются на телефоне");
+        add.SetBounds(296, 14, 210, 40);
+        add.Click += delegate { AddFromFolder(); };
+        tip.SetToolTip(add, "Фото или скан ответа из папки: с кодом справки - к своей справке, без кода - к выбранной в списке");
+        openDoc.SetBounds(518, 14, 160, 40);
+        openDoc.Click += delegate { OpenDoc(); };
+        openAns.SetBounds(690, 14, 140, 40);
+        openAns.Click += delegate { OpenAnswer(); };
+        status.AutoSize = false;
+        status.Font = St.Base;
+        status.SetBounds(24, 60, 900, 46);
+        status.Anchor = AnchorStyles.Left | AnchorStyles.Top | AnchorStyles.Right;
+        bottom.Controls.Add(take);
+        bottom.Controls.Add(add);
+        bottom.Controls.Add(openDoc);
+        bottom.Controls.Add(openAns);
+        bottom.Controls.Add(status);
+        bottom.Resize += delegate { status.Width = bottom.ClientSize.Width - 48; };
+
+        Controls.Add(mid);
+        Controls.Add(bar);
+        Controls.Add(top);
+        Controls.Add(bottom);
+
+        KeyDown += delegate(object s, KeyEventArgs e) {
+            if (e.KeyCode == Keys.Escape) { e.SuppressKeyPress = true; GoBack(); }
+            else if (e.KeyCode == Keys.F5) { e.SuppressKeyPress = true; Reload(); }
+        };
+        FormClosing += delegate(object s, FormClosingEventArgs e) {
+            if (Home != null && e.CloseReason == CloseReason.UserClosing) { e.Cancel = true; GoBack(); }
+        };
+        Activated += delegate { if (!busy) Reload(); };
+        Reload();
+    }
+
+    public void GoBack() {
+        if (busy) { Note("Подождите - идёт забор ответов с телефона.", St.Hint); return; }
+        Hide();
+        if (Home != null) Home.Return(Back);
+        else if (Back != null && !Back.IsDisposed) { Back.Show(); Back.Activate(); }
+    }
+
+    void Note(string text, Color c) { status.Text = text; status.ForeColor = c; }
+
+    void Post(MethodInvoker m) {
+        try { if (!IsDisposed && IsHandleCreated) BeginInvoke(m); } catch { }
+    }
+
+    static DateTime ParseSaved(string s) {
+        DateTime d;
+        return DateTime.TryParseExact(s, "dd.MM.yyyy HH:mm", CultureInfo.InvariantCulture, DateTimeStyles.None, out d) ? d : DateTime.MinValue;
+    }
+
+    // справки из журнала и справки папки без номера (сохранены до QR-кодов) - ответ к ним только вручную
+    public void Reload() {
+        string keep = Selected() != null ? Selected().Rec.Name : null;
+        rows.Clear();
+        string dir = SpravkaForm.Folder(here);
+        Dictionary<string, bool> known = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+        List<SpravkaRec> recs;
+        try { recs = SpravkaJournal.Load(here); }
+        catch (Exception ex) { recs = new List<SpravkaRec>(); Note("Журнал справок не читается: " + ex.Message, St.Bad); }
+        foreach (SpravkaRec x in recs) {
+            if (known.ContainsKey(x.Name)) {
+                // одна справка - одна строка (последний номер)
+                rows.RemoveAll(delegate(Row r) { return string.Compare(r.Rec.Name, x.Name, StringComparison.OrdinalIgnoreCase) == 0; });
+            }
+            known[x.Name] = true;
+            Row row = new Row();
+            row.Rec = x;
+            row.Docx = Path.Combine(dir, x.Name + ".docx");
+            row.When = ParseSaved(x.Saved);
+            if (row.When == DateTime.MinValue && File.Exists(row.Docx)) row.When = File.GetLastWriteTime(row.Docx);
+            rows.Add(row);
+        }
+        if (Directory.Exists(dir))
+            foreach (string f in Directory.GetFiles(dir, "*.docx")) {
+                string n = Path.GetFileNameWithoutExtension(f);
+                if (n.StartsWith("~$") || known.ContainsKey(n)) continue;
+                Row row = new Row();
+                row.Rec = new SpravkaRec();
+                row.Rec.Name = n;
+                row.Docx = f;
+                row.When = File.GetLastWriteTime(f);
+                row.Rec.Saved = row.When.ToString("dd.MM.yyyy HH:mm");
+                rows.Add(row);
+            }
+        foreach (Row r in rows) {
+            r.Answers = SpravkaJournal.Answers(here, r.Rec.Name);
+            r.AnswerTime = DateTime.MinValue;
+            foreach (string f in r.Answers) { DateTime t = File.GetLastWriteTime(f); if (t > r.AnswerTime) r.AnswerTime = t; }
+        }
+        rows.Sort(delegate(Row a, Row b) { return b.When.CompareTo(a.When); });
+        Fill();
+        if (keep != null)
+            foreach (ListViewItem it in list.Items)
+                if (((Row)it.Tag).Rec.Name == keep) { it.Selected = true; it.EnsureVisible(); break; }
+        Enable();
+    }
+
+    void Fill() {
+        string q = find.Text.Trim().ToLowerInvariant();
+        list.BeginUpdate();
+        list.Items.Clear();
+        int back = 0, wait = 0;
+        foreach (Row r in rows) {
+            bool got = r.Answers.Count > 0;
+            if (got) back++;
+            else if (r.Rec.Id.Length > 0) wait++;
+            if (filter.Index == 1 && got || filter.Index == 2 && !got) continue;
+            if (q.Length > 0 && (r.Rec.Name + " " + r.Rec.Ls + " " + r.Rec.Fio + " " + r.Rec.Id + " " + r.Rec.Address).ToLowerInvariant().IndexOf(q) < 0) continue;
+            string ans;
+            if (got) ans = "вернулась " + r.AnswerTime.ToString("dd.MM.yyyy") + " (" + Files(r.Answers.Count) + ")";
+            else if (r.Rec.Id.Length == 0) ans = "без QR-кода - ответ вручную";
+            else ans = "ждём" + (r.When != DateTime.MinValue ? " (" + Days((DateTime.Today - r.When.Date).Days) + ")" : "");
+            ListViewItem it = new ListViewItem(new string[] { r.Rec.Id.Length > 0 ? r.Rec.Id : "-", r.Rec.Saved, r.Rec.Name, r.Rec.Ls, r.Rec.Fio, ans });
+            it.Tag = r;
+            if (got) it.BackColor = Returned;
+            else if (!File.Exists(r.Docx)) it.ForeColor = St.Hint;
+            list.Items.Add(it);
+        }
+        list.EndUpdate();
+        count.Text = "справок " + rows.Count + ", вернулись " + back + ", ждём ответа " + wait;
+    }
+
+    static string Files(int n) {
+        int d = n % 10, h = n % 100;
+        return n + (d == 1 && h != 11 ? " файл" : d >= 2 && d <= 4 && (h < 12 || h > 14) ? " файла" : " файлов");
+    }
+
+    static string Days(int n) {
+        if (n <= 0) return "сегодня";
+        int d = n % 10, h = n % 100;
+        return n + (d == 1 && h != 11 ? " день" : d >= 2 && d <= 4 && (h < 12 || h > 14) ? " дня" : " дней");
+    }
+
+    Row Selected() { return list.SelectedItems.Count > 0 ? (Row)list.SelectedItems[0].Tag : null; }
+
+    void Enable() {
+        Row r = Selected();
+        openDoc.Enabled = r != null && !busy;
+        openAns.Enabled = r != null && r.Answers.Count > 0 && !busy;
+        take.Enabled = !busy;
+        add.Enabled = !busy;
+    }
+
+    void OpenDoc() {
+        Row r = Selected();
+        if (r == null) return;
+        if (!File.Exists(r.Docx)) { MessageBox.Show(this, "Справки нет в папке (удалена или переименована):\n" + r.Docx, Text); return; }
+        try { Process.Start(r.Docx); } catch (Exception ex) { MessageBox.Show(this, "Не открывается:\n" + r.Docx + "\n\n" + ex.Message, Text); }
+    }
+
+    void OpenAnswer() {
+        Row r = Selected();
+        if (r == null) return;
+        string d = SpravkaJournal.AnswerDir(here, r.Rec.Name);
+        if (!Directory.Exists(d)) { MessageBox.Show(this, "Ответа на эту справку пока нет.", Text); return; }
+        try { Process.Start("explorer.exe", "\"" + d + "\""); } catch (Exception ex) { MessageBox.Show(this, ex.Message, Text); }
+    }
+
+    // ---------- забрать с телефона ----------
+
+    public bool Busy { get { return busy; } }
+    public string Status { get { return status.Text; } }
+
+    public void TakeFromPhone() {
+        if (busy) return;
+        busy = true;
+        Enable();
+        Note("Ищу телефон...", St.Hint);
+        DateTime since = SpravkaJournal.Since(here, memory);
+        System.Threading.Thread th = new System.Threading.Thread(delegate() {
+            AnswerResult a;
+            try { a = SpravkaJournal.TakeFromPhone(here, since, delegate(string t) { Post(delegate { Note(t, St.Hint); }); }); }
+            catch (Exception ex) { a = new AnswerResult(); a.Phone = new PhoneResult(); a.Phone.Error = "Не получилось забрать ответы: " + ex.Message; }
+            Post(delegate { TakeDone(a, since); });
+        });
+        // оболочка Windows (как Проводник) работает только в таком потоке
+        th.SetApartmentState(System.Threading.ApartmentState.STA);
+        th.IsBackground = true;
+        th.Start();
+    }
+
+    void TakeDone(AnswerResult a, DateTime since) {
+        busy = false;
+        PhoneResult r = a.Phone;
+        if (r.Newest > since) {
+            // с долями секунды: иначе самое новое фото попадало бы и в следующий раз
+            memory.Values["ТелефонОтветыДо"] = r.Newest.ToString("yyyy-MM-dd HH:mm:ss.fff", CultureInfo.InvariantCulture);
+            memory.Save();
+        }
+        Reload();
+        if (r.Error != null) { Note(r.Error, St.Bad); return; }
+        if (r.NoneNew) { Note("На телефоне «" + r.Device + "» нет новых фото (снятых после " + since.ToString("dd.MM.yyyy HH:mm") + ").", St.Hint); return; }
+        List<string> s = new List<string>();
+        if (a.Got.Count > 0) s.Add("Вернулись ответы (" + a.Got.Count + "): " + string.Join(", ", a.Got.ToArray()) + " - фото перенесены с телефона в папки ответов");
+        else s.Add("Новых ответов нет");
+        if (a.NoCode > 0) s.Add("других фото (без кода справки): " + a.NoCode + " - остались на телефоне. Если среди них ответ, а код не прочитался - переснимите справку ближе " +
+            "(код справа вверху) или добавьте фото кнопкой «Добавить фото ответа…»");
+        if (a.Unknown.Count > 0) s.Add("справок " + string.Join(", ", a.Unknown.ToArray()) + " нет в журнале этого компьютера - фото остались на телефоне");
+        if (r.NotRemoved.Count > 0) s.Add("с телефона не удалились: " + string.Join(", ", r.NotRemoved.ToArray()) + " - удалите их на телефоне сами");
+        if (r.Failed.Count > 0) s.Add("не скопировались: " + string.Join(", ", r.Failed.ToArray()) + " - нажмите ещё раз");
+        if (r.Left > 0) s.Add("на телефоне ещё новых фото: " + r.Left + " - нажмите «Забрать ответы с телефона» ещё раз");
+        Note(string.Join("; ", s.ToArray()) + ".", a.Got.Count > 0 && r.Failed.Count == 0 && r.NotRemoved.Count == 0 ? St.Good : a.Got.Count > 0 ? Warn : St.Caption);
+        // вернувшиеся - выделить
+        foreach (ListViewItem it in list.Items)
+            if (a.Got.Contains(((Row)it.Tag).Rec.Name)) { it.Selected = true; it.EnsureVisible(); }
+    }
+
+    static readonly Color Warn = Color.FromArgb(190, 105, 0);
+
+    // ---------- из папки ----------
+
+    void AddFromFolder() {
+        using (OpenFileDialog d = new OpenFileDialog()) {
+            d.Title = "Фото или скан ответа на справку";
+            d.Filter = "Фото и сканы (*.jpg; *.jpeg; *.png; *.bmp; *.pdf)|*.jpg;*.jpeg;*.png;*.bmp;*.pdf|Все файлы|*.*";
+            d.Multiselect = true;
+            if (d.ShowDialog(this) != DialogResult.OK) return;
+            AddFiles(d.FileNames);
+        }
+    }
+
+    // фото с кодом справки - к своей справке; без кода - к выбранной в списке (с вопросом)
+    public void AddFiles(string[] files) {
+        Cursor = Cursors.WaitCursor;
+        List<SpravkaRec> recs = SpravkaJournal.Load(here);
+        List<string> got = new List<string>(), noCode = new List<string>(), unknown = new List<string>();
+        try {
+            foreach (string f in files) {
+                Note("Смотрю " + Path.GetFileName(f) + "...", St.Hint);
+                Application.DoEvents();
+                string id = null;
+                if (Photo.IsPhoto(f)) { try { id = SpravkaJournal.ReadPhoto(f); } catch { id = null; } }
+                SpravkaRec rec = id != null ? SpravkaJournal.Find(recs, id) : null;
+                if (id != null && rec == null) { unknown.Add(id); noCode.Add(f); continue; }
+                if (rec == null) { noCode.Add(f); continue; }
+                SpravkaJournal.AddAnswer(here, rec.Name, f);
+                if (!got.Contains(rec.Name)) got.Add(rec.Name);
+            }
+        } catch (Exception ex) {
+            Cursor = Cursors.Default;
+            Note("Не получилось добавить: " + ex.Message, St.Bad);
+            Reload();
+            return;
+        }
+        Cursor = Cursors.Default;
+        Row sel = Selected();
+        if (noCode.Count > 0 && sel != null) {
+            string q = (noCode.Count == 1 ? "На фото «" + Path.GetFileName(noCode[0]) + "» код справки не найден" : "На " + noCode.Count + " фото код справки не найден") +
+                ".\n\nПоложить " + (noCode.Count == 1 ? "его" : "их") + " в ответ к выбранной справке «" + sel.Rec.Name + "»?";
+            if (NoQuestions || MessageBox.Show(this, q, Text, MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes) {
+                foreach (string f in noCode) SpravkaJournal.AddAnswer(here, sel.Rec.Name, f);
+                if (!got.Contains(sel.Rec.Name)) got.Add(sel.Rec.Name);
+                noCode.Clear();
+            }
+        }
+        Reload();
+        List<string> s = new List<string>();
+        if (got.Count > 0) s.Add("Ответ добавлен: " + string.Join(", ", got.ToArray()));
+        if (unknown.Count > 0) s.Add("справок " + string.Join(", ", unknown.ToArray()) + " нет в журнале");
+        if (noCode.Count > 0) s.Add("без кода справки (не добавлены): " + noCode.Count + " - выберите справку в списке и добавьте ещё раз");
+        Note(string.Join("; ", s.ToArray()) + ".", noCode.Count == 0 && got.Count > 0 ? St.Good : Warn);
+        foreach (ListViewItem it in list.Items)
+            if (got.Contains(((Row)it.Tag).Rec.Name)) { it.Selected = true; it.EnsureVisible(); }
+    }
+
+    // для проверки: выбрать строку по имени справки; строки списка текстом
+    public void SelectName(string name) {
+        foreach (ListViewItem it in list.Items) it.Selected = ((Row)it.Tag).Rec.Name == name;
+    }
+    public string Dump() {
+        StringBuilder sb = new StringBuilder();
+        foreach (ListViewItem it in list.Items) {
+            for (int i = 0; i < it.SubItems.Count; i++) sb.Append(i > 0 ? " | " : "").Append(it.SubItems[i].Text);
+            sb.Append(it.BackColor == Returned ? "  [зелёная]" : "").Append('\n');
+        }
+        return sb.Append(count.Text).ToString();
     }
 }
 
@@ -18328,6 +19126,746 @@ public class JurPick : Form {
     public void SetLs(string ls) { lsBox.Text = ls; }
     public void PickPoint(int i) { if (i < points.Items.Count) points.Items[i].Selected = true; }
     public void Slot(int i) { to1.Checked = i != 2; to2.Checked = i == 2; }
+}
+
+// QR-код (ISO/IEC 18004) - свой, без сторонних программ: только то, что нужно справкам - версии 1-4, режимы цифр,
+// букв-цифр и байтов. Code - построить, Decode - найти и прочитать на фото (искатели в трёх углах, сетка модулей,
+// формат, коррекция ошибок Рида-Соломона). Камера телефона читает такой код тоже.
+public class QrCode {
+    public int Version, Size, Ecl, Mask;
+    public bool[,] Dark;            // [строка, столбец]
+}
+
+public static class Qr {
+    // ---------- поле Галуа GF(256), многочлен 0x11D ----------
+    static readonly int[] Exp = new int[512], Log = new int[256];
+
+    static Qr() {
+        int x = 1;
+        for (int i = 0; i < 255; i++) {
+            Exp[i] = x;
+            Log[x] = i;
+            x <<= 1;
+            if (x >= 256) x ^= 0x11D;
+        }
+        for (int i = 255; i < 512; i++) Exp[i] = Exp[i - 255];
+    }
+
+    static int Mul(int a, int b) { return a == 0 || b == 0 ? 0 : Exp[Log[a] + Log[b]]; }
+    static int Div(int a, int b) { return a == 0 ? 0 : Exp[(Log[a] + 255 - Log[b]) % 255]; }
+
+    // уровни коррекции L, M, Q, H; [версия-1, уровень] = блоков, данных в блоке, коррекции в блоке
+    static readonly int[,,] Blocks = {
+        { { 1, 19, 7 }, { 1, 16, 10 }, { 1, 13, 13 }, { 1, 9, 17 } },
+        { { 1, 34, 10 }, { 1, 28, 16 }, { 1, 22, 22 }, { 1, 16, 28 } },
+        { { 1, 55, 15 }, { 1, 44, 26 }, { 2, 17, 18 }, { 2, 13, 22 } },
+        { { 1, 80, 20 }, { 2, 32, 18 }, { 2, 24, 26 }, { 4, 9, 16 } } };
+    static readonly int[] EclBits = { 1, 0, 3, 2 };     // L, M, Q, H - как пишутся в формате
+    public const int L = 0, M = 1, Q = 2, H = 3;
+    const string Alnum = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ $%*+-./:";
+
+    // ---------- построение ----------
+
+    public static QrCode Code(string text, int ecl) {
+        bool alnum = text.Length > 0;
+        foreach (char c in text) if (Alnum.IndexOf(c) < 0) alnum = false;
+        byte[] bytes = Encoding.UTF8.GetBytes(text);
+        for (int v = 1; v <= 4; v++) {
+            int cap = Blocks[v - 1, ecl, 0] * Blocks[v - 1, ecl, 1] * 8;
+            List<bool> bits = new List<bool>();
+            if (alnum) {
+                Put(bits, 2, 4);
+                Put(bits, text.Length, 9);
+                for (int i = 0; i + 1 < text.Length; i += 2) Put(bits, Alnum.IndexOf(text[i]) * 45 + Alnum.IndexOf(text[i + 1]), 11);
+                if (text.Length % 2 == 1) Put(bits, Alnum.IndexOf(text[text.Length - 1]), 6);
+            } else {
+                Put(bits, 4, 4);
+                Put(bits, bytes.Length, 8);
+                foreach (byte b in bytes) Put(bits, b, 8);
+            }
+            if (bits.Count > cap) continue;
+            Put(bits, 0, Math.Min(4, cap - bits.Count));
+            while (bits.Count % 8 != 0) bits.Add(false);
+            for (int pad = 0xEC; bits.Count < cap; pad ^= 0xEC ^ 0x11) Put(bits, pad, 8);
+            byte[] data = new byte[cap / 8];
+            for (int i = 0; i < bits.Count; i++) if (bits[i]) data[i >> 3] |= (byte)(0x80 >> (i & 7));
+            return Build(v, ecl, Interleave(v, ecl, data));
+        }
+        throw new ArgumentException("слишком длинный текст для QR-кода: " + text);
+    }
+
+    static void Put(List<bool> bits, int value, int n) { for (int i = n - 1; i >= 0; i--) bits.Add((value >> i & 1) != 0); }
+
+    static int[] Divisor(int degree) {
+        int[] r = new int[degree];
+        r[degree - 1] = 1;
+        int root = 1;
+        for (int i = 0; i < degree; i++) {
+            for (int j = 0; j < degree; j++) {
+                r[j] = Mul(r[j], root);
+                if (j + 1 < degree) r[j] ^= r[j + 1];
+            }
+            root = Mul(root, 2);
+        }
+        return r;
+    }
+
+    static int[] Remainder(byte[] data, int start, int len, int[] div) {
+        int[] r = new int[div.Length];
+        for (int k = start; k < start + len; k++) {
+            int f = data[k] ^ r[0];
+            Array.Copy(r, 1, r, 0, r.Length - 1);
+            r[r.Length - 1] = 0;
+            for (int i = 0; i < r.Length; i++) r[i] ^= Mul(div[i], f);
+        }
+        return r;
+    }
+
+    // данные блоками + коррекция, вперемешку по столбцам (у нас все блоки одной длины)
+    static byte[] Interleave(int v, int ecl, byte[] data) {
+        int nb = Blocks[v - 1, ecl, 0], nd = Blocks[v - 1, ecl, 1], ne = Blocks[v - 1, ecl, 2];
+        int[] div = Divisor(ne);
+        int[][] ec = new int[nb][];
+        for (int b = 0; b < nb; b++) ec[b] = Remainder(data, b * nd, nd, div);
+        byte[] r = new byte[nb * (nd + ne)];
+        int k = 0;
+        for (int i = 0; i < nd; i++) for (int b = 0; b < nb; b++) r[k++] = data[b * nd + i];
+        for (int i = 0; i < ne; i++) for (int b = 0; b < nb; b++) r[k++] = (byte)ec[b][i];
+        return r;
+    }
+
+    // служебные модули: искатели с разделителями, синхрополосы, выравнивающий узор (версии 2+), формат, тёмный модуль
+    static bool[,] Function(int v) {
+        int n = 17 + 4 * v;
+        bool[,] f = new bool[n, n];
+        for (int i = 0; i < n; i++) { f[6, i] = true; f[i, 6] = true; }
+        for (int y = 0; y < 9; y++) for (int x = 0; x < 9; x++) f[y, x] = true;
+        for (int y = 0; y < 9; y++) for (int x = n - 8; x < n; x++) f[y, x] = true;
+        for (int y = n - 8; y < n; y++) for (int x = 0; x < 9; x++) f[y, x] = true;
+        if (v >= 2) for (int y = n - 9; y <= n - 5; y++) for (int x = n - 9; x <= n - 5; x++) f[y, x] = true;
+        return f;
+    }
+
+    static bool MaskBit(int mask, int y, int x) {
+        switch (mask) {
+            case 0: return (x + y) % 2 == 0;
+            case 1: return y % 2 == 0;
+            case 2: return x % 3 == 0;
+            case 3: return (x + y) % 3 == 0;
+            case 4: return (x / 3 + y / 2) % 2 == 0;
+            case 5: return x * y % 2 + x * y % 3 == 0;
+            case 6: return (x * y % 2 + x * y % 3) % 2 == 0;
+            default: return ((x + y) % 2 + x * y % 3) % 2 == 0;
+        }
+    }
+
+    // 15 бит формата: уровень коррекции и маска, код БЧХ, маска 0x5412
+    static int FormatBits(int ecl, int mask) {
+        int d = EclBits[ecl] << 3 | mask, r = d;
+        for (int i = 0; i < 10; i++) r = r << 1 ^ (r >> 9 & 1) * 0x537;
+        return (d << 10 | r & 0x3FF) ^ 0x5412;
+    }
+
+    // места битов формата: (строка, столбец) - первая копия у левого верхнего искателя, вторая - у двух других
+    static void FormatCells(int n, int[] y1, int[] x1, int[] y2, int[] x2) {
+        for (int i = 0; i <= 5; i++) { y1[i] = i; x1[i] = 8; }
+        y1[6] = 7; x1[6] = 8;
+        y1[7] = 8; x1[7] = 8;
+        y1[8] = 8; x1[8] = 7;
+        for (int i = 9; i < 15; i++) { y1[i] = 8; x1[i] = 14 - i; }
+        for (int i = 0; i < 8; i++) { y2[i] = 8; x2[i] = n - 1 - i; }
+        for (int i = 8; i < 15; i++) { y2[i] = n - 15 + i; x2[i] = 8; }
+    }
+
+    static QrCode Build(int v, int ecl, byte[] code) {
+        int n = 17 + 4 * v;
+        bool[,] fn = Function(v), m = new bool[n, n];
+        for (int i = 0; i < n; i++) { m[6, i] = i % 2 == 0; m[i, 6] = i % 2 == 0; }
+        Finder(m, 3, 3);
+        Finder(m, 3, n - 4);
+        Finder(m, n - 4, 3);
+        if (v >= 2)
+            for (int dy = -2; dy <= 2; dy++) for (int dx = -2; dx <= 2; dx++) m[n - 7 + dy, n - 7 + dx] = Math.Max(Math.Abs(dx), Math.Abs(dy)) != 1;
+        // данные - змейкой по два столбца снизу вверх и обратно
+        int bit = 0;
+        for (int right = n - 1; right >= 1; right -= 2) {
+            if (right == 6) right = 5;
+            for (int vert = 0; vert < n; vert++)
+                for (int j = 0; j < 2; j++) {
+                    int x = right - j, y = (right + 1 & 2) == 0 ? n - 1 - vert : vert;
+                    if (fn[y, x] || bit >= code.Length * 8) continue;
+                    m[y, x] = (code[bit >> 3] >> 7 - (bit & 7) & 1) != 0;
+                    bit++;
+                }
+        }
+        // маска - с наименьшим штрафом (как требует стандарт)
+        QrCode best = null;
+        int bestScore = int.MaxValue;
+        for (int mask = 0; mask < 8; mask++) {
+            bool[,] t = (bool[,])m.Clone();
+            for (int y = 0; y < n; y++) for (int x = 0; x < n; x++) if (!fn[y, x] && MaskBit(mask, y, x)) t[y, x] = !t[y, x];
+            int f = FormatBits(ecl, mask);
+            int[] y1 = new int[15], x1 = new int[15], y2 = new int[15], x2 = new int[15];
+            FormatCells(n, y1, x1, y2, x2);
+            for (int i = 0; i < 15; i++) { bool b = (f >> i & 1) != 0; t[y1[i], x1[i]] = b; t[y2[i], x2[i]] = b; }
+            t[n - 8, 8] = true;
+            int s = Penalty(t, n);
+            if (s < bestScore) {
+                bestScore = s;
+                best = new QrCode();
+                best.Version = v;
+                best.Size = n;
+                best.Ecl = ecl;
+                best.Mask = mask;
+                best.Dark = t;
+            }
+        }
+        return best;
+    }
+
+    static void Finder(bool[,] m, int cy, int cx) {
+        int n = m.GetLength(0);
+        for (int dy = -4; dy <= 4; dy++)
+            for (int dx = -4; dx <= 4; dx++) {
+                int y = cy + dy, x = cx + dx, d = Math.Max(Math.Abs(dx), Math.Abs(dy));
+                if (y >= 0 && y < n && x >= 0 && x < n) m[y, x] = d != 2 && d != 4;
+            }
+    }
+
+    static int Penalty(bool[,] t, int n) {
+        int s = 0, dark = 0;
+        for (int pass = 0; pass < 2; pass++)
+            for (int a = 0; a < n; a++) {
+                int run = 0;
+                bool prev = false;
+                int pattern = 0;
+                for (int b = 0; b < n; b++) {
+                    bool c = pass == 0 ? t[a, b] : t[b, a];
+                    if (pass == 0 && c) dark++;
+                    if (b > 0 && c == prev) run++;
+                    else { if (run >= 5) s += run - 2; run = 1; }
+                    prev = c;
+                    pattern = (pattern << 1 | (c ? 1 : 0)) & 0x7FF;
+                    if (b >= 10 && (pattern == 0x05D || pattern == 0x5D0)) s += 40;
+                }
+                if (run >= 5) s += run - 2;
+            }
+        for (int y = 0; y + 1 < n; y++)
+            for (int x = 0; x + 1 < n; x++)
+                if (t[y, x] == t[y, x + 1] && t[y, x] == t[y + 1, x] && t[y, x] == t[y + 1, x + 1]) s += 3;
+        int pct = dark * 100 / (n * n);
+        s += Math.Abs(pct - 50) / 5 * 10;
+        return s;
+    }
+
+    // картинка: модуль - module точек, по краям тихая зона 4 модуля; ниже - подпись (номер справки), если задана
+    public static Bitmap Draw(QrCode q, int module, string caption) { return Draw(q, module, 4, caption); }
+
+    // quiet - тихая зона в модулях (на чистом поле листа хватает 2: дальше и так белая бумага)
+    public static Bitmap Draw(QrCode q, int module, int quiet, string caption) {
+        int side = (q.Size + 2 * quiet) * module, capH = 0;
+        Font f = null;
+        if (caption != null && caption.Length > 0) {
+            f = new Font("Arial", module * 2.2f, FontStyle.Bold, GraphicsUnit.Pixel);
+            capH = (int)(module * 3.6);
+        }
+        Bitmap bmp = new Bitmap(side, side + capH);
+        bmp.SetResolution(300, 300);
+        using (Graphics g = Graphics.FromImage(bmp)) {
+            g.Clear(Color.White);
+            for (int y = 0; y < q.Size; y++)
+                for (int x = 0; x < q.Size; x++)
+                    if (q.Dark[y, x]) g.FillRectangle(Brushes.Black, (x + quiet) * module, (y + quiet) * module, module, module);
+            if (f != null) {
+                g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAlias;
+                StringFormat sf = new StringFormat();
+                sf.Alignment = StringAlignment.Center;
+                g.DrawString(caption, f, Brushes.Black, new RectangleF(0, side - quiet * module + module * 1.0f, side, capH + quiet * module), sf);
+                f.Dispose();
+            }
+        }
+        return bmp;
+    }
+
+    // ---------- чтение ----------
+
+    public class Found {
+        public string Text = "";
+        public int Version;
+    }
+
+    // найти и прочитать QR-код на фото: несколько масштабов и порогов; null - не найден
+    public static Found Decode(GrayImage img) {
+        foreach (int max in new int[] { 1600, 2600, 1000 }) {
+            GrayImage g = Shrink(img, max);
+            // суммы яркости считаются один раз на масштаб, чёрно-белая картинка - в одном и том же массиве
+            // (старому компьютеру - меньше памяти)
+            int[] sum = Integral(g);
+            bool[] black = new bool[g.W * g.H];
+            // окрестность - десятая часть снимка (код мелкий) или четверть (код крупно, во весь кадр)
+            foreach (int part in new int[] { 10, 4 })
+                foreach (double k in new double[] { 0.88, 0.78 }) {
+                    Binarize(g, sum, k, part, black);
+                    Found f = DecodeBinary(g, black);
+                    if (f != null) return f;
+                }
+            if (Math.Max(img.W, img.H) <= max) break;
+        }
+        return null;
+    }
+
+    // уменьшение усреднением, чтобы длинная сторона была не больше max
+    static GrayImage Shrink(GrayImage s, int max) {
+        int f = Math.Max(1, (int)Math.Ceiling(Math.Max(s.W, s.H) / (double)max));
+        if (f == 1) return s;
+        GrayImage r = new GrayImage(s.W / f, s.H / f);
+        for (int y = 0; y < r.H; y++)
+            for (int x = 0; x < r.W; x++) {
+                int sum = 0;
+                for (int dy = 0; dy < f; dy++) {
+                    int o = (y * f + dy) * s.W + x * f;
+                    for (int dx = 0; dx < f; dx++) sum += s.P[o + dx];
+                }
+                r.P[y * r.W + x] = (byte)(sum / (f * f));
+            }
+        return r;
+    }
+
+    // суммы яркости от угла (снимок не больше 2600 точек: 2600 * 2600 * 255 вмещается в int)
+    static int[] Integral(GrayImage g) {
+        int w = g.W, h = g.H;
+        int[] sum = new int[(w + 1) * (h + 1)];
+        for (int y = 0; y < h; y++) {
+            int row = 0;
+            for (int x = 0; x < w; x++) {
+                row += g.P[y * w + x];
+                sum[(y + 1) * (w + 1) + x + 1] = sum[y * (w + 1) + x + 1] + row;
+            }
+        }
+        return sum;
+    }
+
+    // тёмное - темнее среднего по окрестности (свет на фото неровный)
+    static void Binarize(GrayImage g, int[] sum, double k, int part, bool[] b) {
+        int w = g.W, h = g.H, r = Math.Max(8, Math.Max(w, h) / part);
+        for (int y = 0; y < h; y++) {
+            int y0 = Math.Max(0, y - r), y1 = Math.Min(h, y + r + 1);
+            for (int x = 0; x < w; x++) {
+                int x0 = Math.Max(0, x - r), x1 = Math.Min(w, x + r + 1);
+                int s = sum[y1 * (w + 1) + x1] - sum[y0 * (w + 1) + x1] - sum[y1 * (w + 1) + x0] + sum[y0 * (w + 1) + x0];
+                double mean = (double)s / ((x1 - x0) * (y1 - y0));
+                int p = g.P[y * w + x];
+                b[y * w + x] = p < mean * k && mean - p > 12;
+            }
+        }
+    }
+
+    class Cand {
+        public double X, Y, M;
+        public int N;
+    }
+
+    // искатели: чёрное-белое-чёрное(3)-белое-чёрное = 1:1:3:1:1 по строке (отрезки одного цвета), проверка по столбцу
+    static List<Cand> Finders(bool[] b, int w, int h) {
+        List<Cand> list = new List<Cand>();
+        int[] len = new int[w + 1], start = new int[w + 1];
+        bool[] col = new bool[w + 1];
+        int[] c = new int[5];
+        int step = h > 1800 ? 2 : 1;
+        for (int y = 0; y < h; y += step) {
+            int runs = 0, o = y * w;
+            for (int x = 0; x < w; x++) {
+                bool d = b[o + x];
+                if (runs > 0 && col[runs - 1] == d) len[runs - 1]++;
+                else { col[runs] = d; len[runs] = 1; start[runs] = x; runs++; }
+            }
+            for (int i = 0; i + 4 < runs; i++) {
+                if (!col[i]) continue;
+                for (int k = 0; k < 5; k++) c[k] = len[i + k];
+                if (!Ratio(c)) continue;
+                Cross(b, w, h, start[i + 2] + len[i + 2] / 2.0, y, c[0] + c[1] + c[2] + c[3] + c[4], list);
+            }
+        }
+        return list;
+    }
+
+    static bool Ratio(int[] c) {
+        int total = 0;
+        foreach (int v in c) { if (v == 0) return false; total += v; }
+        if (total < 7) return false;
+        double m = total / 7.0, d = m / 2;
+        return Math.Abs(m - c[0]) < d && Math.Abs(m - c[1]) < d && Math.Abs(3 * m - c[2]) < 3 * d && Math.Abs(m - c[3]) < d && Math.Abs(m - c[4]) < d;
+    }
+
+    // отрезки по вертикали/горизонтали через точку; центр и размер или NaN
+    static double Center(bool[] b, int w, int h, int x, int y, bool vertical, int maxTotal, out int total) {
+        int[] c = new int[5];
+        total = 0;
+        int i = vertical ? y : x;
+        int lim = vertical ? h : w;
+        Func get = delegate(int k) { return vertical ? b[k * w + x] : b[y * w + k]; };
+        int p = i;
+        while (p >= 0 && get(p)) { c[2]++; p--; }
+        if (p < 0) return double.NaN;
+        while (p >= 0 && !get(p) && c[1] <= maxTotal) { c[1]++; p--; }
+        if (p < 0 || c[1] > maxTotal) return double.NaN;
+        while (p >= 0 && get(p) && c[0] <= maxTotal) { c[0]++; p--; }
+        if (c[0] > maxTotal) return double.NaN;
+        p = i + 1;
+        while (p < lim && get(p)) { c[2]++; p++; }
+        if (p == lim) return double.NaN;
+        while (p < lim && !get(p) && c[3] < maxTotal) { c[3]++; p++; }
+        if (p == lim || c[3] >= maxTotal) return double.NaN;
+        while (p < lim && get(p) && c[4] < maxTotal) { c[4]++; p++; }
+        if (c[4] >= maxTotal) return double.NaN;
+        total = c[0] + c[1] + c[2] + c[3] + c[4];
+        if (!Ratio(c)) return double.NaN;
+        return p - c[4] - c[3] - c[2] / 2.0;
+    }
+
+    delegate bool Func(int k);
+
+    static void Cross(bool[] b, int w, int h, double cx, int y, int total, List<Cand> list) {
+        int tv, th;
+        double cy = Center(b, w, h, (int)cx, y, true, total * 2, out tv);
+        if (double.IsNaN(cy)) return;
+        double cx2 = Center(b, w, h, (int)cx, (int)cy, false, total * 2, out th);
+        if (double.IsNaN(cx2)) return;
+        if (Math.Abs(tv - total) > total * 0.6) return;
+        double m = (tv + th) / 14.0;
+        foreach (Cand c in list)
+            if (Math.Abs(c.X - cx2) <= c.M * 1.5 && Math.Abs(c.Y - cy) <= c.M * 1.5 && Math.Abs(c.M - m) <= Math.Max(c.M, m) * 0.5) {
+                c.X = (c.X * c.N + cx2) / (c.N + 1);
+                c.Y = (c.Y * c.N + cy) / (c.N + 1);
+                c.M = (c.M * c.N + m) / (c.N + 1);
+                c.N++;
+                return;
+            }
+        Cand n = new Cand();
+        n.X = cx2;
+        n.Y = cy;
+        n.M = m;
+        n.N = 1;
+        list.Add(n);
+    }
+
+    static Found DecodeBinary(GrayImage g, bool[] black) {
+        List<Cand> c = Finders(black, g.W, g.H);
+        c.RemoveAll(delegate(Cand x) { return x.N < 2; });
+        c.Sort(delegate(Cand a, Cand b) { return b.N.CompareTo(a.N); });
+        if (c.Count > 12) c.RemoveRange(12, c.Count - 12);
+        // тройки: прямоугольный равнобедренный треугольник с похожими модулями
+        List<KeyValuePair<double, Cand[]>> triples = new List<KeyValuePair<double, Cand[]>>();
+        for (int i = 0; i < c.Count; i++)
+            for (int j = i + 1; j < c.Count; j++)
+                for (int k = j + 1; k < c.Count; k++) {
+                    Cand[] t = Order(c[i], c[j], c[k]);
+                    if (t == null) continue;
+                    double ab = Dist(t[0], t[1]), ac = Dist(t[0], t[2]), bc = Dist(t[1], t[2]);
+                    double mm = (t[0].M + t[1].M + t[2].M) / 3;
+                    double err = Math.Abs(ab - ac) / Math.Max(ab, ac) + Math.Abs(bc - Math.Sqrt(ab * ab + ac * ac)) / bc;
+                    double modules = (ab + ac) / 2 / mm;
+                    if (err > 0.3 || modules < 10 || modules > 45) continue;
+                    err += (Math.Max(Math.Max(t[0].M, t[1].M), t[2].M) - Math.Min(Math.Min(t[0].M, t[1].M), t[2].M)) / mm;
+                    triples.Add(new KeyValuePair<double, Cand[]>(err, t));
+                }
+        triples.Sort(delegate(KeyValuePair<double, Cand[]> a, KeyValuePair<double, Cand[]> b) { return a.Key.CompareTo(b.Key); });
+        for (int i = 0; i < triples.Count && i < 6; i++) {
+            Found f = Read(g, black, triples[i].Value);
+            if (f != null) return f;
+        }
+        return null;
+    }
+
+    static double Dist(Cand a, Cand b) { return Math.Sqrt((a.X - b.X) * (a.X - b.X) + (a.Y - b.Y) * (a.Y - b.Y)); }
+
+    // A - угол (против самой длинной стороны), B - справа от него, C - снизу (по часовой от B)
+    static Cand[] Order(Cand p, Cand q, Cand r) {
+        double pq = Dist(p, q), pr = Dist(p, r), qr = Dist(q, r);
+        Cand a, b, cc;
+        if (qr >= pq && qr >= pr) { a = p; b = q; cc = r; }
+        else if (pr >= pq && pr >= qr) { a = q; b = p; cc = r; }
+        else { a = r; b = p; cc = q; }
+        double cross = (b.X - a.X) * (cc.Y - a.Y) - (b.Y - a.Y) * (cc.X - a.X);
+        if (cross < 0) { Cand t = b; b = cc; cc = t; }
+        return new Cand[] { a, b, cc };
+    }
+
+    static Found Read(GrayImage g, bool[] black, Cand[] t) {
+        Cand a = t[0], b = t[1], c = t[2];
+        double m = (a.M + b.M + c.M) / 3;
+        double modules = (Dist(a, b) + Dist(a, c)) / 2 / m + 7;
+        int v0 = (int)Math.Round((modules - 17) / 4);
+        foreach (int dv in new int[] { 0, 1, -1 }) {
+            int v = v0 + dv;
+            if (v < 1 || v > 4) continue;
+            Found f = ReadVersion(g, black, a, b, c, v);
+            if (f != null) return f;
+        }
+        return null;
+    }
+
+    // перспективное преобразование: из координат модулей в точки снимка (по четырём парам точек)
+    class Persp {
+        double a11, a12, a13, a21, a22, a23, a31, a32, a33;
+
+        public static Persp Make(double[] src, double[] dst) {
+            Persp s = Square(src[0], src[1], src[2], src[3], src[4], src[5], src[6], src[7]).Adj();
+            Persp d = Square(dst[0], dst[1], dst[2], dst[3], dst[4], dst[5], dst[6], dst[7]);
+            return d.Times(s);
+        }
+
+        static Persp Square(double x0, double y0, double x1, double y1, double x2, double y2, double x3, double y3) {
+            Persp p = new Persp();
+            double dx3 = x0 - x1 + x2 - x3, dy3 = y0 - y1 + y2 - y3;
+            if (Math.Abs(dx3) < 1e-9 && Math.Abs(dy3) < 1e-9) {
+                p.a11 = x1 - x0; p.a21 = x2 - x1; p.a31 = x0;
+                p.a12 = y1 - y0; p.a22 = y2 - y1; p.a32 = y0;
+                p.a13 = 0; p.a23 = 0; p.a33 = 1;
+            } else {
+                double dx1 = x1 - x2, dx2 = x3 - x2, dy1 = y1 - y2, dy2 = y3 - y2;
+                double den = dx1 * dy2 - dx2 * dy1;
+                double a13 = (dx3 * dy2 - dx2 * dy3) / den, a23 = (dx1 * dy3 - dx3 * dy1) / den;
+                p.a11 = x1 - x0 + a13 * x1; p.a21 = x3 - x0 + a23 * x3; p.a31 = x0;
+                p.a12 = y1 - y0 + a13 * y1; p.a22 = y3 - y0 + a23 * y3; p.a32 = y0;
+                p.a13 = a13; p.a23 = a23; p.a33 = 1;
+            }
+            return p;
+        }
+
+        Persp Adj() {
+            Persp p = new Persp();
+            p.a11 = a22 * a33 - a23 * a32; p.a21 = a23 * a31 - a21 * a33; p.a31 = a21 * a32 - a22 * a31;
+            p.a12 = a13 * a32 - a12 * a33; p.a22 = a11 * a33 - a13 * a31; p.a32 = a12 * a31 - a11 * a32;
+            p.a13 = a12 * a23 - a13 * a22; p.a23 = a13 * a21 - a11 * a23; p.a33 = a11 * a22 - a12 * a21;
+            return p;
+        }
+
+        Persp Times(Persp o) {
+            Persp p = new Persp();
+            p.a11 = a11 * o.a11 + a21 * o.a12 + a31 * o.a13;
+            p.a21 = a11 * o.a21 + a21 * o.a22 + a31 * o.a23;
+            p.a31 = a11 * o.a31 + a21 * o.a32 + a31 * o.a33;
+            p.a12 = a12 * o.a11 + a22 * o.a12 + a32 * o.a13;
+            p.a22 = a12 * o.a21 + a22 * o.a22 + a32 * o.a23;
+            p.a32 = a12 * o.a31 + a22 * o.a32 + a32 * o.a33;
+            p.a13 = a13 * o.a11 + a23 * o.a12 + a33 * o.a13;
+            p.a23 = a13 * o.a21 + a23 * o.a22 + a33 * o.a23;
+            p.a33 = a13 * o.a31 + a23 * o.a32 + a33 * o.a33;
+            return p;
+        }
+
+        public void Map(double x, double y, out double ox, out double oy) {
+            double den = a13 * x + a23 * y + a33;
+            ox = (a11 * x + a21 * y + a31) / den;
+            oy = (a12 * x + a22 * y + a32) / den;
+        }
+    }
+
+    static Found ReadVersion(GrayImage g, bool[] black, Cand a, Cand b, Cand c, int v) {
+        int n = 17 + 4 * v;
+        // четвёртая точка: у версий 2+ - выравнивающий узор (ищется рядом с расчётным местом), у версии 1 - угол параллелограмма
+        double dx = b.X - a.X + c.X, dy = b.Y - a.Y + c.Y;
+        double corner = n - 3.5;
+        if (v >= 2) {
+            double k = (n - 10.0) / (n - 7.0);       // выравнивающий узор - на (n-6.5) модуля, угол - на (n-3.5)
+            double ex = a.X + (dx - a.X) * k, ey = a.Y + (dy - a.Y) * k;
+            double fx, fy;
+            if (Align(black, g.W, g.H, ex, ey, (a.M + b.M + c.M) / 3, out fx, out fy)) { dx = fx; dy = fy; corner = n - 6.5; }
+            else { dx = ex; dy = ey; corner = n - 6.5; }
+        }
+        Persp p = Persp.Make(new double[] { 3.5, 3.5, n - 3.5, 3.5, corner, corner, 3.5, n - 3.5 },
+            new double[] { a.X, a.Y, b.X, b.Y, dx, dy, c.X, c.Y });
+        bool[,] m = new bool[n, n];
+        for (int y = 0; y < n; y++)
+            for (int x = 0; x < n; x++) {
+                int votes = 0;
+                for (int s = 0; s < 5; s++) {
+                    double ox, oy;
+                    double sx = x + 0.5 + (s == 1 ? 0.2 : s == 2 ? -0.2 : 0), sy = y + 0.5 + (s == 3 ? 0.2 : s == 4 ? -0.2 : 0);
+                    p.Map(sx, sy, out ox, out oy);
+                    int ix = (int)ox, iy = (int)oy;
+                    if (ix < 0 || iy < 0 || ix >= g.W || iy >= g.H) continue;
+                    if (black[iy * g.W + ix]) votes++;
+                }
+                m[y, x] = votes >= 3;
+            }
+        return Parse(m, v);
+    }
+
+    // выравнивающий узор: тёмный центр, светлое кольцо, тёмное кольцо - лучшее совпадение возле (ex, ey)
+    static bool Align(bool[] b, int w, int h, double ex, double ey, double mod, out double fx, out double fy) {
+        fx = ex; fy = ey;
+        int r = (int)(mod * 4), best = -1;
+        double sx = 0, sy = 0;
+        int cnt = 0;
+        for (int y = (int)(ey - r); y <= ey + r; y++)
+            for (int x = (int)(ex - r); x <= ex + r; x++) {
+                int score = 0;
+                for (int dy = -2; dy <= 2; dy++)
+                    for (int dxx = -2; dxx <= 2; dxx++) {
+                        int px = (int)(x + dxx * mod), py = (int)(y + dy * mod);
+                        if (px < 0 || py < 0 || px >= w || py >= h) continue;
+                        bool want = Math.Max(Math.Abs(dxx), Math.Abs(dy)) != 1;
+                        if (b[py * w + px] == want) score++;
+                    }
+                // одинаково хорошо подходит целое пятно точек - берётся его середина
+                if (score > best) { best = score; sx = sy = 0; cnt = 0; }
+                if (score == best) { sx += x; sy += y; cnt++; }
+            }
+        if (cnt > 0) { fx = sx / cnt; fy = sy / cnt; }
+        return best >= 23;
+    }
+
+    // матрица модулей -> текст: формат, снятие маски, кодовые слова, коррекция, разбор
+    static Found Parse(bool[,] m, int v) {
+        int n = 17 + 4 * v;
+        int[] y1 = new int[15], x1 = new int[15], y2 = new int[15], x2 = new int[15];
+        FormatCells(n, y1, x1, y2, x2);
+        int f1 = 0, f2 = 0;
+        for (int i = 0; i < 15; i++) {
+            if (m[y1[i], x1[i]]) f1 |= 1 << i;
+            if (m[y2[i], x2[i]]) f2 |= 1 << i;
+        }
+        int ecl = -1, mask = -1, bestD = 99;
+        for (int e = 0; e < 4; e++)
+            for (int k = 0; k < 8; k++) {
+                int f = FormatBits(e, k);
+                int d = Math.Min(Bits(f ^ f1), Bits(f ^ f2));
+                if (d < bestD) { bestD = d; ecl = e; mask = k; }
+            }
+        if (bestD > 3) return null;
+        bool[,] fn = Function(v);
+        int nb = Blocks[v - 1, ecl, 0], nd = Blocks[v - 1, ecl, 1], ne = Blocks[v - 1, ecl, 2], total = nb * (nd + ne);
+        byte[] code = new byte[total];
+        int bit = 0;
+        for (int right = n - 1; right >= 1; right -= 2) {
+            if (right == 6) right = 5;
+            for (int vert = 0; vert < n; vert++)
+                for (int j = 0; j < 2; j++) {
+                    int x = right - j, y = (right + 1 & 2) == 0 ? n - 1 - vert : vert;
+                    if (fn[y, x] || bit >= total * 8) continue;
+                    bool d = m[y, x] ^ MaskBit(mask, y, x);
+                    if (d) code[bit >> 3] |= (byte)(0x80 >> (bit & 7));
+                    bit++;
+                }
+        }
+        byte[] data = new byte[nb * nd];
+        for (int blk = 0; blk < nb; blk++) {
+            int[] cw = new int[nd + ne];
+            for (int i = 0; i < nd; i++) cw[i] = code[i * nb + blk];
+            for (int i = 0; i < ne; i++) cw[nd + i] = code[nd * nb + i * nb + blk];
+            if (!Correct(cw, ne)) return null;
+            for (int i = 0; i < nd; i++) data[blk * nd + i] = (byte)cw[i];
+        }
+        string text = Segments(data, v);
+        if (text == null) return null;
+        Found r = new Found();
+        r.Text = text;
+        r.Version = v;
+        return r;
+    }
+
+    static int Bits(int x) { int c = 0; while (x != 0) { c += x & 1; x >>= 1; } return c; }
+
+    // исправление ошибок Рида-Соломона: синдромы, Берлекэмп-Мэсси, Ченя, Форни; false - ошибок больше, чем можно исправить
+    public static bool Correct(int[] cw, int ne) {
+        int n = cw.Length;
+        int[] s = new int[ne];
+        bool clean = true;
+        for (int i = 0; i < ne; i++) {
+            int x = Exp[i], y = 0;
+            for (int k = 0; k < n; k++) y = Mul(y, x) ^ cw[k];
+            s[i] = y;
+            if (y != 0) clean = false;
+        }
+        if (clean) return true;
+        int[] lam = new int[ne + 1], prev = new int[ne + 1];
+        lam[0] = 1;
+        prev[0] = 1;
+        int len = 0, shift = 1, bprev = 1;
+        for (int i = 0; i < ne; i++) {
+            int d = s[i];
+            for (int k = 1; k <= len; k++) d ^= Mul(lam[k], s[i - k]);
+            if (d == 0) { shift++; continue; }
+            int coef = Div(d, bprev);
+            int[] t = (int[])lam.Clone();
+            for (int k = 0; k + shift <= ne; k++) lam[k + shift] ^= Mul(coef, prev[k]);
+            if (2 * len <= i) { len = i + 1 - len; prev = t; bprev = d; shift = 1; }
+            else shift++;
+        }
+        if (2 * len > ne) return false;
+        // Ω = S·Λ mod x^ne
+        int[] om = new int[ne];
+        for (int i = 0; i < ne; i++) for (int k = 0; k <= i && k <= len; k++) om[i] ^= Mul(lam[k], s[i - k]);
+        int found = 0;
+        for (int pw = 0; pw < n; pw++) {
+            int xinv = Exp[(255 - pw) % 255];       // X^-1, X = α^pw
+            int v = 0;
+            for (int k = len; k >= 0; k--) v = Mul(v, xinv) ^ lam[k];
+            if (v != 0) continue;
+            int num = 0;
+            for (int k = ne - 1; k >= 0; k--) num = Mul(num, xinv) ^ om[k];
+            int den = 0;
+            for (int k = 1; k <= len; k += 2) {
+                int term = lam[k];
+                for (int q = 0; q < k - 1; q++) term = Mul(term, xinv);
+                den ^= term;
+            }
+            if (den == 0) return false;
+            int e = Mul(Exp[pw], Div(num, den));
+            cw[n - 1 - pw] ^= e;
+            found++;
+        }
+        if (found != len) return false;
+        for (int i = 0; i < ne; i++) {
+            int x = Exp[i], y = 0;
+            for (int k = 0; k < n; k++) y = Mul(y, x) ^ cw[k];
+            if (y != 0) return false;
+        }
+        return true;
+    }
+
+    // поток данных -> текст (цифры, буквы-цифры, байты UTF-8)
+    static string Segments(byte[] data, int v) {
+        int pos = 0, total = data.Length * 8;
+        StringBuilder sb = new StringBuilder();
+        List<byte> bytes = new List<byte>();
+        while (pos + 4 <= total) {
+            int mode = Take(data, ref pos, 4);
+            if (mode == 0) break;
+            if (mode == 1) {
+                int count = Take(data, ref pos, 10);
+                for (; count >= 3; count -= 3) sb.Append(Take(data, ref pos, 10).ToString("000"));
+                if (count == 2) sb.Append(Take(data, ref pos, 7).ToString("00"));
+                else if (count == 1) sb.Append(Take(data, ref pos, 4));
+            } else if (mode == 2) {
+                int count = Take(data, ref pos, 9);
+                for (; count >= 2; count -= 2) {
+                    int p = Take(data, ref pos, 11);
+                    if (p / 45 >= 45) return null;
+                    sb.Append(Alnum[p / 45]).Append(Alnum[p % 45]);
+                }
+                if (count == 1) { int p = Take(data, ref pos, 6); if (p >= 45) return null; sb.Append(Alnum[p]); }
+            } else if (mode == 4) {
+                int count = Take(data, ref pos, 8);
+                bytes.Clear();
+                for (int i = 0; i < count; i++) bytes.Add((byte)Take(data, ref pos, 8));
+                sb.Append(Encoding.UTF8.GetString(bytes.ToArray()));
+            } else return sb.Length > 0 ? sb.ToString() : null;
+            if (pos > total) return null;
+        }
+        return sb.ToString();
+    }
+
+    static int Take(byte[] data, ref int pos, int n) {
+        int v = 0;
+        for (int i = 0; i < n; i++, pos++) {
+            int bit = pos < data.Length * 8 ? data[pos >> 3] >> 7 - (pos & 7) & 1 : 0;
+            v = v << 1 | bit;
+        }
+        return v;
+    }
 }
 
 // Отчёты по пломбам. Партия - выданные пломбы подряд (пластиковые по 100: 4830401 ... 4830500; наклейки - сколько выдали,
