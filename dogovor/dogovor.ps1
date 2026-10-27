@@ -15859,6 +15859,251 @@ public class SpravkaForm : Form {
     }
 }
 
+// Таблицы Clarion (.DAT): в них данные программы юр лиц «Долги район» (DOLG_VSE.EXE). Только чтение: файл
+// открывается на чтение и программе базы не мешает (ей можно и читать, и писать в это время).
+// Устройство: заголовок 85 байт, описания полей (по 27 байт), ключей (19 байт + по 6 на часть), шаблонов вывода
+// («@D6» - дата и т.п.), массивов; с Offset - записи одной длины: байт состояния (0x10 - удалена), 4 служебных
+// байта, поля. Ключи (индексы) - в файлах .K01, .K02... рядом с таблицей.
+public class ClarionField {
+    public int Type, Offset, Length, DecSig, DecDec, Arr, Pic;
+    public string Name = "", Picture = "";
+
+    public string TypeName {
+        get {
+            switch (Type) {
+                case 1: return IsDate ? "DATE" : IsTime ? "TIME" : "LONG";
+                case 2: return "REAL";
+                case 3: return "STRING";
+                case 4: return "PSTRING";
+                case 5: return "BYTE";
+                case 6: return "SHORT";
+                case 7: return "GROUP";
+                case 8: return "DECIMAL";
+            }
+            return "тип" + Type;
+        }
+    }
+
+    public bool IsText { get { return Type == 3 || Type == 4; } }
+    public bool IsDate { get { return Type == 1 && Picture.ToUpperInvariant().StartsWith("@D"); } }
+    public bool IsTime { get { return Type == 1 && Picture.ToUpperInvariant().StartsWith("@T"); } }
+}
+
+public class ClarionKey {
+    public string Name = "", File = "";
+    public List<int> Parts = new List<int>();
+}
+
+public class ClarionFile : IDisposable {
+    public const int Signature = 0x3343, MemoSignature = 0x334D;
+    public string FileName = "", Prefix = "";
+    public int Attr, RecLen, DataBase = 5;
+    public long Offset, Records, Deleted;
+    public DateTime Changed = DateTime.MinValue;
+    public List<ClarionField> Fields = new List<ClarionField>();
+    public List<ClarionKey> Keys = new List<ClarionKey>();
+    public Encoding Enc = Encoding.GetEncoding(866);
+    FileStream fs;
+
+    public bool Locked { get { return (Attr & 1) != 0; } }
+    public bool Owned { get { return (Attr & 2) != 0; } }
+    public bool Encrypted { get { return (Attr & 4) != 0; } }
+    public bool HasMemo { get { return (Attr & 8) != 0; } }
+    public bool Compressed { get { return (Attr & 16) != 0; } }
+
+    // мест под записи в файле (с удалёнными)
+    public long Slots { get { return RecLen <= 5 ? 0 : Math.Max(0, (fs.Length - Offset) / RecLen); } }
+
+    public static int SignatureOf(string path) {
+        try {
+            using (FileStream f = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite)) {
+                int a = f.ReadByte(), b = f.ReadByte();
+                return a < 0 || b < 0 ? -1 : a | b << 8;
+            }
+        } catch { return -1; }
+    }
+
+    public static bool Is(string path) { return SignatureOf(path) == Signature; }
+
+    public static ClarionFile Open(string path) {
+        ClarionFile c = new ClarionFile();
+        c.FileName = path;
+        c.fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+        try { c.ReadHead(); }
+        catch { c.Dispose(); throw; }
+        return c;
+    }
+
+    public void Dispose() { if (fs != null) { fs.Close(); fs = null; } }
+
+    void ReadHead() {
+        BinaryReader r = new BinaryReader(fs);
+        fs.Position = 0;
+        if (r.ReadUInt16() != Signature) throw new InvalidDataException("не таблица Clarion");
+        Attr = r.ReadUInt16();
+        int keys = r.ReadByte();
+        Records = r.ReadUInt32();
+        Deleted = r.ReadUInt32();
+        int flds = r.ReadUInt16(), pics = r.ReadUInt16();
+        r.ReadUInt16();                          // массивов
+        RecLen = r.ReadUInt16();
+        Offset = r.ReadUInt32();
+        r.ReadBytes(4 + 4 + 4 + 12 + 12);       // logeof, logbof, freerec, имя записи, имя примечаний
+        Prefix = Ascii(r.ReadBytes(3));
+        r.ReadBytes(3 + 2 + 2 + 4);              // префикс записи, примечания, резерв
+        long time = r.ReadUInt32(), date = r.ReadUInt32();
+        r.ReadUInt16();
+        if (date > 3 && date < 110000) {
+            Changed = Day(date);
+            if (time > 0 && time <= 8640000) Changed = Changed.AddMilliseconds((time - 1) * 10.0);
+        }
+        if (flds > 2000 || RecLen <= 5 || Offset < 85 || Offset > fs.Length) throw new InvalidDataException("заголовок не похож на таблицу Clarion");
+        for (int i = 0; i < flds; i++) {
+            ClarionField f = new ClarionField();
+            f.Type = r.ReadByte();
+            f.Name = Ascii(r.ReadBytes(16));
+            int colon = f.Name.IndexOf(':');
+            if (colon >= 0) f.Name = f.Name.Substring(colon + 1);
+            f.Offset = r.ReadUInt16();
+            f.Length = r.ReadUInt16();
+            f.DecSig = r.ReadByte();
+            f.DecDec = r.ReadByte();
+            f.Arr = r.ReadUInt16();
+            f.Pic = r.ReadUInt16();
+            Fields.Add(f);
+        }
+        for (int i = 0; i < keys; i++) {
+            ClarionKey k = new ClarionKey();
+            int parts = r.ReadByte();
+            k.Name = Ascii(r.ReadBytes(16));
+            int colon = k.Name.IndexOf(':');
+            if (colon >= 0) k.Name = k.Name.Substring(colon + 1);
+            r.ReadBytes(2);
+            for (int j = 0; j < parts; j++) {
+                r.ReadByte();
+                int num = r.ReadUInt16();
+                r.ReadBytes(3);
+                k.Parts.Add(num - 1);
+            }
+            k.File = Path.ChangeExtension(FileName, "K" + (i + 1).ToString("X2"));
+            Keys.Add(k);
+        }
+        List<string> pictures = new List<string>();
+        for (int i = 0; i < pics && fs.Position < Offset; i++) {
+            int len = r.ReadUInt16();
+            pictures.Add(Ascii(r.ReadBytes(len)));
+        }
+        foreach (ClarionField f in Fields)
+            if (f.Pic > 0 && f.Pic <= pictures.Count) f.Picture = pictures[f.Pic - 1];
+        // поля считаются от начала данных записи (после 5 байт состояния); если описания считают от начала записи - так
+        int end = 0, first = int.MaxValue;
+        foreach (ClarionField f in Fields) {
+            if (f.Type == 7) continue;
+            end = Math.Max(end, f.Offset + f.Length);
+            first = Math.Min(first, f.Offset);
+        }
+        if (end > RecLen - 5 && first >= 5 && end <= RecLen) DataBase = 0;
+        GuessEncoding();
+    }
+
+    static string Ascii(byte[] b) {
+        StringBuilder sb = new StringBuilder();
+        foreach (byte x in b) { if (x == 0) break; sb.Append(x >= 32 && x < 127 ? (char)x : '?'); }
+        return sb.ToString().Trim();
+    }
+
+    // дата Clarion: дни с 28.12.1800
+    public static DateTime Day(long n) { return new DateTime(1800, 12, 28).AddDays(n); }
+
+    public byte[] Record(long i) {
+        if (i < 0 || i >= Slots) return null;
+        byte[] b = new byte[RecLen];
+        fs.Position = Offset + i * RecLen;
+        int got = 0;
+        while (got < b.Length) {
+            int n = fs.Read(b, got, b.Length - got);
+            if (n <= 0) return null;
+            got += n;
+        }
+        return b;
+    }
+
+    public static bool IsDeleted(byte[] rec) { return (rec[0] & 0x10) != 0; }
+
+    // значение поля текстом; пустое - ""
+    public string Value(byte[] rec, ClarionField f) {
+        int p = DataBase + f.Offset;
+        if (f.Type == 7 || p < 0 || p + Math.Max(1, f.Length) > rec.Length) return "";
+        switch (f.Type) {
+            case 1: {
+                int v = BitConverter.ToInt32(rec, p);
+                if (f.IsDate) return v > 3 && v < 110000 ? Day(v).ToString("dd.MM.yyyy") : "";
+                if (f.IsTime) return v > 0 && v <= 8640000 ? new DateTime(2000, 1, 1).AddMilliseconds((v - 1) * 10.0).ToString("HH:mm") : "";
+                return v.ToString(CultureInfo.InvariantCulture);
+            }
+            case 2: {
+                if (f.Length < 8) return "";
+                if (rec[p] == 0xB0 && rec[p + 6] == 0xEF && rec[p + 7] == 0xFF) return "";
+                double d = BitConverter.ToDouble(rec, p);
+                if (double.IsNaN(d) || double.IsInfinity(d)) return "";
+                return d.ToString(f.DecDec > 0 ? "0." + new string('#', Math.Min(f.DecDec, 9)) : "0.########", CultureInfo.InvariantCulture);
+            }
+            case 3:
+            case 4: {
+                int n = f.Length;
+                while (n > 0 && (rec[p + n - 1] == 32 || rec[p + n - 1] == 0)) n--;
+                int z = Array.IndexOf(rec, (byte)0, p, n);
+                if (z >= 0) n = z - p;
+                return n <= 0 ? "" : Enc.GetString(rec, p, n);
+            }
+            case 5: return rec[p].ToString(CultureInfo.InvariantCulture);
+            case 6: return BitConverter.ToInt16(rec, p).ToString(CultureInfo.InvariantCulture);
+            case 8: return Decimal(rec, p, f);
+        }
+        return "";
+    }
+
+    // упакованное десятичное: по 2 цифры в байте, впереди - знак (не 0 - минус), DecDec цифр после запятой
+    static string Decimal(byte[] rec, int p, ClarionField f) {
+        int nibbles = f.Length * 2, digits = Math.Min(f.DecSig, nibbles);
+        StringBuilder sb = new StringBuilder();
+        bool minus = false;
+        for (int i = 0; i < nibbles; i++) {
+            int b = rec[p + i / 2], v = i % 2 == 0 ? b >> 4 : b & 15;
+            if (i < nibbles - digits) { if (v != 0) minus = true; continue; }
+            if (v > 9) return "";
+            if (sb.Length == digits - f.DecDec && f.DecDec > 0) sb.Append('.');
+            sb.Append((char)('0' + v));
+        }
+        string s = sb.ToString();
+        int k = 0;
+        while (k < s.Length - 1 && s[k] == '0' && s[k + 1] != '.') k++;
+        s = s.Substring(k);
+        if (s.IndexOf('.') >= 0) s = s.TrimEnd('0').TrimEnd('.');
+        if (s.StartsWith(".")) s = "0" + s;
+        return minus && s != "0" ? "-" + s : s;
+    }
+
+    // текст в DOS-кодировке (866) или в Windows (1251): по русским буквам в начале таблицы
+    void GuessEncoding() {
+        int dos = 0, win = 0;
+        long n = Math.Min(Slots, 300);
+        for (long i = 0; i < n; i++) {
+            byte[] rec = Record(i * Math.Max(1, Slots / Math.Max(1, n)));
+            if (rec == null) break;
+            foreach (ClarionField f in Fields) {
+                if (!f.IsText) continue;
+                for (int j = DataBase + f.Offset; j < DataBase + f.Offset + f.Length && j < rec.Length; j++) {
+                    byte b = rec[j];
+                    if (b >= 0x80 && b <= 0xAF) dos++;
+                    else if (b >= 0xC0 && b <= 0xDF) win++;
+                }
+            }
+        }
+        Enc = Encoding.GetEncoding(win > dos ? 1251 : 866);
+    }
+}
+
 // «Перевод из юр в физ»: квартира многоквартирного дома, которая числится за юр лицом (нераспроданная), переходит
 // к гражданину. Нужно: из базы юр лиц - данные счётчика квартиры (тип, номер, поверка, показания) и номер карточки,
 // из базы физ лиц - книга лицевых дома (по соседним квартирам), лицевой 0 + книга + квартира + контрольная цифра.
@@ -15926,7 +16171,7 @@ public class JurForm : Form {
         Button browse = Ui.Button("Обзор…", false);
         browse.Click += delegate {
             using (FolderBrowserDialog d = new FolderBrowserDialog()) {
-                d.Description = "Папка базы юр лиц (где лежат её таблицы .DBF)";
+                d.Description = "Папка базы юр лиц (где лежат её таблицы .DAT и .DBF)";
                 if (Directory.Exists(folder.Text)) d.SelectedPath = folder.Text;
                 if (d.ShowDialog(this) == DialogResult.OK) folder.Text = d.SelectedPath;
             }
@@ -15994,6 +16239,7 @@ public class JurForm : Form {
 
     static Label Para(string text, Color color) {
         Label l = new Label();
+        l.UseCompatibleTextRendering = false;     // рисуется так же, как меряется (TextRenderer) - строки не обрезаются
         l.Text = text;
         l.Font = St.Base;
         l.ForeColor = color;
@@ -16388,27 +16634,45 @@ public class CheckRule {
     }
 }
 
-// Отчёт о строении базы юр лиц: таблицы, поля, вид значений, индексы. Данных абонентов нет:
-// буквы заменены на А/а, цифры на 9; значения показываются, только если их мало разных и в них нет длинных чисел
-// (например, вид объекта «квартира», «нежилое помещение»)
+// Отчёт о строении базы юр лиц: таблицы (.DBF и Clarion .DAT), поля, вид значений, индексы, настройки программы.
+// Данных абонентов нет: буквы заменены на А/а, цифры на 9; значения показываются, только если их мало разных и в них
+// нет длинных чисел (например, вид объекта «квартира», «нежилое помещение»). Всё только читается.
 public static class JurReport {
     public delegate void Progress(string text);
+
+    // эти файлы только считаются: программа, индексы, временные, документы
+    static readonly string[] Counted = { ".exe", ".com", ".dll", ".ovl", ".$$$", ".tmp", ".bak", ".old", ".dbf", ".cdx", ".idx", ".ntx", ".mdx",
+        ".fpt", ".dbt", ".mem", ".lnk", ".hlp", ".ico", ".txt", ".doc", ".docx", ".xls", ".xlsx", ".pdf", ".log", ".zip", ".rar", ".arj", ".lst", ".prn" };
+    static readonly string[] SettingsExt = { ".ini", ".ctl", ".cfg" }, BatchExt = { ".bat", ".cmd" };
 
     public static int Write(string dir, string file, Progress progress) {
         StringBuilder sb = new StringBuilder();
         sb.Append("=== Оформление договора: строение базы юр лиц, ").Append(DateTime.Now.ToString("dd.MM.yyyy HH:mm")).Append(" ===\r\n");
-        sb.Append("Данных абонентов в отчёте нет: только таблицы, поля, вид значений (буквы - А/а, цифры - 9), индексы.\r\n");
-        sb.Append("Папка: ").Append(dir).Append("\r\n\r\n");
+        sb.Append("Данных абонентов в отчёте нет: только таблицы (.DBF и Clarion .DAT), поля, вид значений (буквы - А/а, цифры - 9), индексы.\r\n");
+        sb.Append("База только читается - ничего не меняется.\r\n\r\n");
+        int tables = Folder(sb, dir, progress, 1);
+        File.WriteAllText(file, sb.ToString(), new UTF8Encoding(true));
+        return tables;
+    }
+
+    public static void Append(string file, string line) {
+        try { File.AppendAllText(file, "\r\n" + DateTime.Now.ToString("dd.MM.yyyy HH:mm") + "  " + line + "\r\n", new UTF8Encoding(true)); } catch { }
+    }
+
+    static int Folder(StringBuilder sb, string dir, Progress progress, int depth) {
+        sb.Append("Папка: ").Append(dir).Append("\r\n");
+        string[] all = Directory.GetFiles(dir);
+        Array.Sort(all, StringComparer.OrdinalIgnoreCase);
         // какие файлы есть (программа базы, формы, отчёты) - только имена и размеры
         Dictionary<string, int> exts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         List<string> prog = new List<string>();
-        foreach (string f in Directory.GetFiles(dir)) {
+        foreach (string f in all) {
             string e = Path.GetExtension(f).ToLowerInvariant();
             int n;
             exts.TryGetValue(e, out n);
             exts[e] = n + 1;
             if (e == ".exe" || e == ".app" || e == ".prg" || e == ".fxp" || e == ".mpr" || e == ".mnx" || e == ".scx" || e == ".frx" || e == ".pjx")
-                prog.Add(Path.GetFileName(f) + " (" + (new FileInfo(f).Length / 1024) + " КБ)");
+                prog.Add(Path.GetFileName(f) + " (" + (new FileInfo(f).Length / 1024) + " КБ, " + new FileInfo(f).LastWriteTime.ToString("dd.MM.yyyy") + ")");
         }
         sb.Append("Файлы по типам: ");
         List<string> el = new List<string>();
@@ -16416,33 +16680,62 @@ public static class JurReport {
         el.Sort();
         sb.Append(string.Join(", ", el.ToArray())).Append("\r\n");
         if (prog.Count > 0) sb.Append("Программы и формы: ").Append(string.Join(", ", prog.ToArray())).Append("\r\n");
-        string[] sub = Directory.GetDirectories(dir);
+        string[] sub = new string[0];
+        try { sub = Directory.GetDirectories(dir); } catch { }
+        Array.Sort(sub, StringComparer.OrdinalIgnoreCase);
         if (sub.Length > 0) {
             List<string> sn = new List<string>();
-            foreach (string s in sub) { int k = 0; try { k = Directory.GetFiles(s, "*.dbf").Length; } catch { } sn.Add(Path.GetFileName(s) + (k > 0 ? " (таблиц " + k + ")" : "")); }
+            foreach (string s in sub) { int k = 0; try { k = Directory.GetFiles(s).Length; } catch { } sn.Add(Path.GetFileName(s) + " (файлов " + k + ")"); }
             sb.Append("Подпапки: ").Append(string.Join(", ", sn.ToArray())).Append("\r\n");
         }
         sb.Append("\r\n");
-        string[] files = Places.DbfFiles(dir);
-        int done = 0;
-        foreach (string f in files) {
-            done++;
-            if (progress != null) progress("Изучаю таблицу " + done + " из " + files.Length + ": " + Path.GetFileName(f));
+        // настройки и пакетные файлы программы: откуда она берёт данные
+        foreach (string f in all) {
+            string e = Path.GetExtension(f).ToLowerInvariant();
+            try {
+                if (Array.IndexOf(SettingsExt, e) >= 0) Settings(sb, f);
+                else if (Array.IndexOf(BatchExt, e) >= 0) Batch(sb, f);
+            } catch (Exception ex) { sb.Append(Path.GetFileName(f)).Append(": не прочитался - ").Append(ex.Message).Append("\r\n\r\n"); }
+        }
+        int tables = 0;
+        string[] dbf = Places.DbfFiles(dir);
+        foreach (string f in dbf) {
+            tables++;
+            if (progress != null) progress("Изучаю таблицу " + Path.GetFileName(f) + " (" + Path.GetFileName(dir) + ")");
             try { Table(sb, f); }
             catch (Exception ex) { sb.Append(Path.GetFileName(f)).Append(": не прочиталась - ").Append(ex.Message).Append("\r\n\r\n"); }
         }
-        File.WriteAllText(file, sb.ToString(), new UTF8Encoding(true));
-        return files.Length;
+        // таблицы Clarion (.DAT) и незнакомые файлы - по подписи в начале файла
+        int unknown = 0;
+        foreach (string f in all) {
+            string e = Path.GetExtension(f).ToLowerInvariant();
+            if (Array.IndexOf(Counted, e) >= 0 || Array.IndexOf(SettingsExt, e) >= 0 || Array.IndexOf(BatchExt, e) >= 0) continue;
+            if (System.Text.RegularExpressions.Regex.IsMatch(e, @"^\.[ki][0-9a-f]{2}$")) continue;     // ключи Clarion - при таблице
+            int sig = ClarionFile.SignatureOf(f);
+            if (sig == ClarionFile.Signature) {
+                tables++;
+                if (progress != null) progress("Изучаю таблицу " + Path.GetFileName(f) + " (" + Path.GetFileName(dir) + ")");
+                try { Dat(sb, f); }
+                catch (Exception ex) { sb.Append(Path.GetFileName(f)).Append(": не прочиталась - ").Append(ex.Message).Append("\r\n\r\n"); }
+            } else if (unknown++ < 40) {
+                try { Unknown(sb, f, sig == ClarionFile.MemoSignature ? "примечания Clarion" : null); } catch { }
+            }
+        }
+        if (depth > 0)
+            for (int i = 0; i < sub.Length && i < 12; i++) {
+                sb.Append("----- подпапка ").Append(Path.GetFileName(sub[i])).Append(" -----\r\n");
+                try { tables += Folder(sb, sub[i], progress, depth - 1); }
+                catch (Exception ex) { sb.Append("не открылась - ").Append(ex.Message).Append("\r\n\r\n"); }
+            }
+        return tables;
     }
 
-    public static void Append(string file, string line) {
-        try { File.AppendAllText(file, "\r\n" + DateTime.Now.ToString("dd.MM.yyyy HH:mm") + "  " + line + "\r\n", new UTF8Encoding(true)); } catch { }
-    }
+    static string Mb(long bytes) { return (bytes / 1024.0 / 1024).ToString("0.0"); }
 
     static void Table(StringBuilder sb, string path) {
         LiveBase b = LiveBase.Open(path);
         FileInfo fi = new FileInfo(path);
-        sb.Append(Path.GetFileName(path)).Append(": записей ").Append(b.RecordCount).Append(", ").Append((fi.Length / 1024.0 / 1024).ToString("0.0"))
+        sb.Append(Path.GetFileName(path)).Append(": записей ").Append(b.RecordCount).Append(", ").Append(Mb(fi.Length))
             .Append(" МБ, изменена ").Append(fi.LastWriteTime.ToString("dd.MM.yyyy")).Append("\r\n");
         DbfTable t = b.RecordCount > 3000 ? b.SpreadSample(2000) : DbfTable.Load(path, null, null, 3000);
         foreach (DbfField fd in t.Fields) Field(sb, t, fd);
@@ -16459,16 +16752,26 @@ public static class JurReport {
         int j = t.FieldIndex(f.Name);
         string head = "  " + (f.Name + "           ").Substring(0, 11) + (f.Type.ToString() + f.Length + (f.Decimals > 0 ? "," + f.Decimals : "") + "      ").Substring(0, 7);
         if (f.Type == 'M' || f.Type == 'G' || f.Type == 'W') { sb.Append(head).Append("примечание/двоичное\r\n"); return; }
+        List<string> vals = new List<string>();
+        for (int r = 0; r < t.Count; r++) {
+            try { vals.Add(DbfTable.Format(t.GetValue(r, j, null), true).Trim()); } catch { }
+        }
+        Describe(sb, head, f.Name, f.Type == 'C' ? Kind.Text : f.Type == 'D' || f.Type == 'T' ? Kind.Date : f.Type == 'L' || f.Type == 'N' && f.Length <= 2 ? Kind.Flag : Kind.Number, vals);
+    }
+
+    enum Kind { Text, Number, Flag, Date }
+
+    // поле: сколько заполнено и как выглядят значения; мало разных (вид объекта, признак) - сами значения:
+    // в них нет данных абонентов; даты - только годы (с какого по какой)
+    static void Describe(StringBuilder sb, string head, string name, Kind kind, List<string> vals) {
         Dictionary<string, int> shapes = new Dictionary<string, int>(), values = new Dictionary<string, int>();
-        int filled = 0, n = t.Count;
+        int filled = 0, n = vals.Count, y0 = 9999, y1 = 0;
         // поля с именами людей и организаций: и короткие слова («д.», «п.» - могут быть инициалами) - тоже буквами А/а
-        string up = f.Name.ToUpperInvariant();
+        string up = name.ToUpperInvariant();
         bool person = false;
         foreach (string w in new string[] { "FIO", "FAM", "IMA", "IMJ", "OTCH", "NAIM", "NAME", "RUK", "DIR", "BUH", "KONT", "PODP" })
             if (up.Contains(w)) person = true;
-        for (int r = 0; r < n; r++) {
-            string v;
-            try { v = DbfTable.Format(t.GetValue(r, j, null), true).Trim(); } catch { continue; }
+        foreach (string v in vals) {
             if (v.Length == 0) continue;
             filled++;
             string sh = Report.Shape(v, !person);
@@ -16476,6 +16779,10 @@ public static class JurReport {
             shapes.TryGetValue(sh, out c);
             shapes[sh] = c + 1;
             if (values.Count <= 16) { values.TryGetValue(v, out c); values[v] = c + 1; }
+            if (kind == Kind.Date && v.Length >= 4) {
+                int y;
+                if (int.TryParse(v.Substring(v.Length - 4), out y) || int.TryParse(v.Substring(0, 4), out y)) { y0 = Math.Min(y0, y); y1 = Math.Max(y1, y); }
+            }
         }
         List<KeyValuePair<string, int>> top = new List<KeyValuePair<string, int>>(shapes);
         top.Sort(delegate(KeyValuePair<string, int> a, KeyValuePair<string, int> b) { return b.Value.CompareTo(a.Value); });
@@ -16485,13 +16792,13 @@ public static class JurReport {
             for (int i = 0; i < top.Count && i < 3; i++) sb.Append(i > 0 ? " | " : "").Append(top[i].Key).Append(" (").Append(top[i].Value * 100 / Math.Max(1, filled)).Append("%)");
             if (top.Count > 3) sb.Append(" | ещё видов: ").Append(top.Count - 3);
         }
-        // мало разных значений (вид объекта, признак) - сами значения: в них нет данных абонентов
-        if (f.Type == 'C' && !person && filled >= 20 && values.Count <= 15 && Safe(values)) {
+        if (kind == Kind.Date && y1 > 0) sb.Append("; годы ").Append(y0).Append(y1 > y0 ? "-" + y1 : "");
+        else if ((kind == Kind.Text || kind == Kind.Number) && !person && filled >= 20 && values.Count <= 15 && Safe(values)) {
             List<KeyValuePair<string, int>> vl = new List<KeyValuePair<string, int>>(values);
             vl.Sort(delegate(KeyValuePair<string, int> a, KeyValuePair<string, int> b) { return b.Value.CompareTo(a.Value); });
             sb.Append("; значения: ");
             for (int i = 0; i < vl.Count; i++) sb.Append(i > 0 ? ", " : "").Append("«").Append(vl[i].Key).Append("» ").Append(vl[i].Value);
-        } else if (f.Type == 'L' || f.Type == 'N' && f.Length <= 2) {
+        } else if (kind == Kind.Flag) {
             List<string> vs = new List<string>(values.Keys);
             if (vs.Count <= 15) sb.Append("; значения: ").Append(string.Join(", ", vs.ToArray()));
         }
@@ -16507,9 +16814,158 @@ public static class JurReport {
         }
         return true;
     }
+
+    // таблица Clarion: поля, ключи и вид значений по выборке записей вразброс (до 2000)
+    static void Dat(StringBuilder sb, string path) {
+        FileInfo fi = new FileInfo(path);
+        using (ClarionFile c = ClarionFile.Open(path)) {
+            sb.Append(Path.GetFileName(path)).Append(" (таблица Clarion): записей ").Append(c.Records);
+            if (c.Deleted > 0) sb.Append(" (и удалённых ").Append(c.Deleted).Append(")");
+            sb.Append(", ").Append(Mb(fi.Length)).Append(" МБ, изменена ").Append(fi.LastWriteTime.ToString("dd.MM.yyyy HH:mm"));
+            if (c.Changed != DateTime.MinValue) sb.Append(" (в заголовке ").Append(c.Changed.ToString("dd.MM.yyyy HH:mm")).Append(")");
+            sb.Append("\r\n  запись ").Append(c.RecLen).Append(" байт, префикс ").Append(c.Prefix.Length > 0 ? c.Prefix : "-")
+                .Append(", кодировка текста ").Append(c.Enc.CodePage);
+            List<string> flags = new List<string>();
+            if (c.Encrypted) flags.Add("зашифрована");
+            if (c.Owned) flags.Add("с паролем");
+            if (c.Compressed) flags.Add("сжата");
+            if (c.Locked) flags.Add("занята программой");
+            if (c.HasMemo) flags.Add("есть примечания (.MEM)");
+            if (flags.Count > 0) sb.Append(", ").Append(string.Join(", ", flags.ToArray()));
+            sb.Append("\r\n");
+            bool readable = !c.Encrypted && !c.Compressed;
+            List<byte[]> recs = new List<byte[]>();
+            long slots = c.Slots;
+            if (readable) {
+                long take = Math.Min(slots, 2000);
+                for (long k = 0; k < take; k++) {
+                    byte[] r = c.Record(slots <= 2000 ? k : (long)(k * (slots / (double)take)));
+                    if (r != null && !ClarionFile.IsDeleted(r)) recs.Add(r);
+                }
+            } else sb.Append("  значения не смотрю: таблица ").Append(c.Encrypted ? "зашифрована" : "сжата").Append("\r\n");
+            for (int i = 0; i < c.Fields.Count; i++) {
+                ClarionField f = c.Fields[i];
+                string type = f.TypeName + f.Length + (f.Type == 8 ? "(" + f.DecSig + "," + f.DecDec + ")" : "");
+                string head = "  " + (f.Name + "           ").Substring(0, Math.Max(11, f.Name.Length + 1)) + (type + "        ").Substring(0, Math.Max(10, type.Length + 1))
+                    + (f.Picture.Length > 0 ? f.Picture + " " : "") + (f.Arr > 0 ? "массив " : "");
+                if (f.Type == 7) { sb.Append(head).Append("группа полей\r\n"); continue; }
+                if (!readable) { sb.Append(head).Append("\r\n"); continue; }
+                List<string> vals = new List<string>();
+                foreach (byte[] r in recs) { try { vals.Add(c.Value(r, f).Trim()); } catch { vals.Add(""); } }
+                if (!f.IsText && !f.IsDate)
+                    for (int v = 0; v < vals.Count; v++) if (vals[v] == "0") vals[v] = "";
+                Describe(sb, head, f.Name, f.IsDate ? Kind.Date : f.IsText ? Kind.Text : Kind.Number, vals);
+            }
+            if (c.Keys.Count > 0) {
+                sb.Append("  ключи (индексы):\r\n");
+                foreach (ClarionKey k in c.Keys) {
+                    List<string> parts = new List<string>();
+                    foreach (int p in k.Parts) parts.Add(p >= 0 && p < c.Fields.Count ? c.Fields[p].Name : "поле " + (p + 1));
+                    sb.Append("    ").Append(Path.GetExtension(k.File).TrimStart('.').ToUpperInvariant()).Append(" ").Append(k.Name).Append(" = ")
+                        .Append(string.Join(" + ", parts.ToArray()));
+                    if (File.Exists(k.File)) sb.Append(" (файл ").Append(new FileInfo(k.File).Length / 1024).Append(" КБ)");
+                    else sb.Append(" (файла ключа нет)");
+                    sb.Append("\r\n");
+                }
+            }
+        }
+        sb.Append("\r\n");
+    }
+
+    static byte[] Head(string path, int max) {
+        using (FileStream f = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite)) {
+            byte[] b = new byte[(int)Math.Min(max, f.Length)];
+            int got = 0;
+            while (got < b.Length) { int n = f.Read(b, got, b.Length - got); if (n <= 0) break; got += n; }
+            if (got < b.Length) Array.Resize(ref b, got);
+            return b;
+        }
+    }
+
+    static bool LooksText(byte[] b) {
+        if (b.Length == 0) return false;
+        int bad = 0;
+        foreach (byte x in b) if (x < 32 && x != 9 && x != 10 && x != 13 && x != 26) bad++;
+        return bad * 100 <= b.Length;
+    }
+
+    // текст DOS (866) или Windows (1251) - по русским буквам
+    static Encoding Guess(byte[] b) {
+        int dos = 0, win = 0;
+        foreach (byte x in b) { if (x >= 0x80 && x <= 0xAF) dos++; else if (x >= 0xC0 && x <= 0xDF) win++; }
+        return Encoding.GetEncoding(win > dos ? 1251 : 866);
+    }
+
+    // настройки программы (.ini, .ctl): разделы и имена; значения - пути, короткие числа и да/нет, остальное - видом А/а/9, пароли скрыты
+    static void Settings(StringBuilder sb, string path) {
+        byte[] b = Head(path, 64 * 1024);
+        if (!LooksText(b)) { Unknown(sb, path, null); return; }
+        sb.Append(Path.GetFileName(path)).Append(" (настройки, ").Append(Math.Max(1, b.Length / 1024)).Append(" КБ, изменён ")
+            .Append(new FileInfo(path).LastWriteTime.ToString("dd.MM.yyyy HH:mm")).Append("):\r\n");
+        int shown = 0;
+        foreach (string line in Guess(b).GetString(b).Split('\n')) {
+            string t = line.Trim().Trim('\x1a');
+            if (t.Length == 0) continue;
+            if (++shown > 80) { sb.Append("  ...\r\n"); break; }
+            if (t.StartsWith("[")) { sb.Append("  ").Append(t.Length > 60 ? t.Substring(0, 60) : t).Append("\r\n"); continue; }
+            int eq = t.IndexOf('=');
+            if (eq > 0) sb.Append("  ").Append(t.Substring(0, eq).Trim()).Append(" = ").Append(SafeValue(t.Substring(0, eq), t.Substring(eq + 1).Trim())).Append("\r\n");
+            else sb.Append("  ").Append(SafeValue("", t)).Append("\r\n");
+        }
+        sb.Append("\r\n");
+    }
+
+    static string SafeValue(string key, string v) {
+        string k = key.ToLowerInvariant();
+        if (k.Contains("pass") || k.Contains("pwd") || k.Contains("psw") || k.Contains("парол") || k.Contains("key") || k.Contains("ключ")) return v.Length > 0 ? "(скрыто)" : "";
+        if (v.Length == 0) return "";
+        if (LooksPath(v)) return v.Length > 120 ? v.Substring(0, 120) + "..." : v;
+        bool digits = v.Length <= 3;
+        foreach (char c in v) if (!char.IsDigit(c)) digits = false;
+        if (digits) return v;
+        string low = v.ToLowerInvariant();
+        foreach (string w in new string[] { "yes", "no", "on", "off", "true", "false", "да", "нет" }) if (low == w) return v;
+        return Report.Shape(v, true);
+    }
+
+    static bool LooksPath(string v) {
+        return v.IndexOf(":\\") == 1 || v.StartsWith("\\\\") || v.StartsWith(".\\") || v.StartsWith("..\\") || v.IndexOf('\\') > 0 && v.IndexOf(' ') < 0;
+    }
+
+    // пакетный файл (.bat): команды видны (откуда копируются данные), строки со входом в сеть и паролями - скрыты
+    static void Batch(StringBuilder sb, string path) {
+        byte[] b = Head(path, 32 * 1024);
+        if (!LooksText(b)) { Unknown(sb, path, null); return; }
+        sb.Append(Path.GetFileName(path)).Append(" (команды, изменён ").Append(new FileInfo(path).LastWriteTime.ToString("dd.MM.yyyy")).Append("):\r\n");
+        int shown = 0;
+        foreach (string line in Guess(b).GetString(b).Split('\n')) {
+            string t = line.Trim().Trim('\x1a');
+            if (t.Length == 0) continue;
+            if (++shown > 60) { sb.Append("  ...\r\n"); break; }
+            string low = t.ToLowerInvariant();
+            if (low.Contains("net use") || low.Contains("/user") || low.Contains("pass") || low.Contains("парол") || low.Contains("pwd"))
+                sb.Append("  (строка со входом в сеть или паролем скрыта)\r\n");
+            else sb.Append("  ").Append(t.Length > 160 ? t.Substring(0, 160) + "..." : t).Append("\r\n");
+        }
+        sb.Append("\r\n");
+    }
+
+    // незнакомый файл: размер, дата, первые 4 байта (подпись формата) и текст ли это - содержимое не показывается
+    static void Unknown(StringBuilder sb, string path, string what) {
+        FileInfo fi = new FileInfo(path);
+        byte[] b = Head(path, 4096);
+        sb.Append(Path.GetFileName(path)).Append(": ").Append(Math.Max(1, fi.Length / 1024)).Append(" КБ, изменён ").Append(fi.LastWriteTime.ToString("dd.MM.yyyy"));
+        if (what != null) sb.Append(", ").Append(what);
+        else {
+            sb.Append(", начало:");
+            for (int i = 0; i < b.Length && i < 4; i++) sb.Append(" ").Append(b[i].ToString("X2"));
+            if (LooksText(b)) sb.Append(" (текст)");
+        }
+        sb.Append("\r\n");
+    }
 }
 
-// Где может лежать база юр лиц: папки с таблицами .DBF - по ярлыкам (рабочий стол, меню «Пуск») и на дисках
+// Где может лежать база юр лиц: папки с таблицами .DBF и .DAT (Clarion) - по ярлыкам (рабочий стол, меню «Пуск») и на дисках
 // (сетевые и локальные, две ступени вглубь). Ничего не открывает и не меняет - только смотрит, где сколько таблиц.
 public static class BaseFinder {
     public class Place {
@@ -16595,13 +17051,16 @@ public static class BaseFinder {
         if (DateTime.Now > until) return;
         try {
             if (!Directory.Exists(dir)) return;
-            string[] dbf = Places.DbfFiles(dir);
-            if (dbf.Length > 0 && !found.ContainsKey(dir)) {
+            List<string> tables = new List<string>(Places.DbfFiles(dir));
+            // таблицы Clarion (.DAT) - как у программы юр лиц «Долги район»
+            foreach (string f in Directory.GetFiles(dir))
+                if (Path.GetExtension(f).ToLowerInvariant() == ".dat" && ClarionFile.Is(f)) tables.Add(f);
+            if (tables.Count > 0 && !found.ContainsKey(dir)) {
                 Place p = new Place();
                 p.Folder = dir;
                 p.From = from;
-                p.Tables = dbf.Length;
-                foreach (string f in dbf) { try { p.Bytes += new FileInfo(f).Length; } catch { } }
+                p.Tables = tables.Count;
+                foreach (string f in tables) { try { p.Bytes += new FileInfo(f).Length; } catch { } }
                 found[dir] = p;
             }
             if (depth > 0) foreach (string sub in Directory.GetDirectories(dir)) Look(found, sub, from, depth - 1, until);
