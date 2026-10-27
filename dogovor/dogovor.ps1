@@ -16523,10 +16523,10 @@ public static class BaseFinder {
         DateTime until = DateTime.Now.AddSeconds(40);
         // 1. ярлыки: папка программы и её рабочая папка (и подпапки - таблицы бывают в DATA и т.п.)
         List<string> links = new List<string>();
-        foreach (Environment.SpecialFolder sf in new Environment.SpecialFolder[] { Environment.SpecialFolder.DesktopDirectory, Environment.SpecialFolder.CommonDesktopDirectory,
-                Environment.SpecialFolder.Programs, Environment.SpecialFolder.CommonPrograms }) {
+        // рабочий стол и «Пуск» - свои и общие (номера папок Windows: в .NET 2.0 общих папок в списке нет)
+        foreach (int csidl in new int[] { 0x10, 0x19, 0x02, 0x17 }) {
             try {
-                string d = Environment.GetFolderPath(sf);
+                string d = ShellFolder(csidl);
                 if (d.Length > 0 && Directory.Exists(d)) links.AddRange(Directory.GetFiles(d, "*.lnk", SearchOption.AllDirectories));
             } catch { }
             if (links.Count > 600) break;
@@ -16575,6 +16575,17 @@ public static class BaseFinder {
             return b.Tables.CompareTo(a.Tables);
         });
         return r;
+    }
+
+    [System.Runtime.InteropServices.DllImport("shell32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+    static extern int SHGetFolderPath(IntPtr hwnd, int csidl, IntPtr token, int flags, StringBuilder path);
+
+    static string ShellFolder(int csidl) {
+        try {
+            StringBuilder sb = new StringBuilder(260);
+            if (SHGetFolderPath(IntPtr.Zero, csidl, IntPtr.Zero, 0, sb) == 0) return sb.ToString();
+        } catch { }
+        return "";
     }
 
     static string SafeDir(string path) { try { return Path.GetDirectoryName(path) ?? ""; } catch { return ""; } }
