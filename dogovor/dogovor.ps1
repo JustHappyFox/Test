@@ -8004,7 +8004,8 @@ public class FoxExpr {
             byte[] x = a.Text, y = b.Text;
             int n = loose ? y.Length : Math.Max(x.Length, y.Length);
             for (int i = 0; i < n; i++) {
-                int p = i < x.Length ? x[i] : 32, q = i < y.Length ? y[i] : 32;
+                // (int) - иначе старый компилятор C# (.NET 4 на Windows 7) не собирает: «byte и int неявно преобразуются друг в друга»
+                int p = i < x.Length ? (int)x[i] : 32, q = i < y.Length ? (int)y[i] : 32;
                 if (p != q) return p < q ? -1 : 1;
             }
             return 0;
