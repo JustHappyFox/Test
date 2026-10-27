@@ -16784,11 +16784,19 @@ public static class JurReport {
         ".fpt", ".dbt", ".mem", ".lnk", ".hlp", ".ico", ".txt", ".doc", ".docx", ".xls", ".xlsx", ".pdf", ".log", ".zip", ".rar", ".arj", ".lst", ".prn" };
     static readonly string[] SettingsExt = { ".ini", ".ctl", ".cfg" }, BatchExt = { ".bat", ".cmd" };
 
+    // сводка: по строке на таблицу; ★ - таблицы с полями договора, карточки, квартиры, счётчика - о них подробно
+    class Entry {
+        public string Folder = "", Name = "", Line = "";
+        public int Score;
+    }
+    static List<Entry> index = new List<Entry>();
+    static int detailed;
+    const int Star = 5, MaxDetailed = 25;
+
     public static int Write(string dir, string file, Progress progress) {
+        index = new List<Entry>();
+        detailed = 0;
         StringBuilder sb = new StringBuilder();
-        sb.Append("=== Оформление договора: строение базы юр лиц, ").Append(DateTime.Now.ToString("dd.MM.yyyy HH:mm")).Append(" ===\r\n");
-        sb.Append("Данных абонентов в отчёте нет: только таблицы (.DBF и Clarion .DAT), поля, вид значений (буквы - А/а, цифры - 9), индексы.\r\n");
-        sb.Append("База только читается - ничего не меняется.\r\n\r\n");
         List<string> paths = new List<string>();
         int tables = Folder(sb, dir, progress, 1, paths);
         // программа может брать данные из другой папки (сетевой диск): пути из её настроек, команд, трассировки и таблиц
@@ -16801,8 +16809,75 @@ public static class JurReport {
                 catch (Exception ex) { sb.Append("не открылась - ").Append(ex.Message).Append("\r\n\r\n"); }
             }
         }
-        File.WriteAllText(file, sb.ToString(), new UTF8Encoding(true));
+        StringBuilder top = new StringBuilder();
+        top.Append("=== Оформление договора: строение базы юр лиц, ").Append(DateTime.Now.ToString("dd.MM.yyyy HH:mm")).Append(" ===\r\n");
+        top.Append("Данных абонентов в отчёте нет: только таблицы (.DBF и Clarion .DAT), поля, вид значений (буквы - А/а, цифры - 9), индексы.\r\n");
+        top.Append("База только читается - ничего не меняется.\r\n\r\n");
+        top.Append("СВОДКА - по строке на таблицу: записей, размер, когда изменена, поля. ★ - таблицы с полями договора, карточки,\r\n");
+        top.Append("квартиры, счётчика (нужны для перевода из юр в физ) - о них подробно ниже, в разделе ПОДРОБНО.\r\n");
+        string folder = null;
+        List<Entry> group = new List<Entry>();
+        for (int i = 0; i <= index.Count; i++) {
+            if (i < index.Count && index[i].Folder == folder) { group.Add(index[i]); continue; }
+            if (group.Count > 0) {
+                group.Sort(delegate(Entry a, Entry b) {
+                    bool sa = a.Score >= Star, sb2 = b.Score >= Star;
+                    if (sa != sb2) return sa ? -1 : 1;
+                    if (sa && a.Score != b.Score) return b.Score.CompareTo(a.Score);
+                    return string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase);
+                });
+                top.Append("\r\n").Append(folder).Append(" - таблиц ").Append(group.Count).Append(":\r\n");
+                foreach (Entry e in group) top.Append(e.Line);
+            }
+            if (i == index.Count) break;
+            folder = index[i].Folder;
+            group = new List<Entry>();
+            group.Add(index[i]);
+        }
+        top.Append("\r\n\r\n========== ПОДРОБНО ==========\r\n\r\n");
+        File.WriteAllText(file, top.ToString() + sb.ToString(), new UTF8Encoding(true));
         return tables;
+    }
+
+    // насколько таблица нужна для перевода: поля договора, карточки, квартиры, адреса, счётчика, поверки, показаний
+    static int Score(List<string> names) {
+        int s = 0;
+        foreach (string n0 in names) {
+            string n = n0.ToUpperInvariant();
+            if (n == "KP" || n == "NDOG" || n == "KDOG" || n == "DOG" || n == "NOMDOG" || n == "N_DOG") s += 2;
+            else if (n == "NAB" || n == "KAB" || n == "NKART" || n == "KART" || n == "N_AB") s += 2;
+            else if (n == "KV" || n == "KVAR" || n == "KVART") s += 3;
+            else if (n == "NST" || n == "NSCH" || n == "ZAVN" || n == "NOMSCH" || n == "NOM_SCH" || n == "N_SCH") s += 3;
+            else if (n.StartsWith("TIPSCH") || n == "TIP_SCH" || n == "MARKA" || n == "MARK") s += 2;
+            else if (n == "GODEN" || n.StartsWith("POVER") || n == "DPOV" || n == "DATPOV") s += 2;
+            else if (n.StartsWith("POK") || n == "NT1" || n == "PKZ") s += 1;
+            else if (n == "NUL" || n == "UL" || n == "ULICA" || n == "DOM" || n.StartsWith("ADR")) s += 1;
+        }
+        return s;
+    }
+
+    // строка сводки; true - описать таблицу подробно
+    static bool AddEntry(string path, long records, List<string> names) {
+        Entry e = new Entry();
+        FileInfo fi = new FileInfo(path);
+        e.Folder = Path.GetDirectoryName(path);
+        e.Name = Path.GetFileName(path);
+        e.Score = Score(names);
+        StringBuilder l = new StringBuilder();
+        l.Append(e.Score >= Star ? "★ " : "  ").Append(e.Name).Append(" - записей ").Append(records).Append(", ").Append(Mb(fi.Length)).Append(" МБ, ")
+            .Append(fi.LastWriteTime.ToString("dd.MM.yyyy")).Append(":");
+        int width = l.Length;
+        foreach (string n in names) {
+            if (width + n.Length + 1 > 118) { l.Append("\r\n      "); width = 6; }
+            l.Append(' ').Append(n);
+            width += n.Length + 1;
+        }
+        l.Append("\r\n");
+        e.Line = l.ToString();
+        index.Add(e);
+        if (e.Score < Star || detailed >= MaxDetailed) return false;
+        detailed++;
+        return true;
     }
 
     // пути вида C:\... и \\сервер\... (не адреса вроде «д.5\2»)
@@ -16969,6 +17044,21 @@ public static class JurReport {
     static string Mb(long bytes) { return (bytes / 1024.0 / 1024).ToString("0.0"); }
 
     static void Table(StringBuilder sb, string path, List<string> paths) {
+        DbfTable h = DbfTable.LoadHeader(path);
+        List<string> names = new List<string>();
+        foreach (DbfField fd in h.Fields) names.Add(fd.Name);
+        if (!AddEntry(path, h.Expected, names)) {
+            if (h.Expected <= 200 && paths != null) {
+                DbfTable small = DbfTable.Load(path, null, null, 200);
+                for (int r = 0; r < small.Count; r++)
+                    for (int j = 0; j < small.Fields.Count; j++) {
+                        if (small.Fields[j].Type != 'C') continue;
+                        string v = DbfTable.Format(small.GetValue(r, j, null), true).Trim();
+                        if (AbsPath(v)) Collect(paths, v);
+                    }
+            }
+            return;
+        }
         LiveBase b = LiveBase.Open(path);
         FileInfo fi = new FileInfo(path);
         sb.Append(Path.GetFileName(path)).Append(": записей ").Append(b.RecordCount).Append(", ").Append(Mb(fi.Length))
@@ -17065,6 +17155,22 @@ public static class JurReport {
     static void Dat(StringBuilder sb, string path, List<string> paths) {
         FileInfo fi = new FileInfo(path);
         using (ClarionFile c = ClarionFile.Open(path)) {
+            List<string> names = new List<string>();
+            foreach (ClarionField f in c.Fields) names.Add(f.Name);
+            if (!AddEntry(path, c.Records, names)) {
+                // не подробно; в маленьких таблицах (настройки) - только пути к папкам: откуда программа берёт данные
+                if (c.Records <= 200 && !c.Encrypted && !c.Compressed && paths != null)
+                    for (long k = 0; k < c.Slots && k < 400; k++) {
+                        byte[] r = c.Record(k);
+                        if (r == null || ClarionFile.IsDeleted(r)) continue;
+                        foreach (ClarionField f in c.Fields) {
+                            if (!f.IsText) continue;
+                            string v = c.Value(r, f).Trim();
+                            if (AbsPath(v)) Collect(paths, v);
+                        }
+                    }
+                return;
+            }
             sb.Append(Path.GetFileName(path)).Append(" (таблица Clarion): записей ").Append(c.Records);
             if (c.Deleted > 0) sb.Append(" (и удалённых ").Append(c.Deleted).Append(")");
             sb.Append(", ").Append(Mb(fi.Length)).Append(" МБ, изменена ").Append(fi.LastWriteTime.ToString("dd.MM.yyyy HH:mm"));
