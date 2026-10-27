@@ -16221,7 +16221,7 @@ public class JurForm : Form {
     public StartMenu Home;
     readonly TextBox folder = Ui.Text(1), first8 = Ui.Text(1);
     readonly Label jurNote = new Label(), ruleNote = new Label(), lsOut = new Label();
-    readonly Button study = Ui.Button("Изучить базу юр лиц", true), learn = Ui.Button("Найти правило по физ базе", true);
+    readonly Button study = Ui.Button("Изучить базу юр лиц", true), learn = Ui.Button("Проверить правило по физ базе", false);
     CheckRule rule;
 
     string ReportFile { get { return Path.Combine(here, "otchet_jur.txt"); } }
@@ -16294,8 +16294,9 @@ public class JurForm : Form {
         b1.Controls.AddRange(new Control[] { l1, folder, browse, search, study, jurNote });
 
         BoxPanel b2 = Box("2. Лицевой счёт - контрольная цифра");
-        Label l2 = Para("Лицевой 045671234: 0 - приставка, 4567 - книга, 123 - квартира, последняя цифра - контрольная. Программа найдёт правило " +
-            "этой цифры по лицевым базы физ лиц (читает около 3000 записей вразброс, ничего не меняет) и проверит, ко скольким лицевым оно подходит.", St.Caption);
+        Label l2 = Para("Лицевой 045671234: 0 - приставка, 4567 - книга, 123 - квартира, последняя цифра - контрольная. Правило этой цифры уже найдено " +
+            "по базе физ лиц (подошло к 2900 лицевым из 2900) и встроено в программу - искать его не нужно. Кнопка - перепроверить правило по базе " +
+            "(по желанию: читает около 3000 записей вразброс, ничего не меняет).", St.Caption);
         learn.Click += delegate { Learn(); };
         ruleNote.AutoSize = false;
         ruleNote.Font = St.Base;
@@ -16334,7 +16335,7 @@ public class JurForm : Form {
         Controls.Add(body);
         Controls.Add(top);
 
-        rule = CheckRule.Load(memory.Get("ЛицевойПравило", ""));
+        rule = CheckRule.Current(memory.Get("ЛицевойПравило", ""));
         ShowRule(null);
         FormClosing += delegate(object s, FormClosingEventArgs e) {
             if (Home != null && e.CloseReason == CloseReason.UserClosing) { e.Cancel = true; GoBack(); }
@@ -16503,10 +16504,14 @@ public class JurForm : Form {
                     JurReport.Append(ReportFile, "Контрольная цифра лицевого: правило не найдено, лицевых из 9 цифр " + samples + (r != null ? "; лучшее: " + r.Describe() + "; " + r.Notes : ""));
                     return;
                 }
-                rule = r;
                 memory.Values["ЛицевойПравило"] = r.Save();
                 memory.Save();
+                rule = CheckRule.Current(r.Save());
                 ShowRule(samples);
+                if (rule.BuiltIn) {
+                    ruleNote.Text = "По базе: " + r.Describe() + r.Summary() + "\nРаботает встроенное правило (по базе вышло не лучше).";
+                    ruleNote.ForeColor = St.Hint;
+                }
                 JurReport.Append(ReportFile, "Контрольная цифра лицевого: " + r.Describe() + "; " + r.Notes);
             });
         });
@@ -16516,6 +16521,7 @@ public class JurForm : Form {
 
     void ShowRule(object samples) {
         if (rule == null) { ruleNote.Text = "Правило ещё не найдено - нажмите кнопку (нужен доступ к базе физ лиц)."; ruleNote.ForeColor = St.Hint; }
+        else if (rule.BuiltIn) { ruleNote.Text = "Правило встроено в программу: " + rule.Describe(); ruleNote.ForeColor = St.Good; }
         else { ruleNote.Text = "Правило: " + rule.Describe() + rule.Summary(); ruleNote.ForeColor = St.Good; }
         ShowLs();
     }
@@ -16631,6 +16637,20 @@ public class CheckRule {
         if (V != null) for (int i = 0; i < 8; i++) sb.Append(V[i]).Append(i < 7 ? "," : "");
         sb.Append(";").Append(VK).Append(";").Append(TenRows).Append(";").Append(MissTen);
         return sb.ToString();
+    }
+
+    // правило, найденное по физ базе 27.10 (подошло к 2900 лицевым из 2900): веса 1...8 по модулю 11, вышло 10 - второй
+    // счёт с весами 2...9, снова 10 - 0. Встроено - искать его не нужно ни на одном компьютере
+    public const string Known = "11;0;0;2900;2900;1,2,3,4,5,6,7,8;2,3,4,5,6,7,8,9;0;264;0";
+    public bool BuiltIn;
+
+    // правило для работы: найденное на этом компьютере (новая запись, подходит от 99%), иначе встроенное
+    public static CheckRule Current(string saved) {
+        CheckRule s = Load(saved);
+        if (s != null && s.Good && s.V != null && s.Hits * 100 >= s.Total * 99) return s;
+        CheckRule k = Load(Known);
+        k.BuiltIn = true;
+        return k;
     }
 
     public static CheckRule Load(string s) {
@@ -17796,18 +17816,27 @@ public class FlatLs {
         bool same = rows.Count > 0;
         if (same) r.Where = "в доме " + dom;
         else if (streetQuery.Length > 0) {
-            // в доме лицевых нет - ближайшие по номеру дома той же улицы
+            // в доме лицевых нет - ближайшие по номеру дома той же улицы, только частные (в физ базе без квартир):
+            // у многоквартирного дома своя книга, по нему лицевой не составить
             List<string[]> street = b.House(streetQuery);
             int me = Num(dom);
+            Dictionary<string, bool> withFlats = new Dictionary<string, bool>();
+            foreach (string[] s in street) {
+                if (s[2].Length == 0 || s[2] == dom) continue;
+                bool f, hasFlat = Digits(s[1]).TrimStart('0').Length > 0;
+                withFlats[s[2]] = withFlats.TryGetValue(s[2], out f) && f || hasFlat;
+            }
             List<string> houses = new List<string>();
-            foreach (string[] s in street) if (s[2].Length > 0 && !houses.Contains(s[2])) houses.Add(s[2]);
+            int blocks = 0;
+            foreach (KeyValuePair<string, bool> h in withFlats) { if (h.Value) blocks++; else houses.Add(h.Key); }
             houses.Sort(delegate(string x, string y) {
                 int dx = Math.Abs(Num(x) - me), dy = Math.Abs(Num(y) - me);
                 return dx != dy ? dx.CompareTo(dy) : string.Compare(x, y, StringComparison.Ordinal);
             });
             if (houses.Count > 2) houses.RemoveRange(2, houses.Count - 2);
             foreach (string[] s in street) if (houses.Contains(s[2])) rows.Add(s);
-            if (houses.Count > 0) r.Where = "в доме " + dom + " лицевых нет; соседние дома " + string.Join(", ", houses.ToArray());
+            r.Where = "в доме " + dom + " лицевых нет; " + (houses.Count > 0 ? "соседние частные дома " + string.Join(", ", houses.ToArray())
+                : "частных домов рядом нет" + (blocks > 0 ? " (многоквартирные не показаны - у каждого своя книга)" : ""));
         }
         // книга: самые частые первые 5 цифр (у ближайшего дома - если в самом доме никого)
         Dictionary<string, int> heads = new Dictionary<string, int>();
@@ -17834,7 +17863,11 @@ public class FlatLs {
             if (x.Dom != y.Dom) return Num(x.Dom) != Num(y.Dom) ? Num(x.Dom).CompareTo(Num(y.Dom)) : string.Compare(x.Dom, y.Dom, StringComparison.Ordinal);
             return Num(x.Kv).CompareTo(Num(y.Kv));
         });
-        if (r.Near.Count == 0) { r.Note = "в физ базе соседей нет (ни в доме, ни на улице) - лицевой впишите сами"; return r; }
+        if (r.Near.Count == 0) {
+            r.Note = same || r.Where.Length == 0 ? "в физ базе соседей нет - лицевой впишите сами"
+                : "в доме лицевых нет, частных домов рядом нет - лицевой впишите сами (книгу для нового дома даёт база)";
+            return r;
+        }
         string best = "";
         int bc = 0, total = 0;
         foreach (KeyValuePair<string, int> kvp in heads) { total += kvp.Value; if (kvp.Value > bc) { bc = kvp.Value; best = kvp.Key; } }
@@ -17843,8 +17876,8 @@ public class FlatLs {
         if (!int.TryParse(kv.Trim(), out flat) || flat <= 0 || flat > 999) { r.Note = "квартира «" + kv + "» - не из цифр: лицевой впишите сами"; return r; }
         string d8 = best + flat.ToString("000");
         List<string> notes = new List<string>();
-        notes.Add("книга " + best.Substring(1) + " - у " + bc + " из " + total + " лицевых " + (same ? "дома" : "дома " + nearest));
-        if (!same) notes.Add("взята у соседнего дома - у нового дома может быть своя книга, проверьте");
+        notes.Add("книга " + best.Substring(1) + " - у " + bc + " из " + total + " лицевых " + (same ? "дома" : "частного дома " + nearest));
+        if (!same) notes.Add("взята у соседнего частного дома - проверьте");
         if (bc * 2 <= total) notes.Add("книг несколько - проверьте");
         if (rule == null || !rule.Good || rule.Digit(d8) < 0) {
             r.Ls = d8;
@@ -17908,7 +17941,7 @@ public class JurPick : Form {
         this.form = form;
         this.memory = memory;
         this.baseLink = baseLink;
-        rule = CheckRule.Load(memory.Get("ЛицевойПравило", ""));
+        rule = CheckRule.Current(memory.Get("ЛицевойПравило", ""));
         Text = "Квартира из базы юр лиц";
         Font = St.Base;
         BackColor = St.Back;
@@ -18189,7 +18222,7 @@ public class JurPick : Form {
                 lsOk = ok;
                 lsNote.Text = (about.Length > 0 ? about + ". " : "") + char.ToUpper(text[0]) + text.Substring(1) + ".";
                 // предложен по соседнему дому (не по своему) - оранжевым, даже если цифра и копия в порядке
-                lsNote.ForeColor = !ok ? St.Bad : about.Contains("соседнего дома") || about.Contains("несколько") ? Warn : St.Good;
+                lsNote.ForeColor = !ok ? St.Bad : about.Contains("соседнего") || about.Contains("несколько") ? Warn : St.Good;
                 ShowChoice();
             });
         });
