@@ -16215,10 +16215,10 @@ public class JurForm : Form {
             l2.SetBounds(14, 34, iw, TextHeight(l2, iw));
             yy = l2.Bottom + 8;
             learn.SetBounds(14, yy, 240, 32);
-            ruleNote.SetBounds(learn.Right + 14, yy - 4, iw - 254, 44);
-            cap.SetBounds(14, yy + 50, 300, 18);
-            first8.SetBounds(14, yy + 70, 160, 26);
-            lsOut.SetBounds(186, yy + 72, iw - 172, 24);
+            ruleNote.SetBounds(learn.Right + 14, yy - 4, iw - 254, 66);
+            cap.SetBounds(14, yy + 70, 300, 18);
+            first8.SetBounds(14, yy + 90, 160, 26);
+            lsOut.SetBounds(186, yy + 92, iw - 172, 24);
             b2.SetBounds(x, y, w, lsOut.Bottom + 14);
         };
         Controls.Add(body);
@@ -16390,14 +16390,14 @@ public class JurForm : Form {
                 if (r == null || !r.Good) {
                     ruleNote.Text = "Правило не найдено (лицевых из 9 цифр: " + samples + (r != null ? "; лучшее - " + r.Describe() : "") + ").";
                     ruleNote.ForeColor = St.Bad;
-                    JurReport.Append(ReportFile, "Контрольная цифра лицевого: правило не найдено, лицевых из 9 цифр " + samples + (r != null ? "; лучшее: " + r.Describe() : ""));
+                    JurReport.Append(ReportFile, "Контрольная цифра лицевого: правило не найдено, лицевых из 9 цифр " + samples + (r != null ? "; лучшее: " + r.Describe() + "; " + r.Notes : ""));
                     return;
                 }
                 rule = r;
                 memory.Values["ЛицевойПравило"] = r.Save();
                 memory.Save();
                 ShowRule(samples);
-                JurReport.Append(ReportFile, "Контрольная цифра лицевого: " + r.Describe());
+                JurReport.Append(ReportFile, "Контрольная цифра лицевого: " + r.Describe() + "; " + r.Notes);
             });
         });
         th.IsBackground = true;
@@ -16406,7 +16406,7 @@ public class JurForm : Form {
 
     void ShowRule(object samples) {
         if (rule == null) { ruleNote.Text = "Правило ещё не найдено - нажмите кнопку (нужен доступ к базе физ лиц)."; ruleNote.ForeColor = St.Hint; }
-        else { ruleNote.Text = "Правило: " + rule.Describe(); ruleNote.ForeColor = St.Good; }
+        else { ruleNote.Text = "Правило: " + rule.Describe() + rule.Summary(); ruleNote.ForeColor = St.Good; }
         ShowLs();
     }
 
@@ -16416,8 +16416,15 @@ public class JurForm : Form {
         if (d.Length != 8 || !CheckRule.AllDigits(d)) { lsOut.Text = "нужно 8 цифр"; lsOut.ForeColor = St.Hint; return; }
         if (rule == null) { lsOut.Text = "сначала найдите правило"; lsOut.ForeColor = St.Hint; return; }
         int c = rule.Digit(d);
-        lsOut.Text = c < 0 ? "для этого номера контрольной цифры нет (правило даёт 10)" : "лицевой: " + d + c + "   (сверьте с базой: «формирование лицевых счетов»)";
-        lsOut.ForeColor = c < 0 ? St.Bad : St.Text;
+        bool special = rule.Special(d);
+        if (c < 0) { lsOut.Text = "для этого номера контрольной цифры нет (правило даёт 10)"; lsOut.ForeColor = St.Bad; }
+        else if (special && !rule.SpecialSure) {
+            lsOut.Text = "лицевой: " + d + c + "?   особый случай (сумма даёт 10) - эту цифру возьмите из базы";
+            lsOut.ForeColor = Color.FromArgb(190, 105, 0);
+        } else {
+            lsOut.Text = "лицевой: " + d + c + (special ? "   (особый случай - второй счёт; сверьте с базой)" : "   (сверьте с базой: «формирование лицевых счетов»)");
+            lsOut.ForeColor = St.Text;
+        }
     }
 
     // для проверки
@@ -16434,7 +16441,11 @@ public class CheckRule {
     public int[] W = new int[8];
     public int K;                 // прибавка
     public int Ten = -1;          // модуль 11: какая цифра ставится, когда выходит 10 (-1 - такого номера не дают)
+    public int[] V;               // модуль 11, вышло 10: второй счёт с этими весами (как у кодов ОКПО), снова 10 - Ten
+    public int VK;
     public int Total, Hits;
+    public int TenRows, MissTen, MissOther;   // сколько лицевых с остатком 10; не подошли: с остатком 10 и прочие
+    public string Notes = "";     // отчего не подошли (только количества - без самих лицевых)
 
     public bool Good { get { return Total >= 100 && Hits >= Total * 0.9; } }
 
@@ -16460,22 +16471,55 @@ public class CheckRule {
         int m = Kind == "11" ? 11 : 10, sum = K;
         for (int i = 0; i < 8; i++) sum += W[i] * d[i];
         int r = ((sum % m) + m) % m;
+        if (r == 10 && V != null) {
+            sum = VK;
+            for (int i = 0; i < 8; i++) sum += V[i] * d[i];
+            r = ((sum % 11) + 11) % 11;
+        }
         if (r == 10) return Ten;
         return r;
     }
 
+    // особый случай: взвешенная сумма даёт 10 (у таких номеров цифру лучше брать из базы)
+    public bool Special(string d8) {
+        if (Kind != "11") return false;
+        int[] d = new int[9];
+        for (int i = 0; i < 8; i++) d[i] = d8[i] - '0';
+        return Raw(d) == 10;
+    }
+
+    // хорошо ли проверен второй счёт: по лицевым с остатком 10 подходит почти всегда
+    public bool SpecialSure { get { return V != null && TenRows >= 30 && MissTen * 20 <= TenRows; } }
+
     public string Describe() {
         string pct = Total > 0 ? (100.0 * Hits / Total).ToString("0.0") + "% (" + Hits + " из " + Total + ")" : "";
         if (Kind.StartsWith("luhn")) return "алгоритм Луна" + (Kind == "luhn2" ? " (с первой цифры)" : "") + "; подходит к " + pct;
-        StringBuilder w = new StringBuilder();
-        foreach (int x in W) w.Append(x).Append(' ');
-        return "веса цифр " + w.ToString().Trim() + (K != 0 ? ", прибавка " + K : "") + ", остаток от деления на " + Kind
-            + (Kind == "11" ? (Ten >= 0 ? " (10 -> " + Ten + ")" : " (10 - номер не дают)") : "") + "; подходит к " + pct;
+        string ten = Ten >= 0 ? Ten.ToString() : "номер не дают";
+        string second = V == null ? " (10 -> " + ten + ")" : " (вышло 10 - второй счёт с весами " + Weights(V) + (VK != 0 ? ", прибавка " + VK : "") + ", снова 10 -> " + ten + ")";
+        return "веса цифр " + Weights(W) + (K != 0 ? ", прибавка " + K : "") + ", остаток от деления на " + Kind
+            + (Kind == "11" ? second : "") + "; подходит к " + pct;
+    }
+
+    // не все подошли: сколько и отчего (подробно - в otchet_jur.txt)
+    public string Summary() {
+        if (Total == 0 || Hits >= Total) return "";
+        if (Kind == "11" && TenRows == 0) return "\nНе подошли " + (Total - Hits) + " - нажмите кнопку ещё раз: программа покажет, отчего.";
+        return "\nНе подошли " + (Total - Hits) + (Kind == "11" ? ": с остатком 10 - " + MissTen + ", прочие - " + (Total - Hits - MissTen) : "")
+            + ". Подробно - в конце otchet_jur.txt.";
+    }
+
+    static string Weights(int[] w) {
+        StringBuilder sb = new StringBuilder();
+        foreach (int x in w) sb.Append(x).Append(' ');
+        return sb.ToString().Trim();
     }
 
     public string Save() {
         StringBuilder sb = new StringBuilder(Kind + ";" + K + ";" + Ten + ";" + Total + ";" + Hits + ";");
         for (int i = 0; i < 8; i++) sb.Append(W[i]).Append(i < 7 ? "," : "");
+        sb.Append(";");
+        if (V != null) for (int i = 0; i < 8; i++) sb.Append(V[i]).Append(i < 7 ? "," : "");
+        sb.Append(";").Append(VK).Append(";").Append(TenRows).Append(";").Append(MissTen);
         return sb.ToString();
     }
 
@@ -16487,6 +16531,15 @@ public class CheckRule {
             r.Kind = p[0]; r.K = int.Parse(p[1]); r.Ten = int.Parse(p[2]); r.Total = int.Parse(p[3]); r.Hits = int.Parse(p[4]);
             string[] w = p[5].Split(',');
             for (int i = 0; i < 8; i++) r.W[i] = int.Parse(w[i]);
+            // второй счёт (записан программой с 27.10; в старой записи его нет)
+            if (p.Length >= 10) {
+                if (p[6].Length > 0) {
+                    string[] v = p[6].Split(',');
+                    r.V = new int[8];
+                    for (int i = 0; i < 8; i++) r.V[i] = int.Parse(v[i]);
+                }
+                r.VK = int.Parse(p[7]); r.TenRows = int.Parse(p[8]); r.MissTen = int.Parse(p[9]);
+            }
             return r;
         } catch { return null; }
     }
@@ -16519,19 +16572,105 @@ public class CheckRule {
     void Score(List<int[]> rows) {
         Total = rows.Count;
         Hits = 0;
-        // модуль 11: что ставят вместо 10 - самое частое среди таких номеров
+        V = null;
+        VK = 0;
+        TenRows = MissTen = MissOther = 0;
+        // модуль 11: что ставят вместо 10 - самое частое среди таких номеров; или считают второй раз другими весами
         if (Kind == "11") {
             int[] tens = new int[10];
-            int tenCount = 0;
-            foreach (int[] d in rows) if (Raw(d) == 10) { tens[d[8]]++; tenCount++; }
+            List<int[]> tenRows = new List<int[]>();
+            foreach (int[] d in rows) if (Raw(d) == 10) { tens[d[8]]++; tenRows.Add(d); }
+            TenRows = tenRows.Count;
             Ten = -1;
-            if (tenCount > 0) { int b = 0; for (int i = 1; i < 10; i++) if (tens[i] > tens[b]) b = i; Ten = b; }
+            if (tenRows.Count > 0) { int b = 0; for (int i = 1; i < 10; i++) if (tens[i] > tens[b]) b = i; Ten = b; }
+            SecondPass(tenRows, Ten >= 0 ? tens[Ten] : 0);
         }
+        // не подошли: с остатком 10 и прочие; прочие - по первой цифре и по книгам (одиночные или целые книги)
+        Dictionary<int, int[]> byFirst = new Dictionary<int, int[]>();
+        Dictionary<string, int[]> byBook = new Dictionary<string, int[]>();
         foreach (int[] d in rows) {
             StringBuilder s = new StringBuilder(8);
             for (int i = 0; i < 8; i++) s.Append((char)('0' + d[i]));
-            if (Digit(s.ToString()) == d[8]) Hits++;
+            bool hit = Digit(s.ToString()) == d[8];
+            bool ten = Kind == "11" && Raw(d) == 10;
+            if (hit) Hits++;
+            else if (ten) MissTen++;
+            else MissOther++;
+            if (ten) continue;
+            int[] f;
+            if (!byFirst.TryGetValue(d[0], out f)) byFirst[d[0]] = f = new int[2];
+            f[0]++;
+            if (!hit) f[1]++;
+            string book = s.ToString().Substring(1, 4);
+            if (!byBook.TryGetValue(book, out f)) byBook[book] = f = new int[2];
+            f[0]++;
+            if (!hit) f[1]++;
         }
+        StringBuilder n = new StringBuilder();
+        n.Append("не подошли ").Append(Total - Hits).Append(" из ").Append(Total);
+        if (Kind == "11") n.Append(": с остатком 10 - ").Append(MissTen).Append(" (всего лицевых с остатком 10: ").Append(TenRows).Append("), прочие - ").Append(MissOther);
+        if (MissOther > 0) {
+            List<string> fl = new List<string>();
+            List<int> keys = new List<int>(byFirst.Keys);
+            keys.Sort();
+            foreach (int k in keys) fl.Add("на " + k + " - " + byFirst[k][1] + " из " + byFirst[k][0]);
+            n.Append("; прочие по первой цифре: ").Append(string.Join(", ", fl.ToArray()));
+            int books = 0, whole = 0, single = 0;
+            foreach (int[] b in byBook.Values) {
+                if (b[1] == 0) continue;
+                books++;
+                if (b[1] >= 2 && b[1] * 2 > b[0]) whole++;      // не подходит большинство лицевых книги - у книги своё правило?
+                else single++;
+            }
+            n.Append("; книг, где есть неподошедшие: ").Append(books).Append(" (в ").Append(whole).Append(" не подходит большинство лицевых книги, в ")
+                .Append(single).Append(" - одиночные среди подошедших)");
+        }
+        Notes = n.ToString();
+    }
+
+    // вышло 10: второй счёт с весами больше на s (у кодов ОКПО - на 2) или с любыми весами - решением по самим этим лицевым;
+    // берётся, если подходит к большинству таких лицевых и лучше, чем одна цифра вместо 10
+    void SecondPass(List<int[]> tenRows, int tenHits) {
+        if (tenRows.Count < 30) return;
+        int bestHits = tenHits, bestK = 0;
+        int[] best = null;
+        for (int sh = 1; sh <= 10; sh++) {
+            int[] v = new int[8];
+            for (int i = 0; i < 8; i++) v[i] = (W[i] + sh) % 11;
+            int h = PassHits(tenRows, v, K);
+            if (h > bestHits) { bestHits = h; best = v; bestK = K; }
+        }
+        int[] sol = Solve(tenRows, 11, delegate(int[] d) { return d[8] == 0 ? -1 : d[8]; }, 12, 300);
+        if (sol != null) {
+            int[] v = new int[8];
+            Array.Copy(sol, v, 8);
+            int h = PassHits(tenRows, v, sol[8]);
+            if (h > bestHits + tenRows.Count / 20) { bestHits = h; best = v; bestK = sol[8]; }
+        }
+        if (best == null || bestHits * 10 < tenRows.Count * 6) return;
+        V = best;
+        VK = bestK;
+        // и во второй раз 10: какая цифра ставится (обычно 0)
+        int[] tens = new int[10];
+        int n = 0;
+        foreach (int[] d in tenRows) {
+            int sum = VK;
+            for (int i = 0; i < 8; i++) sum += V[i] * d[i];
+            if (((sum % 11) + 11) % 11 == 10) { tens[d[8]]++; n++; }
+        }
+        Ten = 0;
+        if (n >= 3) for (int i = 1; i < 10; i++) if (tens[i] > tens[Ten]) Ten = i;
+    }
+
+    int PassHits(List<int[]> rows, int[] v, int k) {
+        int hits = 0;
+        foreach (int[] d in rows) {
+            int sum = k;
+            for (int i = 0; i < 8; i++) sum += v[i] * d[i];
+            int r = ((sum % 11) + 11) % 11;
+            if ((r == 10 ? (Ten >= 0 ? Ten : 0) : r) == d[8]) hits++;
+        }
+        return hits;
     }
 
     int Raw(int[] d) {
@@ -16542,7 +16681,7 @@ public class CheckRule {
 
     // c = Σ w·d + k (mod p), p простое: веса - решением системы по случайным наборам лицевых (ошибочные лицевые не мешают)
     static CheckRule Linear(List<int[]> rows, int p) {
-        int[] sol = Solve(rows, p, delegate(int[] d) { return p == 11 && d[8] == 0 ? -1 : d[8] % p; });
+        int[] sol = Solve(rows, p, delegate(int[] d) { return p == 11 && d[8] == 0 ? -1 : d[8] % p; }, 24, 60);
         if (sol == null) return null;
         CheckRule r = new CheckRule();
         r.Kind = p.ToString();
@@ -16553,8 +16692,8 @@ public class CheckRule {
 
     // модуль 10 = модуль 2 и модуль 5 вместе (китайская теорема об остатках)
     static CheckRule Mod10(List<int[]> rows) {
-        int[] a = Solve(rows, 2, delegate(int[] d) { return d[8] % 2; });
-        int[] b = Solve(rows, 5, delegate(int[] d) { return d[8] % 5; });
+        int[] a = Solve(rows, 2, delegate(int[] d) { return d[8] % 2; }, 24, 60);
+        int[] b = Solve(rows, 5, delegate(int[] d) { return d[8] % 5; }, 24, 60);
         if (a == null || b == null) return null;
         CheckRule r = new CheckRule();
         r.Kind = "10";
@@ -16565,14 +16704,14 @@ public class CheckRule {
 
     delegate int Target(int[] d);
 
-    // лучшее решение по 60 случайным наборам из 24 лицевых: то, что подходит к наибольшему числу лицевых
-    static int[] Solve(List<int[]> rows, int p, Target target) {
+    // лучшее решение по trials случайным наборам из size лицевых: то, что подходит к наибольшему числу лицевых
+    static int[] Solve(List<int[]> rows, int p, Target target, int size, int trials) {
         Random rnd = new Random(12345);
         int[] best = null;
         int bestHits = -1;
-        for (int trial = 0; trial < 60; trial++) {
+        for (int trial = 0; trial < trials; trial++) {
             List<int[]> eq = new List<int[]>();
-            for (int k = 0; k < 24 * 4 && eq.Count < 24; k++) {
+            for (int k = 0; k < size * 4 && eq.Count < size; k++) {
                 int[] d = rows[rnd.Next(rows.Count)];
                 int t = target(d);
                 if (t < 0) continue;
