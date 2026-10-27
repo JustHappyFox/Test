@@ -12387,7 +12387,7 @@ public class BaseLink {
         return found;
     }
 
-    // лицевые и квартиры дома (адрес без квартиры) - для книги лицевых новой квартиры
+    // лицевые, квартиры и дома по адресу дома (без квартиры) или улицы - для книги лицевых новой квартиры: NAB, KV, DOM, KOR
     public List<string[]> House(string query) {
         List<string[]> found = new List<string[]>();
         lock (sync) {
@@ -12395,7 +12395,8 @@ public class BaseLink {
             if (r.Error != null) throw new Exception(r.Error);
             if (r.NoIndex) throw new Exception("в базе нет индекса по улице и дому");
             if (r.Table != null)
-                foreach (int row in r.Rows) if (!r.Added.ContainsKey(row)) found.Add(new string[] { F(r.Table, row, "NAB"), F(r.Table, row, "KV") });
+                foreach (int row in r.Rows)
+                    if (!r.Added.ContainsKey(row)) found.Add(new string[] { F(r.Table, row, "NAB"), F(r.Table, row, "KV"), F(r.Table, row, "DOM"), F(r.Table, row, "KOR") });
         }
         return found;
     }
@@ -16263,9 +16264,10 @@ public class JurForm : Form {
         body.Padding = new Padding(24, 14, 24, 14);
 
         Label intro = Para("Квартира дома, которая числилась за юр лицом (нераспроданная), переходит к гражданину. Перевод делается в окне договора: " +
-            "заполните адрес с квартирой, в разделе «Счётчики» нажмите «Из базы юр лиц…» и введите номер договора юр лица (например 11118). Программа найдёт " +
-            "карточку дома (например 255), счётчик квартиры - номер, тип, поверку, показания, составит лицевой (книга дома - по соседям в базе физ лиц, " +
-            "квартира, контрольная цифра), проверит, нет ли такого, и перенесёт всё в договор. Базы только читаются. Ниже - проверка базы юр лиц и правило контрольной цифры.", St.Text);
+            "в разделе «Счётчики» нажмите «Из базы юр лиц…» - адрес берётся из договора (можно поправить там же). Программа найдёт дом во всех договорах " +
+            "базы юр лиц (нет такого адреса - скажет), карточку (например 11118/255) и счётчик квартиры - номер, тип, поверку, показания; покажет лицевые " +
+            "соседей из базы физ лиц и по ним предложит лицевой (можно поправить), проверит, нет ли такого, и перенесёт всё в договор. Базы только читаются. " +
+            "Ниже - проверка базы юр лиц и правило контрольной цифры.", St.Text);
         Button openDog = Ui.Button("Открыть договор", true);
         openDog.Click += delegate { if (Home != null) { Hide(); Home.OpenDogovor(); } };
 
@@ -17572,17 +17574,18 @@ public static class BaseFinder {
 // База юр лиц «Долги район» (таблицы Clarion на L:\ = \\FSO\dolg_vse) - только чтение. Здесь всё, что программа из неё берёт;
 // после переезда на 1С заменяется только этот класс (на выгрузку из 1С), окно и перенос в договор остаются.
 //   ABON_.DAT - «Абоненты по договору»: KP - договор, NAB - код абонента (карточка), NAIM - наименование, ADRES - адрес;
-//   TU_.DAT - «Точки учёта»: KP, NAB, NAIM - наименование ТУ (у квартир - номер квартиры), NST - № счётчика, TIPSCH - тип,
-//             GODEN - поверка («2024-3»), TPOK/PPOK - текущие/предыдущие показания, FAZA, SHKALA, VID, AMPER.
-// Таблицы читаются подряд (TU_ - около 10 МБ, по сети секунда-две); между поисками ничего не запоминается.
+//   TU_.DAT - «Точки учёта»: KP, NP - наименование договора, NAB, NAIM - наименование ТУ (у квартир - номер квартиры),
+//             NST - № счётчика, TIPSCH - тип, GODEN - поверка («2024-3»), TPOK/PPOK - текущие/предыдущие показания, FAZA...
+// Поиск - по адресу во всех карточках (номер договора - по желанию). Таблицы читаются подряд (TU_ - около 10 МБ, по сети
+// секунда-две); между поисками ничего не запоминается.
 public class JurAbon {
-    public int Nab, Score, Flats;
-    public bool House;      // в адресе карточки - номер дома из договора
-    public string Name = "", Address = "";
+    public int Kp, Nab, Score, Flats;
+    public bool House;      // адрес карточки - этот дом (улица и номер дома)
+    public string Name = "", Address = "", Contract = "";
 }
 
 public class JurPoint {
-    public int Nab;
+    public int Kp, Nab;
     public string AbonName = "", Name = "", Serial = "", Type = "", Poverka = "", Reading = "", Previous = "", Phase = "", Scale = "", Kind = "", Amper = "";
     public bool Flat;      // наименование ТУ - искомая квартира
 
@@ -17590,8 +17593,14 @@ public class JurPoint {
     public string Best { get { return Reading.Length > 0 && Reading != "0" ? Reading : Previous; } }
 }
 
+public class JurFound {
+    public List<JurAbon> Cards = new List<JurAbon>();     // карточки этого дома (или договора, если он указан)
+    public List<JurAbon> Street = new List<JurAbon>();    // нет дома - карточки той же улицы (других домов)
+    public List<JurPoint> Points = new List<JurPoint>();  // точки учёта найденных карточек
+}
+
 public class JurBase {
-    public string Folder = "", ContractName = "";
+    public string Folder = "";
     public DateTime Updated = DateTime.MinValue;
 
     static readonly string[] Usual = { @"L:\", @"\\FSO\dolg_vse", @"\\10.177.100.29\dolg_Vse" };
@@ -17623,39 +17632,59 @@ public class JurBase {
 
     static string Get(ClarionFile c, byte[] rec, ClarionField f) { return f == null ? "" : c.Value(rec, f).Trim(); }
 
-    // «Абоненты по договору»: карточки договора
-    public List<JurAbon> Abonents(int kp) {
-        List<JurAbon> r = new List<JurAbon>();
+    static long Key(long kp, long nab) { return kp * 100000 + nab; }
+
+    // карточки дома по адресу (н.п., улица, дом) во всех договорах - или все карточки договора kp (если указан); квартира kv - среди ТУ
+    public JurFound Find(string np, string street, string dom, string kv, int kp) {
+        JurFound r = new JurFound();
+        string v = Word(np), st = Word(street);
+        Dictionary<long, JurAbon> cards = new Dictionary<long, JurAbon>();
         using (ClarionFile c = ClarionFile.Open(Path.Combine(Folder, "ABON_.DAT"))) {
             ClarionField fkp = Need(c, "KP"), fnab = Need(c, "NAB"), fname = c.Field("NAIM"), fadr = c.Field("ADRES");
             c.Scan(delegate(byte[] rec) {
-                if (c.Number(rec, fkp) != kp) return true;
+                long k = c.Number(rec, fkp);
+                if (kp > 0 && k != kp) return true;
+                string name = Get(c, rec, fname), adr = Get(c, rec, fadr);
+                int m = Match(name + " " + adr, v, st, dom);
+                if (kp == 0 && m == 0) return true;
                 JurAbon a = new JurAbon();
+                a.Kp = (int)k;
                 a.Nab = (int)c.Number(rec, fnab);
-                a.Name = Get(c, rec, fname);
-                a.Address = Get(c, rec, fadr);
-                r.Add(a);
+                a.Name = name;
+                a.Address = adr;
+                a.House = m == 2;
+                if (kp > 0 || m == 2) cards[Key(a.Kp, a.Nab)] = a;
+                else if (r.Street.Count < 30) r.Street.Add(a);
                 return true;
             });
         }
-        r.Sort(delegate(JurAbon x, JurAbon y) { return x.Nab.CompareTo(y.Nab); });
-        return r;
-    }
-
-    // «Точки учёта» всех карточек договора
-    public List<JurPoint> Points(int kp) {
-        List<JurPoint> r = new List<JurPoint>();
-        string name = "";
         using (ClarionFile c = ClarionFile.Open(Path.Combine(Folder, "TU_.DAT"))) {
             ClarionField fkp = Need(c, "KP"), fnab = Need(c, "NAB"), fnaim = c.Field("NAIM"), fnst = c.Field("NST"), ftip = c.Field("TIPSCH"),
                 fgod = c.Field("GODEN"), ftpok = c.Field("TPOK"), fppok = c.Field("PPOK"), ffaz = c.Field("FAZA"), fsh = c.Field("SHKALA"),
                 fvid = c.Field("VID"), famp = c.Field("AMPER"), fabn = c.Field("NAB_NAIM"), fnp = c.Field("NP");
             c.Scan(delegate(byte[] rec) {
-                if (c.Number(rec, fkp) != kp) return true;
+                long k = c.Number(rec, fkp);
+                if (kp > 0 && k != kp) return true;
+                long nab = c.Number(rec, fnab);
+                string tu = Get(c, rec, fnaim);
+                JurAbon a;
+                if (!cards.TryGetValue(Key(k, nab), out a)) {
+                    // адрес бывает и в наименовании точки учёта («ул.Заводская 77 кв.5»)
+                    if (Match(tu, v, st, dom) != 2) return true;
+                    a = new JurAbon();
+                    a.Kp = (int)k;
+                    a.Nab = (int)nab;
+                    a.Name = Get(c, rec, fabn);
+                    a.Address = "(адрес - в наименовании ТУ)";
+                    a.House = true;
+                    cards[Key(k, nab)] = a;
+                }
+                if (a.Contract.Length == 0) a.Contract = Get(c, rec, fnp);
                 JurPoint p = new JurPoint();
-                p.Nab = (int)c.Number(rec, fnab);
+                p.Kp = (int)k;
+                p.Nab = (int)nab;
                 p.AbonName = Get(c, rec, fabn);
-                p.Name = Get(c, rec, fnaim);
+                p.Name = tu;
                 p.Serial = Get(c, rec, fnst);
                 p.Type = Get(c, rec, ftip);
                 p.Poverka = Get(c, rec, fgod);
@@ -17666,12 +17695,21 @@ public class JurBase {
                 p.Scale = Get(c, rec, fsh);
                 p.Kind = Get(c, rec, fvid);
                 p.Amper = Get(c, rec, famp);
-                if (name.Length == 0) name = Get(c, rec, fnp);
-                r.Add(p);
+                p.Flat = IsFlat(tu, kv);
+                r.Points.Add(p);
                 return true;
             });
         }
-        ContractName = name;
+        foreach (JurAbon a in cards.Values) {
+            a.Flats = 0;
+            foreach (JurPoint p in r.Points) if (p.Kp == a.Kp && p.Nab == a.Nab && p.Flat) a.Flats++;
+            a.Score = (a.House ? 10 : 0) + (a.Name.ToLowerInvariant().Contains("нераспрод") ? 2 : 0) + (a.Flats > 0 ? 3 : 0);
+            r.Cards.Add(a);
+        }
+        r.Cards.Sort(delegate(JurAbon x, JurAbon y) {
+            if (x.Score != y.Score) return y.Score.CompareTo(x.Score);
+            return x.Kp != y.Kp ? x.Kp.CompareTo(y.Kp) : x.Nab.CompareTo(y.Nab);
+        });
         return r;
     }
 
@@ -17681,28 +17719,16 @@ public class JurBase {
         return v.Replace('.', ',');
     }
 
-    // карточка дома: «нераспроданные квартиры», в адресе - улица и номер дома, среди точек учёта - эта квартира
-    public static void Score(List<JurAbon> list, List<JurPoint> points, string np, string street, string dom) {
-        string st = Word(street), v = Word(np);
-        foreach (JurAbon a in list) {
-            string n = a.Name.ToLowerInvariant(), ad = a.Address.ToLowerInvariant();
-            int s = 0;
-            if (n.Contains("нераспрод")) s += 4;
-            else if (n.Contains("кварт")) s += 1;
-            if (st.Length >= 3 && (ad.Contains(st) || n.Contains(st))) s += 2;
-            a.House = dom.Length > 0 && HasNumber(ad, dom);
-            if (a.House) s += 2;
-            if (v.Length >= 3 && ad.Contains(v)) s += 1;
-            a.Flats = 0;
-            foreach (JurPoint p in points) if (p.Nab == a.Nab && p.Flat) a.Flats++;
-            if (a.Flats > 0) s += 3;
-            a.Score = s;
-        }
-        list.Sort(delegate(JurAbon x, JurAbon y) { return x.Score != y.Score ? y.Score.CompareTo(x.Score) : x.Nab.CompareTo(y.Nab); });
+    // адрес в тексте карточки: 2 - этот дом, 1 - та же улица (без улицы - тот же н.п.), другой дом, 0 - нет
+    public static int Match(string text, string village, string street, string dom) {
+        string t = Regex.Replace(text.ToLowerInvariant(), @"кв[а-я]*\.?\s*\d+", " ");     // номер квартиры - не номер дома
+        bool place = street.Length >= 3 ? t.Contains(street) : village.Length >= 3 && t.Contains(village);
+        if (!place) return 0;
+        return dom.Length > 0 && HasNumber(t, dom) ? 2 : 1;
     }
 
     // главное слово названия: без типа (ул., д., аг.) и кавычек, нижним регистром, первые 5 букв (окончания пишут по-разному)
-    static string Word(string s) {
+    public static string Word(string s) {
         string best = "";
         foreach (string w in s.ToLowerInvariant().Split(new char[] { ' ', '.', ',', '"', '«', '»', '-', '(', ')' }, StringSplitOptions.RemoveEmptyEntries))
             if (w.Length > best.Length && Array.IndexOf(Types, w) < 0) best = w;
@@ -17740,10 +17766,16 @@ public class JurBase {
     }
 }
 
-// Лицевой новой квартиры: в физ базе у дома своя книга лицевых - она берётся по соседям; лицевой = первая цифра (0) +
-// книга (4) + квартира (3) + контрольная цифра (правило найдено по физ базе). Проверяется, что такого лицевого ещё нет.
+public class Neighbour {
+    public string Dom = "", Kv = "", Ls = "";
+}
+
+// Лицевой новой квартиры. В физ базе у дома своя книга лицевых: лицевой = первая цифра (0) + книга (4) + квартира (3) +
+// контрольная цифра. Книга - по лицевым соседей: квартиры этого дома, а если их нет - ближайших домов улицы (тогда проверить:
+// у нового дома может быть своя книга). Предложенный лицевой можно поправить; проверка цифры и копии - Check.
 public class FlatLs {
-    public string Ls = "", Note = "";
+    public List<Neighbour> Near = new List<Neighbour>();
+    public string Where = "", Ls = "", Note = "";
     public bool Ok;
 
     public static string Digits(string s) {
@@ -17752,110 +17784,179 @@ public class FlatLs {
         return sb.ToString();
     }
 
-    public static FlatLs Make(BaseLink b, string houseQuery, string kv, CheckRule rule) {
+    static int Num(string dom) {
+        Match m = Regex.Match(dom, @"\d+");
+        return m.Success ? int.Parse(m.Value) : -1;
+    }
+
+    public static FlatLs Make(BaseLink b, string houseQuery, string streetQuery, string dom, string kv, CheckRule rule) {
         FlatLs r = new FlatLs();
-        int flat;
-        if (!int.TryParse(kv.Trim(), out flat) || flat <= 0 || flat > 999) { r.Note = "номер квартиры «" + kv + "» - не из цифр: лицевой не составить"; return r; }
-        if (b == null) { r.Note = "база физ лиц недоступна - лицевой не составить"; return r; }
-        if (houseQuery.Length == 0) { r.Note = "в договоре нет адреса дома - лицевой не составить"; return r; }
+        if (b == null) { r.Note = "база физ лиц недоступна"; return r; }
+        List<string[]> rows = houseQuery.Length > 0 ? b.House(houseQuery) : new List<string[]>();
+        bool same = rows.Count > 0;
+        if (same) r.Where = "в доме " + dom;
+        else if (streetQuery.Length > 0) {
+            // в доме лицевых нет - ближайшие по номеру дома той же улицы
+            List<string[]> street = b.House(streetQuery);
+            int me = Num(dom);
+            List<string> houses = new List<string>();
+            foreach (string[] s in street) if (s[2].Length > 0 && !houses.Contains(s[2])) houses.Add(s[2]);
+            houses.Sort(delegate(string x, string y) {
+                int dx = Math.Abs(Num(x) - me), dy = Math.Abs(Num(y) - me);
+                return dx != dy ? dx.CompareTo(dy) : string.Compare(x, y, StringComparison.Ordinal);
+            });
+            if (houses.Count > 2) houses.RemoveRange(2, houses.Count - 2);
+            foreach (string[] s in street) if (houses.Contains(s[2])) rows.Add(s);
+            if (houses.Count > 0) r.Where = "в доме " + dom + " лицевых нет; соседние дома " + string.Join(", ", houses.ToArray());
+        }
+        // книга: самые частые первые 5 цифр (у ближайшего дома - если в самом доме никого)
         Dictionary<string, int> heads = new Dictionary<string, int>();
-        int n = 0, fit = 0;
-        foreach (string[] h in b.House(houseQuery)) {
-            string nab = Digits(h[0]);
+        string nearest = "";
+        if (!same) {
+            int me = Num(dom), bestDist = int.MaxValue;
+            foreach (string[] s in rows) { int d = Math.Abs(Num(s[2]) - me); if (d < bestDist) { bestDist = d; nearest = s[2]; } }
+        }
+        foreach (string[] s in rows) {
+            string nab = Digits(s[0]);
             if (nab.Length == 0 || nab.Length > 9) continue;
             nab = nab.PadLeft(9, '0');
-            n++;
-            string head = nab.Substring(0, 5);
+            Neighbour n = new Neighbour();
+            n.Dom = s[2] + (s[3].Length > 0 ? " корп." + s[3] : "");
+            n.Kv = s[1];
+            n.Ls = nab;
+            r.Near.Add(n);
+            if (!same && s[2] != nearest) continue;
             int c;
-            heads.TryGetValue(head, out c);
-            heads[head] = c + 1;
-            int k;
-            if (int.TryParse(Digits(h[1]), out k) && k == int.Parse(nab.Substring(5, 3))) fit++;
+            heads.TryGetValue(nab.Substring(0, 5), out c);
+            heads[nab.Substring(0, 5)] = c + 1;
         }
-        if (n == 0) { r.Note = "в физ базе по адресу дома («" + houseQuery + "») лицевых нет - книгу лицевых взять не у кого"; return r; }
+        r.Near.Sort(delegate(Neighbour x, Neighbour y) {
+            if (x.Dom != y.Dom) return Num(x.Dom) != Num(y.Dom) ? Num(x.Dom).CompareTo(Num(y.Dom)) : string.Compare(x.Dom, y.Dom, StringComparison.Ordinal);
+            return Num(x.Kv).CompareTo(Num(y.Kv));
+        });
+        if (r.Near.Count == 0) { r.Note = "в физ базе соседей нет (ни в доме, ни на улице) - лицевой впишите сами"; return r; }
         string best = "";
-        int bc = 0;
-        foreach (KeyValuePair<string, int> kvp in heads) if (kvp.Value > bc) { bc = kvp.Value; best = kvp.Key; }
+        int bc = 0, total = 0;
+        foreach (KeyValuePair<string, int> kvp in heads) { total += kvp.Value; if (kvp.Value > bc) { bc = kvp.Value; best = kvp.Key; } }
+        int flat;
+        if (best.Length == 0) { r.Note = "у соседей лицевые не из 9 цифр - лицевой впишите сами"; return r; }
+        if (!int.TryParse(kv.Trim(), out flat) || flat <= 0 || flat > 999) { r.Note = "квартира «" + kv + "» - не из цифр: лицевой впишите сами"; return r; }
         string d8 = best + flat.ToString("000");
         List<string> notes = new List<string>();
-        notes.Add("книга " + best.Substring(1) + " - по " + bc + " из " + n + " лицевых дома");
-        if (bc * 2 <= n) notes.Add("у дома несколько книг - проверьте");
-        if (fit * 2 < n) notes.Add("у соседей номер квартиры в лицевом не сходится - проверьте");
-        if (rule == null || !rule.Good) {
+        notes.Add("книга " + best.Substring(1) + " - у " + bc + " из " + total + " лицевых " + (same ? "дома" : "дома " + nearest));
+        if (!same) notes.Add("взята у соседнего дома - у нового дома может быть своя книга, проверьте");
+        if (bc * 2 <= total) notes.Add("книг несколько - проверьте");
+        if (rule == null || !rule.Good || rule.Digit(d8) < 0) {
             r.Ls = d8;
-            notes.Add("контрольной цифры нет: найдите правило («Перевод из юр в физ» - «Найти правило по физ базе»)");
-            r.Note = string.Join("; ", notes.ToArray());
-            return r;
-        }
-        int digit = rule.Digit(d8);
-        if (digit < 0) { r.Ls = d8; notes.Add("для этого номера правило контрольной цифры не даёт - возьмите её в базе"); r.Note = string.Join("; ", notes.ToArray()); return r; }
-        r.Ls = d8 + digit;
-        bool unsure = rule.Special(d8) && !rule.SpecialSure;
-        if (unsure) notes.Add("особый случай (сумма даёт 10) - контрольную цифру сверьте с базой");
-        List<string> same = b.Accounts(r.Ls);
-        if (same.Count > 0) notes.Add("ТАКОЙ ЛИЦЕВОЙ УЖЕ ЕСТЬ: " + same[0]);
-        else notes.Add("в базе такого лицевого нет");
-        r.Ok = same.Count == 0 && !unsure && bc * 2 > n;
+            notes.Add("контрольную цифру допишите (правило не найдено)");
+        } else r.Ls = d8 + rule.Digit(d8);
+        r.Ok = same && bc * 2 > total && r.Ls.Length == 9;
         r.Note = string.Join("; ", notes.ToArray());
         return r;
     }
+
+    // проверка лицевого (9 цифр): контрольная цифра по правилу, нет ли такого в физ базе. ok - всё хорошо
+    public static string Check(string ls, BaseLink b, CheckRule rule, out bool ok) {
+        ok = false;
+        string d = Digits(ls);
+        if (d.Length != 9) return "лицевой - 9 цифр (сейчас " + d.Length + ")";
+        List<string> notes = new List<string>();
+        bool good = true;
+        if (rule != null && rule.Good) {
+            int c = rule.Digit(d.Substring(0, 8));
+            if (c >= 0 && c != d[8] - '0') { notes.Add("контрольная цифра не та: по правилу " + d.Substring(0, 8) + c); good = false; }
+            else if (rule.Special(d.Substring(0, 8)) && !rule.SpecialSure) notes.Add("особый случай - контрольную цифру сверьте с базой");
+            else notes.Add("контрольная цифра верна");
+        }
+        if (b == null) { notes.Add("база физ лиц недоступна - копию не проверить"); good = false; }
+        else {
+            List<string> same = b.Accounts(d);
+            if (same.Count > 0) { notes.Add("ТАКОЙ ЛИЦЕВОЙ УЖЕ ЕСТЬ: " + same[0]); good = false; }
+            else notes.Add("в базе такого нет");
+        }
+        ok = good;
+        return string.Join("; ", notes.ToArray());
+    }
 }
 
-// Окно «Квартира из базы юр лиц»: договор юр лица + адрес и квартира из договора -> карточка, счётчик квартиры, лицевой.
+// Окно «Квартира из базы юр лиц»: адрес (из договора, можно поправить) -> карточки дома во всех договорах базы юр лиц ->
+// точки учёта карточки (счётчик квартиры); лицевые соседей из физ базы и предложенный лицевой (можно поправить).
 // Ничего не меняет в базах - только переносит найденное в поля договора.
 public class JurPick : Form {
     readonly DogovorForm form;
     readonly Memory memory;
     readonly BaseLink baseLink;
-    readonly TextBox kpBox = Ui.Text(1), kvBox = Ui.Text(1), prefixBox = Ui.Text(1);
-    readonly Label status = new Label(), adrLabel = new Label(), lsLabel = new Label(), abCap, ptCap;
-    readonly ListView abons = new ListView(), points = new ListView();
+    readonly TextBox npBox = Ui.Text(1), ulBox = Ui.Text(1), domBox = Ui.Text(1), korBox = Ui.Text(1), kvBox = Ui.Text(1), kpBox = Ui.Text(1);
+    readonly TextBox prefixBox = Ui.Text(1), lsBox = Ui.Text(1);
+    readonly Label status = new Label(), lsNote = new Label(), nearCap, abCap, ptCap;
+    readonly ListView abons = new ListView(), points = new ListView(), near = new ListView();
     readonly RadioButton to1 = new RadioButton(), to2 = new RadioButton();
-    readonly CheckBox cZav = new CheckBox(), cTip = new CheckBox(), cPov = new CheckBox(), cPok = new CheckBox(), cLs = new CheckBox();
+    readonly CheckBox cZav = new CheckBox(), cTip = new CheckBox(), cPov = new CheckBox(), cPok = new CheckBox(), cLs = new CheckBox(), cAdr = new CheckBox();
     readonly Button find = Ui.Button("Найти", true), apply = Ui.Button("Перенести в договор", true), close = Ui.Button("Закрыть", false);
     List<JurAbon> abList = new List<JurAbon>();
     List<JurPoint> ptList = new List<JurPoint>();
-    FlatLs flatLs;
-    int seq;
+    readonly List<JurPoint> shown = new List<JurPoint>();
+    readonly CheckRule rule;
+    string lsAbout = "";            // откуда предложенный лицевой (книга соседей)
+    int seq, lsSeq;
+    bool lsOk, filling, fromNear;
     public string Result = "";      // что перенесено - для надписи в договоре
 
-    static readonly Color FlatBack = Color.FromArgb(214, 240, 220);
+    static readonly Color FlatBack = Color.FromArgb(214, 240, 220), OtherBack = Color.FromArgb(240, 240, 240), Warn = Color.FromArgb(190, 105, 0);
 
     public JurPick(DogovorForm form, Memory memory, BaseLink baseLink, int slot) {
         this.form = form;
         this.memory = memory;
         this.baseLink = baseLink;
+        rule = CheckRule.Load(memory.Get("ЛицевойПравило", ""));
         Text = "Квартира из базы юр лиц";
         Font = St.Base;
         BackColor = St.Back;
         StartPosition = FormStartPosition.CenterParent;
-        ClientSize = new Size(1080, 720);
-        MinimumSize = new Size(900, 620);
+        ClientSize = new Size(1120, 760);
+        MinimumSize = new Size(940, 660);
         ShowInTaskbar = false;
 
-        Label kpCap = Ui.Caption("Договор юр лица №"), kvCap = Ui.Caption("Квартира");
-        kpBox.Text = memory.Get("ЮрДоговор", "");
-        Ui.Cue(kpBox, "например 11118");
+        // адрес - из договора; можно поправить здесь (уйдёт в договор)
+        Label npCap = Ui.Caption("Населённый пункт"), ulCap = Ui.Caption("Улица"), domCap = Ui.Caption("Дом"), korCap = Ui.Caption("Корпус"),
+            kvCap = Ui.Caption("Квартира"), kpCap = Ui.Caption("Договор юр лица (если знаете)");
+        npBox.Text = form.V("np");
+        ulBox.Text = form.V("ulica");
+        domBox.Text = form.V("dom");
+        korBox.Text = form.V("korp");
         kvBox.Text = form.V("kv");
+        Ui.Cue(kpBox, "необязательно");
         find.Click += delegate { Search(); };
-        kpBox.KeyDown += delegate(object s, KeyEventArgs e) { if (e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; Search(); } };
-        kvBox.KeyDown += delegate(object s, KeyEventArgs e) { if (e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; Search(); } };
-        adrLabel.AutoSize = false;
-        adrLabel.ForeColor = St.Text;
-        string house = form.HouseQuery();
-        adrLabel.Text = "Адрес из договора: " + (house.Length > 0 ? house : "не заполнен (улица и дом нужны, чтобы найти карточку дома и книгу лицевых)");
+        foreach (TextBox t in new TextBox[] { npBox, ulBox, domBox, korBox, kvBox, kpBox })
+            t.KeyDown += delegate(object s, KeyEventArgs e) { if (e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; Search(); } };
         status.AutoSize = false;
         status.ForeColor = St.Hint;
-        status.Text = "Введите номер договора юр лица и нажмите «Найти». База юр лиц только читается.";
+        status.Text = "Адрес - из договора (можно поправить). «Найти» - карточки этого дома во всех договорах базы юр лиц. Базы только читаются.";
 
-        abCap = Ui.Caption("Абоненты по договору (карточки) - выбрана подходящая: «нераспроданные квартиры», улица и дом, есть эта квартира");
-        ptCap = Ui.Caption("Точки учёта карточки - зелёным квартира из договора");
-        Columns(abons, new string[] { "Код", "Наименование абонента", "Адрес абонента", "Квартир найдено" }, new int[] { 70, 420, 360, 140 });
+        abCap = Ui.Caption("Найдено в базе юр лиц: карточки этого дома");
+        ptCap = Ui.Caption("Точки учёта карточки");
+        nearCap = Ui.Caption("Лицевые соседей (база физ лиц)");
+        Columns(abons, new string[] { "Договор", "Наименование договора", "Код", "Наименование абонента", "Адрес абонента", "Квартира" },
+            new int[] { 70, 250, 50, 240, 300, 90 });
         Columns(points, new string[] { "Наим. ТУ", "№ счётчика", "Тип", "Поверка", "Показания", "Пред. показ.", "Фазы", "Шкала", "Вид" },
             new int[] { 150, 130, 230, 80, 100, 100, 55, 60, 110 });
+        Columns(near, new string[] { "Дом", "Кв.", "Лицевой" }, new int[] { 80, 60, 120 });
         abons.SelectedIndexChanged += delegate { ShowPoints(); };
         points.SelectedIndexChanged += delegate { ShowChoice(); };
         points.DoubleClick += delegate { Transfer(); };
+        // двойной щелчок по соседу - его книга (первые 5 цифр) + наша квартира
+        near.DoubleClick += delegate {
+            if (near.SelectedItems.Count == 0) return;
+            string ls = near.SelectedItems[0].SubItems[2].Text;
+            int flat;
+            if (ls.Length == 9 && int.TryParse(kvBox.Text.Trim(), out flat) && flat > 0 && flat < 1000) {
+                string d8 = ls.Substring(0, 5) + flat.ToString("000");
+                lsAbout = "книга " + ls.Substring(1, 4) + " - как у соседа (дом " + near.SelectedItems[0].SubItems[0].Text + ", кв. " + near.SelectedItems[0].SubItems[1].Text + ")";
+                fromNear = true;
+                lsBox.Text = rule != null && rule.Good && rule.Digit(d8) >= 0 ? d8 + rule.Digit(d8) : d8;
+                fromNear = false;
+            }
+        };
 
         Label toCap = Ui.Caption("Перенести в договор:");
         to1.Text = "в счётчик 1";
@@ -17867,51 +17968,70 @@ public class JurPick : Form {
         Prepare(cTip, "тип");
         Prepare(cPov, "поверку");
         Prepare(cPok, "показания");
-        Prepare(cLs, "лицевой");
-        Label preCap = Ui.Caption("приписка района");
+        Prepare(cAdr, "адрес (если поправили здесь)");
+        Prepare(cLs, "лицевой:");
+        Label preCap = Ui.Caption("приписка"), lsCap = Ui.Caption("лицевой (9 цифр) - можно поправить");
         prefixBox.Text = Prefix();
         Ui.Cue(prefixBox, "5002");
-        lsLabel.AutoSize = false;
-        lsLabel.ForeColor = St.Hint;
-        lsLabel.Text = "Лицевой: найдётся после поиска (книга лицевых дома - по соседям в физ базе).";
+        Ui.Cue(lsBox, "045671234");
+        lsBox.TextChanged += delegate {
+            if (filling) return;
+            if (!fromNear) lsAbout = "исправлен вручную";
+            CheckLs();
+        };
+        lsNote.AutoSize = false;
+        lsNote.ForeColor = St.Hint;
+        lsNote.Text = "Лицевой предложится после поиска - по книге лицевых соседей.";
         apply.Click += delegate { Transfer(); };
         close.Click += delegate { Close(); };
         CancelButton = close;
 
-        Controls.AddRange(new Control[] { kpCap, kpBox, kvCap, kvBox, find, adrLabel, status, abCap, abons, ptCap, points,
-            toCap, to1, to2, cZav, cTip, cPov, cPok, cLs, preCap, prefixBox, lsLabel, apply, close });
+        Controls.AddRange(new Control[] { npCap, npBox, ulCap, ulBox, domCap, domBox, korCap, korBox, kvCap, kvBox, kpCap, kpBox, find, status,
+            abCap, abons, ptCap, points, nearCap, near, toCap, to1, to2, cZav, cTip, cPov, cPok, cAdr, cLs, preCap, prefixBox, lsCap, lsBox, lsNote, apply, close });
         Resize += delegate {
-            int w = ClientSize.Width - 32, x = 16, y = 14;
-            kpCap.SetBounds(x, y, 200, 18);
-            kvCap.SetBounds(x + 210, y, 100, 18);
-            kpBox.SetBounds(x, y + 20, 200, 26);
-            kvBox.SetBounds(x + 210, y + 20, 100, 26);
-            find.SetBounds(x + 322, y + 17, 120, 32);
-            adrLabel.SetBounds(x + 460, y + 2, w - 460, 22);
-            status.SetBounds(x + 460, y + 24, w - 460, 40);
-            y += 70;
+            int w = ClientSize.Width - 32, x = 16, y = 12;
+            int[] widths = { 230, 230, 70, 70, 80, 200 };
+            Label[] caps = { npCap, ulCap, domCap, korCap, kvCap, kpCap };
+            TextBox[] boxes = { npBox, ulBox, domBox, korBox, kvBox, kpBox };
+            int cx = x;
+            for (int i = 0; i < caps.Length; i++) {
+                caps[i].SetBounds(cx, y, widths[i] + (i == 5 ? 40 : 0), 18);
+                boxes[i].SetBounds(cx, y + 20, widths[i], 26);
+                cx += widths[i] + 10;
+            }
+            find.SetBounds(cx + 4, y + 17, Math.Max(100, ClientSize.Width - 16 - cx - 4), 32);
+            y += 54;
+            status.SetBounds(x, y, w, 40);
+            y += 44;
+            int bottom = 214, free = ClientSize.Height - y - bottom;
             abCap.SetBounds(x, y, w, 18);
-            int free = ClientSize.Height - y - 190;
-            abons.SetBounds(x, y + 20, w, Math.Max(90, free * 2 / 5));
-            y = abons.Bottom + 10;
+            abons.SetBounds(x, y + 20, w, Math.Max(80, free * 2 / 5 - 22));
+            y = abons.Bottom + 8;
             ptCap.SetBounds(x, y, w, 18);
-            points.SetBounds(x, y + 20, w, Math.Max(120, ClientSize.Height - y - 20 - 160));
-            y = points.Bottom + 12;
-            toCap.SetBounds(x, y + 2, 170, 20);
-            to1.Location = new Point(x + 175, y);
-            to2.Location = new Point(x + 300, y);
-            int cx = x + 440;
-            foreach (CheckBox c in new CheckBox[] { cZav, cTip, cPov, cPok }) { c.Location = new Point(cx, y); cx += c.PreferredSize.Width + 14; }
-            y += 34;
-            cLs.Location = new Point(x, y + 4);
-            preCap.SetBounds(x + 100, y - 12, 140, 16);
-            prefixBox.SetBounds(x + 100, y + 4, 70, 26);
-            lsLabel.SetBounds(x + 182, y, w - 182, 48);
-            y += 56;
-            apply.SetBounds(ClientSize.Width - 16 - 140 - 12 - 230, y, 230, 36);
-            close.SetBounds(ClientSize.Width - 16 - 140, y, 140, 36);
+            points.SetBounds(x, y + 20, w, Math.Max(100, ClientSize.Height - bottom - y - 20));
+            y = points.Bottom + 10;
+            nearCap.SetBounds(x, y, 280, 18);
+            near.SetBounds(x, y + 20, 280, ClientSize.Height - y - 30);
+            int rx = x + 296, rw = ClientSize.Width - 16 - rx;
+            toCap.SetBounds(rx, y + 2, 160, 20);
+            to1.Location = new Point(rx + 165, y);
+            to2.Location = new Point(rx + 290, y);
+            int ccx = rx;
+            foreach (CheckBox c in new CheckBox[] { cZav, cTip, cPov, cPok, cAdr }) {
+                c.Location = new Point(ccx, y + 28);
+                ccx += c.PreferredSize.Width + 12;
+            }
+            int ly = y + 62;
+            cLs.Location = new Point(rx, ly + 22);
+            preCap.SetBounds(rx + 92, ly, 70, 18);
+            prefixBox.SetBounds(rx + 92, ly + 20, 64, 26);
+            lsCap.SetBounds(rx + 166, ly, 300, 18);
+            lsBox.SetBounds(rx + 166, ly + 20, 130, 26);
+            lsNote.SetBounds(rx + 306, ly + 20, rw - 306, 64);
+            apply.SetBounds(ClientSize.Width - 16 - 140 - 12 - 230, ClientSize.Height - 48, 230, 36);
+            close.SetBounds(ClientSize.Width - 16 - 140, ClientSize.Height - 48, 140, 36);
         };
-        Shown += delegate { OnResize(EventArgs.Empty); if (kpBox.Text.Trim().Length > 0) Search(); else kpBox.Focus(); };
+        Shown += delegate { OnResize(EventArgs.Empty); if (domBox.Text.Trim().Length > 0) Search(); else npBox.Focus(); };
     }
 
     static void Columns(ListView lv, string[] heads, int[] widths) {
@@ -17945,84 +18065,148 @@ public class JurPick : Form {
         status.ForeColor = color;
     }
 
+    // адрес для физ базы: типы н.п. и улицы - из договора
+    string Query(bool withHouse) {
+        List<string> parts = new List<string>();
+        string np = npBox.Text.Trim(), ul = ulBox.Text.Trim();
+        if (np.Length > 0) parts.Add((form.V("np_tip") + " " + np).Trim());
+        if (ul.Length > 0) parts.Add((form.V("ulica_tip") + " " + ul).Trim());
+        if (withHouse) {
+            if (domBox.Text.Trim().Length == 0) return "";
+            parts.Add("д. " + domBox.Text.Trim());
+            if (korBox.Text.Trim().Length > 0) parts.Add("корп. " + korBox.Text.Trim());
+        }
+        return parts.Count > 0 ? string.Join(", ", parts.ToArray()) : "";
+    }
+
     public void Search() {
-        int kp;
-        if (!int.TryParse(kpBox.Text.Trim(), out kp) || kp <= 0) { Status("Введите номер договора юр лица (только цифры).", St.Bad); return; }
-        memory.Values["ЮрДоговор"] = kp.ToString();
-        memory.Save();
-        string kv = kvBox.Text.Trim(), saved = memory.Get("ЮрБазаПапка", ""), house = form.HouseQuery();
-        string np = form.V("np"), street = form.V("ulica"), dom = form.V("dom");
-        CheckRule rule = CheckRule.Load(memory.Get("ЛицевойПравило", ""));
+        string np = npBox.Text.Trim(), ul = ulBox.Text.Trim(), dom = domBox.Text.Trim(), kv = kvBox.Text.Trim(), kpText = kpBox.Text.Trim();
+        int kp = 0;
+        if (kpText.Length > 0 && !int.TryParse(kpText, out kp)) { Status("Номер договора юр лица - только цифры (или оставьте пустым).", St.Bad); return; }
+        if (kp == 0 && (dom.Length == 0 || np.Length == 0 && ul.Length == 0)) { Status("Нужен адрес: населённый пункт или улица и дом (или номер договора юр лица).", St.Bad); return; }
+        string saved = memory.Get("ЮрБазаПапка", ""), house = Query(true), street = Query(false);
+        string where = (ul.Length > 0 ? ul : np) + (dom.Length > 0 ? ", д." + dom : "") + (korBox.Text.Trim().Length > 0 ? " корп." + korBox.Text.Trim() : "");
         int my = ++seq;
         find.Enabled = false;
-        Status("Читаю базу юр лиц (договор " + kp + ")...", St.Hint);
+        Status("Ищу «" + where + "» в базе юр лиц и соседей в базе физ лиц...", St.Hint);
         BaseLink b = baseLink;
+        CheckRule r = rule;
         System.Threading.Thread th = new System.Threading.Thread(delegate() {
-            string err = null;
+            string err = null, lsErr = null;
             JurBase jb = null;
-            List<JurAbon> ab = null;
-            List<JurPoint> pt = null;
+            JurFound found = null;
             FlatLs ls = null;
             try {
                 jb = JurBase.Open(saved);
-                ab = jb.Abonents(kp);
-                pt = jb.Points(kp);
-                foreach (JurPoint p in pt) p.Flat = JurBase.IsFlat(p.Name, kv);
-                JurBase.Score(ab, pt, np, street, dom);
+                found = jb.Find(np, ul, dom, kv, kp);
             } catch (Exception ex) { err = ex.Message; }
-            try { if (err == null && kv.Length > 0) ls = FlatLs.Make(b, house, kv, rule); }
-            catch (Exception ex) { ls = new FlatLs(); ls.Note = "лицевой: " + ex.Message; }
+            try { ls = FlatLs.Make(b, house, street, dom, kv, r); }
+            catch (Exception ex) { lsErr = ex.Message; }
             Post(delegate {
                 if (my != seq) return;
                 find.Enabled = true;
-                Fill(kp, jb, ab, pt, ls, err);
+                Fill(where, kp, kv, jb, found, err);
+                FillLs(ls, lsErr);
             });
         });
         th.IsBackground = true;
         th.Start();
     }
 
-    void Fill(int kp, JurBase jb, List<JurAbon> ab, List<JurPoint> pt, FlatLs ls, string err) {
-        string dom = form.V("dom");
+    void Fill(string where, int kp, string kv, JurBase jb, JurFound f, string err) {
         abons.Items.Clear();
         points.Items.Clear();
-        if (err != null) { Status("Не получилось: " + err, St.Bad); return; }
-        abList = ab;
-        ptList = pt;
-        flatLs = ls;
-        string when = jb.Updated.ToString("dd.MM.yyyy HH:mm");
+        shown.Clear();
+        abList = new List<JurAbon>();
+        ptList = new List<JurPoint>();
+        if (err != null) { Status("База юр лиц: не получилось - " + err, St.Bad); ShowChoice(); return; }
+        ptList = f.Points;
         bool old = (DateTime.Now - jb.Updated).TotalDays > 3;
-        if (ab.Count == 0) { Status("Договора " + kp + " в базе юр лиц нет (" + jb.Folder + ", данные от " + when + ").", St.Bad); ShowLs(); return; }
-        int flats = 0;
-        List<string> where = new List<string>();
-        foreach (JurAbon a in ab) if (a.Flats > 0) { flats += a.Flats; where.Add(a.Nab.ToString()); }
-        string kv = kvBox.Text.Trim();
-        Status("Договор " + kp + (jb.ContractName.Length > 0 ? " «" + jb.ContractName + "»" : "") + ": карточек " + ab.Count + ", точек учёта " + pt.Count
-            + (kv.Length == 0 ? "" : flats == 0 ? "; квартиры " + kv + " среди точек учёта нет" : "; квартира " + kv + " - в карточке " + string.Join(", ", where.ToArray()))
-            + ". Данные базы от " + when + (old ? " - СТАРЫЕ!" : ""),
-            old || kvBox.Text.Trim().Length > 0 && flats == 0 ? St.Bad : St.Good);
-        foreach (JurAbon a in ab) {
-            ListViewItem it = new ListViewItem(new string[] { a.Nab.ToString(), a.Name, a.Address, a.Flats > 0 ? a.Flats.ToString() : "" });
-            if (a.Flats > 0 && (a.House || dom.Length == 0)) it.BackColor = FlatBack;
+        string when = " Данные базы юр лиц от " + jb.Updated.ToString("dd.MM.yyyy HH:mm") + (old ? " - СТАРЫЕ!" : "") + ".";
+        if (f.Cards.Count == 0) {
+            // такого адреса в базе юр лиц нет (не внесли) - показать, что есть на этой улице
+            abCap.Text = f.Street.Count > 0 ? "Этого дома в базе юр лиц нет. На этой улице есть (другие дома):" : "Найдено в базе юр лиц: ничего";
+            Status((kp > 0 ? "Договора " + kp + " в базе юр лиц нет." : "В базе юр лиц адреса «" + where + "» нет - ни в одной карточке (возможно, не внесли).")
+                + (f.Street.Count > 0 ? " На этой улице - другие дома, см. список." : "") + when, St.Bad);
+            foreach (JurAbon a in f.Street) {
+                ListViewItem it = new ListViewItem(new string[] { a.Kp.ToString(), a.Contract, a.Nab.ToString(), a.Name, a.Address, "" });
+                it.ForeColor = St.Hint;
+                abons.Items.Add(it);
+            }
+            ptCap.Text = "Точки учёта карточки";
+            ShowChoice();
+            return;
+        }
+        abList = f.Cards;
+        List<string> withFlat = new List<string>();
+        foreach (JurAbon a in abList) if (a.Flats > 0) withFlat.Add(a.Kp + "/" + a.Nab);
+        abCap.Text = "Найдено в базе юр лиц: карточки " + (kp > 0 ? "договора " + kp : "этого дома") + " - " + abList.Count;
+        string text;
+        if (kv.Length == 0) text = "Дом найден: карточек " + abList.Count + ". Впишите квартиру - найдётся её счётчик.";
+        else if (withFlat.Count == 0) text = "Дом найден (карточек " + abList.Count + "), а квартиры " + kv + " среди точек учёта нет - выберите строку сами или проверьте в «Долгах район».";
+        else text = "Квартира " + kv + " найдена: договор/карточка " + string.Join(", ", withFlat.ToArray()) + ".";
+        Status(text + when, old || kv.Length > 0 && withFlat.Count == 0 ? St.Bad : St.Good);
+        foreach (JurAbon a in abList) {
+            ListViewItem it = new ListViewItem(new string[] { a.Kp.ToString(), a.Contract, a.Nab.ToString(), a.Name, a.Address, a.Flats > 0 ? "есть" : "" });
+            if (a.Flats > 0) it.BackColor = FlatBack;
+            else if (!a.House) it.BackColor = OtherBack;
             abons.Items.Add(it);
         }
         if (abons.Items.Count > 0) abons.Items[0].Selected = true;
         ShowPoints();
-        ShowLs();
+    }
+
+    void FillLs(FlatLs ls, string err) {
+        near.Items.Clear();
+        filling = true;
+        try {
+            if (err != null) { lsBox.Text = ""; lsNote.Text = "Физ база: не получилось - " + err; lsNote.ForeColor = St.Bad; cLs.Checked = false; return; }
+            nearCap.Text = "Лицевые соседей (база физ лиц)" + (ls.Where.Length > 0 ? ": " + ls.Where : "");
+            foreach (Neighbour n in ls.Near) near.Items.Add(new ListViewItem(new string[] { n.Dom, n.Kv, n.Ls }));
+            lsBox.Text = ls.Ls;
+        } finally { filling = false; }
+        lsAbout = ls.Note;
+        lsNote.Text = ls.Note;
+        lsNote.ForeColor = ls.Ok ? St.Good : Warn;
+        cLs.Checked = ls.Ls.Length == 9;
+        if (ls.Ls.Length > 0) CheckLs();
+        else ShowChoice();
+    }
+
+    // лицевой предложен или поправлен: контрольная цифра и копия - в фоне
+    void CheckLs() {
+        int my = ++lsSeq;
+        string ls = lsBox.Text, about = lsAbout;
+        lsOk = false;
+        BaseLink b = baseLink;
+        CheckRule r = rule;
+        System.Threading.Thread th = new System.Threading.Thread(delegate() {
+            bool ok;
+            string text;
+            try { text = FlatLs.Check(ls, b, r, out ok); } catch (Exception ex) { text = "проверить не удалось: " + ex.Message; ok = false; }
+            Post(delegate {
+                if (my != lsSeq) return;
+                lsOk = ok;
+                lsNote.Text = (about.Length > 0 ? about + ". " : "") + char.ToUpper(text[0]) + text.Substring(1) + ".";
+                // предложен по соседнему дому (не по своему) - оранжевым, даже если цифра и копия в порядке
+                lsNote.ForeColor = !ok ? St.Bad : about.Contains("соседнего дома") || about.Contains("несколько") ? Warn : St.Good;
+                ShowChoice();
+            });
+        });
+        th.IsBackground = true;
+        th.Start();
     }
 
     JurAbon SelectedAbon() { return abons.SelectedIndices.Count == 0 || abons.SelectedIndices[0] >= abList.Count ? null : abList[abons.SelectedIndices[0]]; }
-
-    List<JurPoint> shown = new List<JurPoint>();
 
     void ShowPoints() {
         points.Items.Clear();
         shown.Clear();
         JurAbon a = SelectedAbon();
-        if (a == null) return;
-        foreach (JurPoint p in ptList) if (p.Nab == a.Nab && p.Flat) shown.Add(p);
-        foreach (JurPoint p in ptList) if (p.Nab == a.Nab && !p.Flat) shown.Add(p);
-        ptCap.Text = "Точки учёта карточки " + a.Nab + " (" + shown.Count + ") - зелёным квартира из договора; двойной щелчок - перенести";
+        if (a == null) { ShowChoice(); return; }
+        foreach (JurPoint p in ptList) if (p.Kp == a.Kp && p.Nab == a.Nab && p.Flat) shown.Add(p);
+        foreach (JurPoint p in ptList) if (p.Kp == a.Kp && p.Nab == a.Nab && !p.Flat) shown.Add(p);
+        ptCap.Text = "Точки учёта " + a.Kp + "/" + a.Nab + " (" + shown.Count + ") - зелёным квартира из договора; двойной щелчок - перенести";
         foreach (JurPoint p in shown) {
             ListViewItem it = new ListViewItem(new string[] { p.Name, p.Serial, p.Type, p.Poverka, p.Reading, p.Previous, p.Phase, p.Scale, p.Kind });
             if (p.Flat) it.BackColor = FlatBack;
@@ -18035,30 +18219,36 @@ public class JurPick : Form {
     JurPoint SelectedPoint() { return points.SelectedIndices.Count == 0 || points.SelectedIndices[0] >= shown.Count ? null : shown[points.SelectedIndices[0]]; }
 
     void ShowChoice() {
-        apply.Enabled = SelectedPoint() != null || flatLs != null && flatLs.Ls.Length == 9;
+        apply.Enabled = SelectedPoint() != null || FlatLs.Digits(lsBox.Text).Length == 9;
     }
 
-    void ShowLs() {
-        if (flatLs == null) {
-            lsLabel.Text = kvBox.Text.Trim().Length == 0 ? "Лицевой: нужна квартира." : "Лицевой: не найден.";
-            lsLabel.ForeColor = St.Hint;
-            cLs.Checked = false;
-            cLs.Enabled = false;
-            return;
+    // адрес поправили в окне - отличается от договора
+    bool AddressChanged {
+        get {
+            return npBox.Text.Trim() != form.V("np") || ulBox.Text.Trim() != form.V("ulica") || domBox.Text.Trim() != form.V("dom")
+                || korBox.Text.Trim() != form.V("korp") || kvBox.Text.Trim() != form.V("kv");
         }
-        lsLabel.Text = "Лицевой: " + (flatLs.Ls.Length > 0 ? flatLs.Ls + " - " : "") + flatLs.Note + (flatLs.Ls.Length == 9 ? ". Сверьте с базой: «формирование лицевых счетов»." : "");
-        lsLabel.ForeColor = flatLs.Ok ? St.Good : flatLs.Ls.Length == 9 ? Color.FromArgb(190, 105, 0) : St.Bad;
-        cLs.Enabled = flatLs.Ls.Length == 9;
-        cLs.Checked = flatLs.Ok;
-        ShowChoice();
     }
+
+    public bool NoQuestions;        // для проверки: не спрашивать
 
     // в поля договора; в базах ничего не меняется
     public void Transfer() {
         JurPoint p = SelectedPoint();
-        bool lsOk = cLs.Checked && flatLs != null && flatLs.Ls.Length == 9;
-        if (p == null && !lsOk) { Status("Выберите строку счётчика (точку учёта).", St.Bad); return; }
+        string ls = FlatLs.Digits(lsBox.Text);
+        bool withLs = cLs.Checked && ls.Length == 9;
+        if (p == null && !withLs) { Status("Выберите строку счётчика (точку учёта) или впишите лицевой.", St.Bad); return; }
+        if (withLs && !lsOk && !NoQuestions && MessageBox.Show(this, "Лицевой " + ls + ": " + lsNote.Text + "\n\nВсё равно перенести его в договор?", Text,
+                MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
         List<string> done = new List<string>();
+        if (cAdr.Checked && AddressChanged) {
+            form.SetV("np", npBox.Text.Trim());
+            form.SetV("ulica", ulBox.Text.Trim());
+            form.SetV("dom", domBox.Text.Trim());
+            form.SetV("korp", korBox.Text.Trim());
+            form.SetV("kv", kvBox.Text.Trim());
+            done.Add("адрес");
+        }
         int i = to2.Checked ? 2 : 1;
         string pre = "pu" + i + "_";
         if (p != null) {
@@ -18068,21 +18258,21 @@ public class JurPick : Form {
                 form.SetV(pre + "model", t.Model);
                 form.SetV(pre + "korpus", t.Case);
                 form.SetV(pre + "modif", t.Mod);
+                form.SetV(pre + "tip", JurBase.Normalize(p.Type));      // в договор - тип, как в базе
                 done.Add("тип");
             }
-            if (cTip.Checked && p.Type.Length > 0) form.SetV(pre + "tip", JurBase.Normalize(p.Type));      // в договор - тип, как в базе
             if (p.Phase == "1" || p.Phase == "3") form.SetV(pre + "faz", p.Phase + " ф");
             if (cZav.Checked && p.Serial.Length > 0) { form.SetV(pre + "zav", p.Serial); done.Add("номер"); }
             if (cPov.Checked && p.Poverka.Length > 0) { form.SetV(pre + "poverka", p.Poverka); done.Add("поверка"); }
             if (cPok.Checked && p.Best.Length > 0) { form.SetV(pre + "pokaz", p.Best); done.Add("показания"); }
         }
-        if (lsOk) {
+        if (withLs) {
             string prefix = FlatLs.Digits(prefixBox.Text);
-            form.SetV("ls", prefix + flatLs.Ls);
+            form.SetV("ls", prefix + ls);
             if (prefix.Length > 0) { memory.Values["ЛицевойПриписка"] = prefix; memory.Save(); }
             done.Add("лицевой");
         }
-        Result = "Из базы юр лиц (договор " + kpBox.Text.Trim() + (p != null ? ", карточка " + p.Nab + ", ТУ «" + p.Name + "»" : "") + "): "
+        Result = "Из базы юр лиц" + (p != null ? " (договор " + p.Kp + ", карточка " + p.Nab + ", ТУ «" + p.Name + "»)" : "") + ": "
             + string.Join(", ", done.ToArray()) + (p != null ? " - в счётчик " + i : "") + ".";
         DialogResult = DialogResult.OK;
         Close();
@@ -18093,11 +18283,16 @@ public class JurPick : Form {
         get {
             JurAbon a = SelectedAbon();
             JurPoint p = SelectedPoint();
-            return status.Text + " | карточка: " + (a == null ? "-" : a.Nab + " " + a.Name) + " | ТУ: " + (p == null ? "-" : p.Name + " " + p.Serial + " " + p.Type + " " + p.Poverka + " " + p.Best)
-                + " | " + lsLabel.Text;
+            StringBuilder n = new StringBuilder();
+            foreach (ListViewItem it in near.Items) n.Append(it.SubItems[0].Text).Append('-').Append(it.SubItems[1].Text).Append(':').Append(it.SubItems[2].Text).Append(' ');
+            return status.Text + " | список: " + abons.Items.Count + " | карточка: " + (a == null ? "-" : a.Kp + "/" + a.Nab + " " + a.Name)
+                + " | ТУ: " + (p == null ? "-" : p.Name + " " + p.Serial + " " + p.Type + " " + p.Poverka + " " + p.Best)
+                + " | " + nearCap.Text + ": " + n + "| лицевой [" + lsBox.Text + "] " + lsNote.Text;
         }
     }
     public void SetQuery(string kp, string kv) { kpBox.Text = kp; kvBox.Text = kv; }
+    public void SetAddress(string np, string ul, string dom) { npBox.Text = np; ulBox.Text = ul; domBox.Text = dom; }
+    public void SetLs(string ls) { lsBox.Text = ls; }
     public void PickPoint(int i) { if (i < points.Items.Count) points.Items[i].Selected = true; }
     public void Slot(int i) { to1.Checked = i != 2; to2.Checked = i == 2; }
 }
