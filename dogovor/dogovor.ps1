@@ -16789,16 +16789,112 @@ public static class JurReport {
         sb.Append("=== Оформление договора: строение базы юр лиц, ").Append(DateTime.Now.ToString("dd.MM.yyyy HH:mm")).Append(" ===\r\n");
         sb.Append("Данных абонентов в отчёте нет: только таблицы (.DBF и Clarion .DAT), поля, вид значений (буквы - А/а, цифры - 9), индексы.\r\n");
         sb.Append("База только читается - ничего не меняется.\r\n\r\n");
-        int tables = Folder(sb, dir, progress, 1);
+        List<string> paths = new List<string>();
+        int tables = Folder(sb, dir, progress, 1, paths);
+        // программа может брать данные из другой папки (сетевой диск): пути из её настроек, команд, трассировки и таблиц
+        List<string> more = Elsewhere(paths, dir);
+        if (more.Count > 0) {
+            sb.Append("===== Папки, на которые ссылается программа: ").Append(string.Join(", ", more.ToArray())).Append(" =====\r\n\r\n");
+            foreach (string m in more) {
+                sb.Append("===== ").Append(m).Append(Unc(m) != m ? " (" + Unc(m) + ")" : "").Append(" =====\r\n");
+                try { tables += Folder(sb, m, progress, 1, null); }
+                catch (Exception ex) { sb.Append("не открылась - ").Append(ex.Message).Append("\r\n\r\n"); }
+            }
+        }
         File.WriteAllText(file, sb.ToString(), new UTF8Encoding(true));
         return tables;
+    }
+
+    // пути вида C:\... и \\сервер\... (не адреса вроде «д.5\2»)
+    static readonly System.Text.RegularExpressions.Regex PathRx = new System.Text.RegularExpressions.Regex(@"(?:\b[A-Za-z]:\\|\\\\[\w.$-]+\\)[^\s""'<>|*?,;=]*");
+
+    static bool AbsPath(string v) {
+        System.Text.RegularExpressions.Match m = PathRx.Match(v);
+        return m.Success && m.Index == 0 && m.Length == v.Length;
+    }
+
+    static void Collect(List<string> paths, string text) {
+        if (paths == null) return;
+        foreach (System.Text.RegularExpressions.Match m in PathRx.Matches(text))
+            if (paths.Count < 400 && !paths.Contains(m.Value)) paths.Add(m.Value);
+    }
+
+    [System.Runtime.InteropServices.DllImport("mpr.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+    static extern int WNetGetConnection(string local, StringBuilder remote, ref int length);
+
+    // сетевой диск -> \\сервер\папка (L:\ и \\FSO\dolg_vse - одна папка)
+    static string Unc(string path) {
+        try {
+            if (path.Length >= 2 && path[1] == ':') {
+                StringBuilder r = new StringBuilder(512);
+                int len = r.Capacity;
+                if (WNetGetConnection(path.Substring(0, 2), r, ref len) == 0 && r.Length > 0) return r.ToString().TrimEnd('\\') + path.Substring(2);
+            }
+        } catch { }
+        return path;
+    }
+
+    static string Key(string path) {
+        try { return Unc(Path.GetFullPath(path)).TrimEnd('\\', '/').ToLowerInvariant(); } catch { return path.ToLowerInvariant(); }
+    }
+
+    // папки из найденных путей: существуют, не эта же папка и не её подпапки, в них есть таблицы; не больше 4
+    static List<string> Elsewhere(List<string> paths, string dir) {
+        List<string> r = new List<string>();
+        List<string> keys = new List<string>();
+        string own = Key(dir), win = "";
+        try { win = (Path.GetDirectoryName(Environment.GetFolderPath(Environment.SpecialFolder.System)) ?? "").ToLowerInvariant(); } catch { }
+        foreach (string p0 in paths) {
+            string p = p0.Trim().TrimEnd('.');
+            try {
+                if (!Directory.Exists(p)) {
+                    p = Path.GetDirectoryName(p);
+                    if (p == null || !Directory.Exists(p)) continue;
+                }
+                string k = Key(p);
+                if (k == own || k.StartsWith(own + "\\") || keys.Contains(k)) continue;
+                if (win.Length > 0 && k.StartsWith(win)) continue;     // папка Windows
+                keys.Add(k);
+                if (HasTables(p)) r.Add(p);
+            } catch { }
+            if (r.Count >= 4) break;
+        }
+        // подпапка уже изучается вместе с папкой выше
+        List<string> top = new List<string>();
+        foreach (string p in r) {
+            bool inner = false;
+            foreach (string q in r) {
+                string kp = Key(p), kq = Key(q);
+                if (kp != kq && (kp.StartsWith(kq + "\\") || kp.StartsWith(kq + "/"))) inner = true;
+            }
+            if (!inner) top.Add(p);
+        }
+        return top;
+    }
+
+    // таблицы в папке или в её подпапках (данные бывают в DATA и т.п.)
+    static bool HasTables(string dir) {
+        if (TablesIn(dir)) return true;
+        string[] sub = new string[0];
+        try { sub = Directory.GetDirectories(dir); } catch { }
+        for (int i = 0; i < sub.Length && i < 30; i++) if (TablesIn(sub[i])) return true;
+        return false;
+    }
+
+    static bool TablesIn(string dir) {
+        try {
+            if (Places.DbfFiles(dir).Length > 0) return true;
+            foreach (string f in Directory.GetFiles(dir))
+                if (Path.GetExtension(f).ToLowerInvariant() == ".dat" && ClarionFile.Is(f)) return true;
+        } catch { }
+        return false;
     }
 
     public static void Append(string file, string line) {
         try { File.AppendAllText(file, "\r\n" + DateTime.Now.ToString("dd.MM.yyyy HH:mm") + "  " + line + "\r\n", new UTF8Encoding(true)); } catch { }
     }
 
-    static int Folder(StringBuilder sb, string dir, Progress progress, int depth) {
+    static int Folder(StringBuilder sb, string dir, Progress progress, int depth, List<string> paths) {
         sb.Append("Папка: ").Append(dir).Append("\r\n");
         string[] all = Directory.GetFiles(dir);
         Array.Sort(all, StringComparer.OrdinalIgnoreCase);
@@ -16832,8 +16928,9 @@ public static class JurReport {
         foreach (string f in all) {
             string e = Path.GetExtension(f).ToLowerInvariant();
             try {
-                if (Array.IndexOf(SettingsExt, e) >= 0) Settings(sb, f);
-                else if (Array.IndexOf(BatchExt, e) >= 0) Batch(sb, f);
+                if (Array.IndexOf(SettingsExt, e) >= 0) Settings(sb, f, paths);
+                else if (Array.IndexOf(BatchExt, e) >= 0) Batch(sb, f, paths);
+                else if (Path.GetFileName(f).ToLowerInvariant().Contains("trace") || e == ".log") Trace(sb, f, paths);
             } catch (Exception ex) { sb.Append(Path.GetFileName(f)).Append(": не прочитался - ").Append(ex.Message).Append("\r\n\r\n"); }
         }
         int tables = 0;
@@ -16841,7 +16938,7 @@ public static class JurReport {
         foreach (string f in dbf) {
             tables++;
             if (progress != null) progress("Изучаю таблицу " + Path.GetFileName(f) + " (" + Path.GetFileName(dir) + ")");
-            try { Table(sb, f); }
+            try { Table(sb, f, paths); }
             catch (Exception ex) { sb.Append(Path.GetFileName(f)).Append(": не прочиталась - ").Append(ex.Message).Append("\r\n\r\n"); }
         }
         // таблицы Clarion (.DAT) и незнакомые файлы - по подписи в начале файла
@@ -16854,7 +16951,7 @@ public static class JurReport {
             if (sig == ClarionFile.Signature) {
                 tables++;
                 if (progress != null) progress("Изучаю таблицу " + Path.GetFileName(f) + " (" + Path.GetFileName(dir) + ")");
-                try { Dat(sb, f); }
+                try { Dat(sb, f, paths); }
                 catch (Exception ex) { sb.Append(Path.GetFileName(f)).Append(": не прочиталась - ").Append(ex.Message).Append("\r\n\r\n"); }
             } else if (unknown++ < 40) {
                 try { Unknown(sb, f, sig == ClarionFile.MemoSignature ? "примечания Clarion" : null); } catch { }
@@ -16863,7 +16960,7 @@ public static class JurReport {
         if (depth > 0)
             for (int i = 0; i < sub.Length && i < 12; i++) {
                 sb.Append("----- подпапка ").Append(Path.GetFileName(sub[i])).Append(" -----\r\n");
-                try { tables += Folder(sb, sub[i], progress, depth - 1); }
+                try { tables += Folder(sb, sub[i], progress, depth - 1, paths); }
                 catch (Exception ex) { sb.Append("не открылась - ").Append(ex.Message).Append("\r\n\r\n"); }
             }
         return tables;
@@ -16871,13 +16968,13 @@ public static class JurReport {
 
     static string Mb(long bytes) { return (bytes / 1024.0 / 1024).ToString("0.0"); }
 
-    static void Table(StringBuilder sb, string path) {
+    static void Table(StringBuilder sb, string path, List<string> paths) {
         LiveBase b = LiveBase.Open(path);
         FileInfo fi = new FileInfo(path);
         sb.Append(Path.GetFileName(path)).Append(": записей ").Append(b.RecordCount).Append(", ").Append(Mb(fi.Length))
             .Append(" МБ, изменена ").Append(fi.LastWriteTime.ToString("dd.MM.yyyy")).Append("\r\n");
         DbfTable t = b.RecordCount > 3000 ? b.SpreadSample(2000) : DbfTable.Load(path, null, null, 3000);
-        foreach (DbfField fd in t.Fields) Field(sb, t, fd);
+        foreach (DbfField fd in t.Fields) Field(sb, t, fd, paths);
         if (b.Tags.Count > 0) {
             sb.Append("  индексы:\r\n");
             foreach (IndexTag tag in b.Tags)
@@ -16887,7 +16984,7 @@ public static class JurReport {
         sb.Append("\r\n");
     }
 
-    static void Field(StringBuilder sb, DbfTable t, DbfField f) {
+    static void Field(StringBuilder sb, DbfTable t, DbfField f, List<string> paths) {
         int j = t.FieldIndex(f.Name);
         string head = "  " + (f.Name + "           ").Substring(0, 11) + (f.Type.ToString() + f.Length + (f.Decimals > 0 ? "," + f.Decimals : "") + "      ").Substring(0, 7);
         if (f.Type == 'M' || f.Type == 'G' || f.Type == 'W') { sb.Append(head).Append("примечание/двоичное\r\n"); return; }
@@ -16895,15 +16992,17 @@ public static class JurReport {
         for (int r = 0; r < t.Count; r++) {
             try { vals.Add(DbfTable.Format(t.GetValue(r, j, null), true).Trim()); } catch { }
         }
-        Describe(sb, head, f.Name, f.Type == 'C' ? Kind.Text : f.Type == 'D' || f.Type == 'T' ? Kind.Date : f.Type == 'L' || f.Type == 'N' && f.Length <= 2 ? Kind.Flag : Kind.Number, vals);
+        Describe(sb, head, f.Name, f.Type == 'C' ? Kind.Text : f.Type == 'D' || f.Type == 'T' ? Kind.Date : f.Type == 'L' || f.Type == 'N' && f.Length <= 2 ? Kind.Flag : Kind.Number, vals, paths);
     }
 
     enum Kind { Text, Number, Flag, Date }
 
     // поле: сколько заполнено и как выглядят значения; мало разных (вид объекта, признак) - сами значения:
     // в них нет данных абонентов; даты - только годы (с какого по какой)
-    static void Describe(StringBuilder sb, string head, string name, Kind kind, List<string> vals) {
+    static void Describe(StringBuilder sb, string head, string name, Kind kind, List<string> vals, List<string> paths) {
         Dictionary<string, int> shapes = new Dictionary<string, int>(), values = new Dictionary<string, int>();
+        List<string> pathValues = new List<string>();
+        bool allPaths = kind == Kind.Text;
         int filled = 0, n = vals.Count, y0 = 9999, y1 = 0;
         // поля с именами людей и организаций: и короткие слова («д.», «п.» - могут быть инициалами) - тоже буквами А/а
         string up = name.ToUpperInvariant();
@@ -16918,6 +17017,11 @@ public static class JurReport {
             shapes.TryGetValue(sh, out c);
             shapes[sh] = c + 1;
             if (values.Count <= 16) { values.TryGetValue(v, out c); values[v] = c + 1; }
+            // пути к папкам и файлам (в таблицах настроек) - не данные абонентов: показываются как есть
+            if (allPaths) {
+                if (!AbsPath(v)) allPaths = false;
+                else if (!pathValues.Contains(v) && pathValues.Count < 8) pathValues.Add(v);
+            }
             if (kind == Kind.Date && v.Length >= 4) {
                 int y;
                 if (int.TryParse(v.Substring(v.Length - 4), out y) || int.TryParse(v.Substring(0, 4), out y)) { y0 = Math.Min(y0, y); y1 = Math.Max(y1, y); }
@@ -16931,7 +17035,10 @@ public static class JurReport {
             for (int i = 0; i < top.Count && i < 3; i++) sb.Append(i > 0 ? " | " : "").Append(top[i].Key).Append(" (").Append(top[i].Value * 100 / Math.Max(1, filled)).Append("%)");
             if (top.Count > 3) sb.Append(" | ещё видов: ").Append(top.Count - 3);
         }
-        if (kind == Kind.Date && y1 > 0) sb.Append("; годы ").Append(y0).Append(y1 > y0 ? "-" + y1 : "");
+        if (allPaths && pathValues.Count > 0) {
+            sb.Append("; пути: ").Append(string.Join(", ", pathValues.ToArray()));
+            foreach (string pv in pathValues) Collect(paths, pv);
+        } else if (kind == Kind.Date && y1 > 0) sb.Append("; годы ").Append(y0).Append(y1 > y0 ? "-" + y1 : "");
         else if ((kind == Kind.Text || kind == Kind.Number) && !person && filled >= 20 && values.Count <= 15 && Safe(values)) {
             List<KeyValuePair<string, int>> vl = new List<KeyValuePair<string, int>>(values);
             vl.Sort(delegate(KeyValuePair<string, int> a, KeyValuePair<string, int> b) { return b.Value.CompareTo(a.Value); });
@@ -16955,7 +17062,7 @@ public static class JurReport {
     }
 
     // таблица Clarion: поля, ключи и вид значений по выборке записей вразброс (до 2000)
-    static void Dat(StringBuilder sb, string path) {
+    static void Dat(StringBuilder sb, string path, List<string> paths) {
         FileInfo fi = new FileInfo(path);
         using (ClarionFile c = ClarionFile.Open(path)) {
             sb.Append(Path.GetFileName(path)).Append(" (таблица Clarion): записей ").Append(c.Records);
@@ -16993,7 +17100,7 @@ public static class JurReport {
                 foreach (byte[] r in recs) { try { vals.Add(c.Value(r, f).Trim()); } catch { vals.Add(""); } }
                 if (!f.IsText && !f.IsDate)
                     for (int v = 0; v < vals.Count; v++) if (vals[v] == "0") vals[v] = "";
-                Describe(sb, head, f.Name, f.IsDate ? Kind.Date : f.IsText ? Kind.Text : Kind.Number, vals);
+                Describe(sb, head, f.Name, f.IsDate ? Kind.Date : f.IsText ? Kind.Text : Kind.Number, vals, paths);
             }
             if (c.Keys.Count > 0) {
                 sb.Append("  ключи (индексы):\r\n");
@@ -17036,9 +17143,10 @@ public static class JurReport {
     }
 
     // настройки программы (.ini, .ctl): разделы и имена; значения - пути, короткие числа и да/нет, остальное - видом А/а/9, пароли скрыты
-    static void Settings(StringBuilder sb, string path) {
+    static void Settings(StringBuilder sb, string path, List<string> paths) {
         byte[] b = Head(path, 64 * 1024);
         if (!LooksText(b)) { Unknown(sb, path, null); return; }
+        Collect(paths, Guess(b).GetString(b));
         sb.Append(Path.GetFileName(path)).Append(" (настройки, ").Append(Math.Max(1, b.Length / 1024)).Append(" КБ, изменён ")
             .Append(new FileInfo(path).LastWriteTime.ToString("dd.MM.yyyy HH:mm")).Append("):\r\n");
         int shown = 0;
@@ -17071,10 +17179,11 @@ public static class JurReport {
         return v.IndexOf(":\\") == 1 || v.StartsWith("\\\\") || v.StartsWith(".\\") || v.StartsWith("..\\") || v.IndexOf('\\') > 0 && v.IndexOf(' ') < 0;
     }
 
-    // пакетный файл (.bat): команды видны (откуда копируются данные), строки со входом в сеть и паролями - скрыты
-    static void Batch(StringBuilder sb, string path) {
+    // пакетный файл (.bat): команды видны (откуда копируются данные); в «net use» - только диск и папка, пароли скрыты
+    static void Batch(StringBuilder sb, string path, List<string> paths) {
         byte[] b = Head(path, 32 * 1024);
         if (!LooksText(b)) { Unknown(sb, path, null); return; }
+        Collect(paths, Guess(b).GetString(b));
         sb.Append(Path.GetFileName(path)).Append(" (команды, изменён ").Append(new FileInfo(path).LastWriteTime.ToString("dd.MM.yyyy")).Append("):\r\n");
         int shown = 0;
         foreach (string line in Guess(b).GetString(b).Split('\n')) {
@@ -17082,11 +17191,30 @@ public static class JurReport {
             if (t.Length == 0) continue;
             if (++shown > 60) { sb.Append("  ...\r\n"); break; }
             string low = t.ToLowerInvariant();
-            if (low.Contains("net use") || low.Contains("/user") || low.Contains("pass") || low.Contains("парол") || low.Contains("pwd"))
-                sb.Append("  (строка со входом в сеть или паролем скрыта)\r\n");
+            int nu = low.IndexOf("net use");
+            if (nu >= 0) {
+                // net use L: \\сервер\папка [пароль] [/user:...] - пароль и имя скрыты
+                string[] w = t.Substring(nu).Split(new char[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
+                StringBuilder l = new StringBuilder(t.Substring(0, nu));
+                for (int i = 0; i < w.Length && i < 4; i++) l.Append(i > 0 ? " " : "").Append(w[i]);
+                if (w.Length > 4) l.Append(" (дальше скрыто)");
+                sb.Append("  ").Append(l).Append("\r\n");
+            } else if (low.Contains("/user") || low.Contains("pass") || low.Contains("парол") || low.Contains("pwd"))
+                sb.Append("  (строка с паролем скрыта)\r\n");
             else sb.Append("  ").Append(t.Length > 160 ? t.Substring(0, 160) + "..." : t).Append("\r\n");
         }
         sb.Append("\r\n");
+    }
+
+    // журнал/трассировка программы (XTRACE и т.п.): только пути к файлам, с которыми она работала - откуда берёт данные
+    static void Trace(StringBuilder sb, string path, List<string> paths) {
+        byte[] b = Head(path, 256 * 1024);
+        if (!LooksText(b)) { Unknown(sb, path, null); return; }
+        List<string> found = new List<string>();
+        Collect(found, Guess(b).GetString(b));
+        sb.Append(Path.GetFileName(path)).Append(" (журнал программы, изменён ").Append(new FileInfo(path).LastWriteTime.ToString("dd.MM.yyyy"))
+            .Append("): пути в нём - ").Append(found.Count == 0 ? "нет" : string.Join(", ", found.GetRange(0, Math.Min(found.Count, 30)).ToArray())).Append("\r\n\r\n");
+        foreach (string f in found) Collect(paths, f);
     }
 
     // незнакомый файл: размер, дата, первые 4 байта (подпись формата) и текст ли это - содержимое не показывается
@@ -17151,6 +17279,7 @@ public static class BaseFinder {
                 if (drv.DriveType != DriveType.Network && drv.DriveType != DriveType.Fixed) continue;
                 if (progress != null) progress("Смотрю диск " + drv.Name + " ...");
                 if (!drv.IsReady) continue;
+                Look(found, drv.RootDirectory.FullName, "диск " + drv.Name, 0, until);     // сетевой диск - часто сама папка базы
                 foreach (string d in Directory.GetDirectories(drv.RootDirectory.FullName)) {
                     string n = Path.GetFileName(d).ToLowerInvariant();
                     if (n == "windows" || n.StartsWith("program") || n == "users" || n == "documents and settings" || n.StartsWith("$") || n == "system volume information") continue;
