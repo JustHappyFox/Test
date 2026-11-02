@@ -7568,11 +7568,14 @@ public class BatchSearch : Form {
 public class NaryadSetup {
     public string Table = "", Number = "", Date = "", Done = "", DoneDate = "", Work = "", Taker = "", Account = "", Meter = "", Name = "";
     public string How = "";          // «сама» - найдена программой, «вручную» - выбрана в настройке
+    public string WorkBook = "", StaffBook = "";   // справочники: «таблица:код:название» (вид работы, работники)
     public int Year;                 // последний выбранный год
+    public int Version;              // 2 - найдено новой программой (знает таблицу REGNZ); старую «сама» - найти заново
+    public const int CurrentVersion = 2;
 
-    static readonly string[] Keys = { "таблица", "номер", "дата", "выполнил", "дата_выполнения", "работа", "принял", "лицевой", "счётчик", "фио", "как", "год" };
+    static readonly string[] Keys = { "таблица", "номер", "дата", "выполнил", "дата_выполнения", "работа", "принял", "лицевой", "счётчик", "фио", "как", "год", "версия", "справочник_работ", "справочник_работников" };
 
-    string[] Values() { return new string[] { Table, Number, Date, Done, DoneDate, Work, Taker, Account, Meter, Name, How, Year > 0 ? Year.ToString() : "" }; }
+    string[] Values() { return new string[] { Table, Number, Date, Done, DoneDate, Work, Taker, Account, Meter, Name, How, Year > 0 ? Year.ToString() : "", Version.ToString(), WorkBook, StaffBook }; }
 
     public bool Ready { get { return Table.Length > 0 && Number.Length > 0 && Date.Length > 0 && Done.Length > 0; } }
 
@@ -7599,6 +7602,9 @@ public class NaryadSetup {
             if (d.TryGetValue("фио", out v)) s.Name = v;
             if (d.TryGetValue("как", out v)) s.How = v;
             if (d.TryGetValue("год", out v)) int.TryParse(v, out s.Year);
+            if (d.TryGetValue("версия", out v)) int.TryParse(v, out s.Version);
+            if (d.TryGetValue("справочник_работ", out v)) s.WorkBook = v;
+            if (d.TryGetValue("справочник_работников", out v)) s.StaffBook = v;
         } catch (Exception) { }
         return s;
     }
@@ -8076,6 +8082,25 @@ public static class NaryadFinder {
         g.Sample = t;
         g.Records = h.Expected;
         g.Setup.Table = System.IO.Path.GetFileName(path);
+        g.Setup.Version = NaryadSetup.CurrentVersion;
+        // наряды программы базы (REGNZ): № Н-З N_NAR, дата оф. DOF, выполнил - табельный TNRVIP (0 - не выполнен)
+        if (t.FieldIndex("N_NAR") >= 0 && t.FieldIndex("DOF") >= 0 && t.FieldIndex("TNRVIP") >= 0) {
+            g.Setup.Number = "N_NAR";
+            g.Setup.Date = "DOF";
+            g.Setup.Done = "TNRVIP";
+            string[][] more = { new string[] { "DVIP", "d" }, new string[] { "KVRAB", "w" }, new string[] { "TNRPR", "t" }, new string[] { "NAB", "a" }, new string[] { "NCH", "m" } };
+            foreach (string[] m in more) {
+                if (t.FieldIndex(m[0]) < 0) continue;
+                if (m[1] == "d") g.Setup.DoneDate = m[0];
+                else if (m[1] == "w") g.Setup.Work = m[0];
+                else if (m[1] == "t") g.Setup.Taker = m[0];
+                else if (m[1] == "a") g.Setup.Account = m[0];
+                else g.Setup.Meter = m[0];
+            }
+            g.Setup.How = "сама";
+            g.Score = 100;
+            return g;
+        }
         int nf = t.Fields.Count;
         int[] filled = new int[nf];
         bool[,] has = new bool[nf, n];
@@ -8213,6 +8238,119 @@ public static class NaryadFinder {
     }
 }
 
+// Названия кодов из справочника базы: вид работы (KVRAB) -> «Определить принадлежность», табельный (TNRVIP) -> «Петров А.А.».
+// Справочник ищется сам среди небольших таблиц папки: поле с теми же кодами (лучше - то же имя), у каждого кода - текст.
+public class CodeNames {
+    public string Table = "", KeyField = "", NameField = "", Note = "";
+    readonly Dictionary<string, string> map = new Dictionary<string, string>();
+
+    public int Count { get { return map.Count; } }
+
+    static string Key(string v) {
+        v = v.Trim();
+        decimal d;
+        if (decimal.TryParse(v, NumberStyles.Number, CultureInfo.InvariantCulture, out d)) return d.ToString("0.##########", CultureInfo.InvariantCulture);
+        return v.ToUpperInvariant();
+    }
+
+    public string Name(string code) {
+        string n;
+        return map.TryGetValue(Key(code), out n) ? n : null;
+    }
+
+    // «таблица:поле кода:поле названия» - как запомнено в naryady.txt
+    public string Saved { get { return Table + ":" + KeyField + ":" + NameField; } }
+
+    public static CodeNames Load(string folder, string saved) {
+        string[] p = saved.Split(':');
+        if (p.Length != 3) return null;
+        try {
+            string path = Path.Combine(folder, p[0]);
+            if (!File.Exists(path)) return null;
+            DbfTable t = DbfTable.Load(path, null, null, 20000);
+            int k = t.FieldIndex(p[1]), n = t.FieldIndex(p[2]);
+            if (k < 0 || n < 0) return null;
+            CodeNames c = new CodeNames();
+            c.Table = p[0]; c.KeyField = p[1]; c.NameField = p[2];
+            c.Fill(t, k, n);
+            c.Note = c.Table + " (код " + c.KeyField + ", название " + c.NameField + ", кодов " + c.Count + ")";
+            return c;
+        } catch (Exception) { return null; }
+    }
+
+    void Fill(DbfTable t, int k, int n) {
+        for (int r = 0; r < t.Count; r++) {
+            string key = Key(DbfTable.Format(t.GetValue(r, k, null), true));
+            string name = DbfTable.Format(t.GetValue(r, n, null), true).Trim();
+            if (key.Length > 0 && key != "0" && name.Length > 0 && !map.ContainsKey(key)) map[key] = name;
+        }
+    }
+
+    // field - поле кода в таблице нарядов; codes - его значения в последних нарядах; people - нужны Ф.И.О. (табельные)
+    public static CodeNames Find(string folder, string field, List<string> codes, bool people, string skip) {
+        Dictionary<string, bool> want = new Dictionary<string, bool>();
+        foreach (string c in codes) { string k = Key(c); if (k.Length > 0 && k != "0") want[k] = true; }
+        if (want.Count == 0) return null;
+        CodeNames best = null;
+        int bestScore = 0;
+        foreach (string f in Directory.GetFiles(folder)) {
+            if (string.Compare(Path.GetExtension(f), ".dbf", StringComparison.OrdinalIgnoreCase) != 0) continue;
+            if (string.Compare(Path.GetFileName(f), skip, StringComparison.OrdinalIgnoreCase) == 0) continue;
+            DbfTable h;
+            try { h = DbfTable.LoadHeader(f); } catch (Exception) { continue; }
+            if (h.Expected > 20000 || h.Expected < 1) continue;
+            List<int> texts = new List<int>();
+            for (int j = 0; j < h.Fields.Count; j++) if (h.Fields[j].Type == 'C' && h.Fields[j].Length >= 6) texts.Add(j);
+            if (texts.Count == 0) continue;
+            DbfTable t;
+            try { t = DbfTable.Load(f, null, null, 20000); } catch (Exception) { continue; }
+            for (int k = 0; k < t.Fields.Count; k++) {
+                DbfField kf = t.Fields[k];
+                if (!(kf.Type == 'N' && kf.Decimals == 0 || kf.Type == 'C' && kf.Length <= 10)) continue;
+                Dictionary<string, int> seen = new Dictionary<string, int>();
+                for (int r = 0; r < t.Count; r++) {
+                    string v = Key(DbfTable.Format(t.GetValue(r, k, null), true));
+                    int c;
+                    seen.TryGetValue(v, out c);
+                    seen[v] = c + 1;
+                }
+                int hits = 0, dup = 0;
+                foreach (string c in want.Keys) { int n; if (seen.TryGetValue(c, out n)) { hits++; if (n > 1) dup++; } }
+                if (hits * 10 < want.Count * 6 || dup * 5 > hits) continue;
+                // название: для табельных - больше всего похожих на Ф.И.О., иначе - длинный текст
+                int name = -1, nameScore = -1;
+                foreach (int j in texts) {
+                    if (j == k) continue;
+                    int nl = 0, filled = 0;
+                    for (int r = 0; r < t.Count && r < 300; r++) {
+                        string v = DbfTable.Format(t.GetValue(r, j, null), true).Trim();
+                        if (v.Length == 0) continue;
+                        filled++;
+                        if (NaryadFinder.NameLike(v)) nl++;
+                    }
+                    if (filled == 0) continue;
+                    int sc = people ? nl * 100 / filled : (nl * 2 > filled ? 0 : 50) + t.Fields[j].Length;
+                    if (sc > nameScore) { nameScore = sc; name = j; }
+                }
+                if (name < 0 || people && nameScore < 50) continue;
+                int score = hits * 100 / want.Count + (string.Compare(kf.Name, field, StringComparison.OrdinalIgnoreCase) == 0 ? 50 : 0)
+                    + (people && kf.Name.ToUpperInvariant().StartsWith("T") ? 10 : 0);
+                if (score <= bestScore) continue;
+                bestScore = score;
+                best = new CodeNames();
+                best.Table = Path.GetFileName(f);
+                best.KeyField = kf.Name;
+                best.NameField = t.Fields[name].Name;
+                best.Fill(t, k, name);
+                best.Note = best.Table + " (код " + best.KeyField + ", название " + best.NameField + ", кодов " + best.Count + "; нашлось " + hits + " из " + want.Count + ")";
+            }
+        }
+        return best;
+    }
+}
+
+public delegate string ValueMap(string field, string value);
+
 // найденный наряд (или строка списка, которая не нашлась)
 public class NaryadHit {
     public int Line;
@@ -8233,7 +8371,7 @@ public class NaryadRow {
     public bool Done;
     public string[] Values;          // все поля записи текстом
 
-    public static NaryadRow Read(FileStream fs, DbfTable h, NaryadSetup s, int recNo) {
+    public static NaryadRow Read(FileStream fs, DbfTable h, NaryadSetup s, int recNo, ValueMap map) {
         long at = h.HeaderLength + (long)(recNo - 1) * h.RecordLength;
         if (recNo < 1 || at + h.RecordLength > fs.Length) return null;
         byte[] rec = new byte[h.RecordLength];
@@ -8251,6 +8389,8 @@ public class NaryadRow {
         if (s.Work.Length > 0 && h.FieldIndex(s.Work) >= 0) r.Work = r.Values[h.FieldIndex(s.Work)];
         string done = r.Values[h.FieldIndex(s.Done)];
         r.Done = done.Length > 0 && done != "0";
+        if (map != null) for (int j = 0; j < h.Fields.Count; j++) r.Values[j] = map(h.Fields[j].Name, r.Values[j]);
+        if (s.Work.Length > 0 && h.FieldIndex(s.Work) >= 0) r.Work = r.Values[h.FieldIndex(s.Work)];
         return r;
     }
 }
@@ -8299,7 +8439,10 @@ public class AccountTable {
 public class ObhodRow {
     public DateTime Date = DateTime.MinValue;
     public string[] Values;
-    public string Table = "";
+    public string Table = "", Fio = "";
+    public decimal Reading;
+    public bool HasReading;
+    public int Order, RecNo;        // таблица по порядку и запись - для одинаковых дат: позже внесённая - выше
 }
 
 // Обходы лицевого - как окно Ctrl+O программы базы: дата проверки, показание, ср. сутки, № участка, код и его название.
@@ -8341,7 +8484,10 @@ public class ObhodSource {
         return o;
     }
 
-    // столбцы как в окне Ctrl+O: № абонента, дата пров., показ., ср. сут., № уч., код, наименование, остальное
+    public const string Average = "*sr";      // столбец «Ср. сут.» - считается: (показание - предыдущее) / дней между проверками
+    public string Reading = "", DateField = "", NameField = "";
+
+    // столбцы как в окне Ctrl+O: № абонента, дата пров., показ., ср. сут., № уч., код, наименование, остальное (Ф.И.О. - в заголовок)
     void Arrange(string folder) {
         DbfTable h = Tables[0].Base.Header;
         DbfTable sample = Tables[0].Base.Sample;
@@ -8351,48 +8497,60 @@ public class ObhodSource {
         // дата проверки: DPR, иначе первая дата
         int dpr = h.FieldIndex("DPR");
         for (int j = 0; j < h.Fields.Count && dpr < 0; j++) if (h.Fields[j].Type == 'D') dpr = j;
-        if (dpr >= 0) order.Add(dpr);
-        for (int j = 0; j < h.Fields.Count; j++) if (h.Fields[j].Name.ToUpperInvariant().StartsWith("POK") && !order.Contains(j)) order.Add(j);
-        for (int j = 0; j < h.Fields.Count; j++) if ((h.Fields[j].Type == 'N' || h.Fields[j].Type == 'F') && h.Fields[j].Decimals >= 2 && !order.Contains(j)) order.Add(j);
+        if (dpr >= 0) { order.Add(dpr); DateField = h.Fields[dpr].Name; }
+        int pok = h.FieldIndex("POK");
+        for (int j = 0; j < h.Fields.Count && pok < 0; j++) if (h.Fields[j].Name.ToUpperInvariant().StartsWith("POK")) pok = j;
+        if (pok >= 0) { order.Add(pok); Reading = h.Fields[pok].Name; }
         int uch = h.FieldIndex("N_UCH");
-        if (uch >= 0 && !order.Contains(uch)) order.Add(uch);
-        // код: числовое поле KOD.../VID.../IST... или маленькие целые с немногими значениями
+        // код: KOD.../K_.../VID.../IST... или маленькие целые с немногими значениями
         int code = -1;
         for (int j = 0; j < h.Fields.Count && code < 0; j++) {
             string n = h.Fields[j].Name.ToUpperInvariant();
-            if (!order.Contains(j) && (n.StartsWith("KOD") || n.StartsWith("KD") || n.Contains("VID") || n.Contains("IST"))) code = j;
+            if (j != uch && !order.Contains(j) && h.Fields[j].Type == 'N' && (n.StartsWith("KOD") || n.StartsWith("KD") || n.StartsWith("K_") || n.Contains("VID") || n.Contains("IST"))) code = j;
         }
         for (int j = 0; j < h.Fields.Count && code < 0; j++) {
             DbfField f = h.Fields[j];
-            if (order.Contains(j) || f.Type != 'N' || f.Decimals != 0 || f.Length > 4) continue;
+            if (j == uch || order.Contains(j) || f.Type != 'N' || f.Decimals != 0 || f.Length > 4) continue;
             Dictionary<string, bool> d = new Dictionary<string, bool>();
             for (int r = 0; r < sample.Count; r++) d[DbfTable.Format(sample.GetValue(r, j, null), true)] = true;
             if (d.Count >= 2 && d.Count <= 60) code = j;
         }
+        // название кода - в самой таблице (K_RESO -> N_RESO), иначе справочник
+        int name = -1;
         if (code >= 0) {
-            order.Add(code);
             CodeField = h.Fields[code].Name;
-            string dir = CodeDirectory(folder, CodeField, sample, code);
-            if (dir != null) Names = CodeBook.Get(folder, dir, new string[] { CodeField });
+            string cu = CodeField.ToUpperInvariant();
+            string tail = cu.StartsWith("K_") ? cu.Substring(2) : cu.StartsWith("KOD") ? cu.Substring(3) : "";
+            for (int j = 0; j < h.Fields.Count && name < 0; j++) {
+                string n = h.Fields[j].Name.ToUpperInvariant();
+                if (h.Fields[j].Type == 'C' && (tail.Length > 0 && n == "N_" + tail || n.StartsWith("NAIM") || n.StartsWith("NAME"))) name = j;
+            }
+            if (name >= 0) NameField = h.Fields[name].Name;
+            else {
+                string dir = CodeDirectory(folder, CodeField, sample, code);
+                if (dir != null) Names = CodeBook.Get(folder, dir, new string[] { CodeField });
+            }
         }
-        for (int j = 0; j < h.Fields.Count; j++) if (!order.Contains(j)) order.Add(j);
-        foreach (int j in order) {
-            string n = h.Fields[j].Name, up = n.ToUpperInvariant();
-            Columns.Add(n);
-            string t;
-            if (j == nab) t = "№ Абонента";
-            else if (j == dpr) t = "Дата пров.";
-            else if (up.StartsWith("POK")) t = "Показ.";
-            else if (h.Fields[j].Decimals >= 2 && (up.Contains("SR") || up.Contains("SUT"))) t = "Ср. сут.";
-            else if (j == uch) t = "№ Уч.";
-            else if (j == code) t = "Код";
-            else t = FieldNames.Label(n) ?? n;
-            if (Titles.Contains(t)) t = FieldNames.Label(n) ?? n;
-            Titles.Add(t);
-            if (j == code) { Columns.Add(""); Titles.Add("Наименование"); NameColumn = Columns.Count - 1; }
+        int fio = h.FieldIndex("FIO");
+        Add(h, nab, "№ Абонента");
+        Add(h, dpr, "Дата пров.");
+        Add(h, pok, "Показ.");
+        if (pok >= 0 && dpr >= 0) { Columns.Add(Average); Titles.Add("Ср. сут."); }
+        Add(h, uch, "№ Уч.");
+        if (code >= 0) {
+            Add(h, code, "Код");
+            if (name >= 0) Add(h, name, "Наименование");
+            else { Columns.Add(""); Titles.Add("Наименование"); NameColumn = Columns.Count - 1; }
         }
+        for (int j = 0; j < h.Fields.Count; j++) if (j != fio && !Columns.Contains(h.Fields[j].Name)) Add(h, j, FieldNames.Label(h.Fields[j].Name) ?? h.Fields[j].Name);
         Columns.Add("");
         Titles.Add("Таблица");
+    }
+
+    void Add(DbfTable h, int j, string title) {
+        if (j < 0 || Columns.Contains(h.Fields[j].Name)) return;
+        Columns.Add(h.Fields[j].Name);
+        Titles.Add(title);
     }
 
     // справочник кодов: небольшая таблица с полем того же имени (каждый код один раз, при нём текст), где нашлось больше кодов
@@ -8440,30 +8598,51 @@ public class ObhodSource {
             List<int> rows;
             DbfTable part;
             try { part = t.Find(ls, out rows); } catch (Exception ex) { error = t.Name + ": " + ex.Message; continue; }
-            int date = -1;
+            int date = DateField.Length > 0 ? part.FieldIndex(DateField) : -1;
             for (int j = 0; j < part.Fields.Count && date < 0; j++) if (part.Fields[j].Type == 'D') date = j;
-            int dpr = part.FieldIndex("DPR");
-            if (dpr >= 0) date = dpr;
+            int pok = Reading.Length > 0 ? part.FieldIndex(Reading) : -1, fio = part.FieldIndex("FIO");
             foreach (int row in rows) {
                 ObhodRow o = new ObhodRow();
                 o.Table = t.Name;
+                o.Order = Tables.IndexOf(t);
+                o.RecNo = part.RecNos[row];
+                if (fio >= 0) o.Fio = DbfTable.Format(part.GetValue(row, fio, null), true).Trim();
+                object pv = pok >= 0 ? part.GetValue(row, pok, null) : null;
+                if (pv is decimal) { o.Reading = (decimal)pv; o.HasReading = true; }
                 o.Values = new string[Columns.Count];
                 for (int c = 0; c < Columns.Count; c++) {
-                    if (Columns[c].Length == 0) continue;
+                    if (Columns[c].Length == 0 || Columns[c] == Average) continue;
                     int j = part.FieldIndex(Columns[c]);
                     if (j >= 0) o.Values[c] = DbfTable.Format(part.GetValue(row, j, null), false).Trim();
                 }
                 if (NameColumn > 0 && Names != null) o.Values[NameColumn] = Names.Name(o.Values[NameColumn - 1] ?? "");
+                if (NameColumn > 0 && Names == null) o.Values[NameColumn] = "";
                 o.Values[Columns.Count - 1] = t.Name;
                 object d = date >= 0 ? part.GetValue(row, date, null) : null;
                 if (d is DateTime) o.Date = (DateTime)d;
-                string key = string.Join("|", o.Values, 0, Columns.Count - 1);
+                string key = o.Date.Ticks + "|" + string.Join("|", o.Values, 0, Columns.Count - 1);
                 if (seen.ContainsKey(key)) continue;
                 seen[key] = true;
                 r.Add(o);
             }
         }
-        r.Sort(delegate(ObhodRow a, ObhodRow b) { return b.Date.CompareTo(a.Date); });
+        r.Sort(delegate(ObhodRow a, ObhodRow b) {
+            int c = b.Date.CompareTo(a.Date);
+            if (c != 0) return c;
+            if (a.Order != b.Order) return a.Order.CompareTo(b.Order);
+            return b.RecNo.CompareTo(a.RecNo);
+        });
+        // ср. сутки: (показание - следующее ниже, более раннее) / дней между ними; один день - 0 (как в программе базы)
+        int sc = Columns.IndexOf(Average);
+        if (sc >= 0)
+            for (int i = 0; i < r.Count; i++) {
+                decimal avg = 0;
+                if (i + 1 < r.Count && r[i].HasReading && r[i + 1].HasReading && r[i].Date != DateTime.MinValue && r[i + 1].Date != DateTime.MinValue) {
+                    int days = (r[i].Date - r[i + 1].Date).Days;
+                    if (days > 0) avg = (r[i].Reading - r[i + 1].Reading) / days;
+                }
+                r[i].Values[sc] = avg.ToString("0.000", CultureInfo.InvariantCulture);
+            }
         return r;
     }
 }
@@ -8482,6 +8661,9 @@ public class NaryadForm : Form {
     ObhodSource obhod;
     AccountTable nzByLs;
     NaryadHit shownHit;
+    CodeNames workNames, staffNames;                       // вид работы и табельные -> названия, Ф.И.О.
+    Dictionary<long, string> plan = new Dictionary<long, string>();   // UNNAR -> «назначено на дату» (GRAF_NZ)
+    bool building, pendingRun;                             // индексы создаются в фоне; поиск - когда будут готовы
     readonly string setupFile;
     NaryadSetup setup;
     DbfTable header;                 // поля таблицы нарядов
@@ -8502,7 +8684,7 @@ public class NaryadForm : Form {
     static readonly Color DoneColor = Color.FromArgb(205, 240, 205), OpenColor = Color.FromArgb(255, 205, 205), MissColor = Color.FromArgb(235, 235, 235);
     Font bold, headFont;             // «ВЫПОЛНЕН» / «НЕ ВЫПОЛНЕН» - жирным (один шрифт на все ячейки); заголовок нарядов лицевого
 
-    public bool Busy { get { return busy; } }
+    public bool Busy { get { return busy || building || pendingRun; } }
 
     public NaryadForm(string dir, string folder) : this(dir, folder, null) { }
 
@@ -8619,7 +8801,11 @@ public class NaryadForm : Form {
         lower.Orientation = Orientation.Horizontal;
         lower.Panel1.Controls.Add(grid);
         lower.Panel2.Controls.Add(BuildAccountPanel());
-        grid.SelectionChanged += delegate { if (grid.CurrentRow != null && grid.CurrentRow.Index < hits.Count) ShowAccount(hits[grid.CurrentRow.Index]); };
+        grid.SelectionChanged += delegate {
+            // окно ещё не показано (или закрывается) - списки не трогать
+            if (!lsList.IsHandleCreated || IsDisposed || grid.CurrentRow == null || grid.CurrentRow.Index >= hits.Count) return;
+            try { ShowAccount(hits[grid.CurrentRow.Index]); } catch (Exception ex) { lsHead.Text = "Наряды лицевого не показались: " + ex.Message; }
+        };
         split.Panel2.Controls.Add(lower);
         split.Panel2.Controls.Add(bottom);
         Shown += delegate { lower.SplitterDistance = Math.Max(120, lower.Height * 2 / 5); };
@@ -8652,7 +8838,8 @@ public class NaryadForm : Form {
 
     // таблица нарядов: запомненная, иначе - найти самой
     void Prepare() {
-        if (setup.Ready && File.Exists(TablePath)) {
+        // таблицу «сама» нашла прежняя программа (не знала REGNZ) - найти заново
+        if (setup.Ready && (setup.How == "вручную" || setup.Version >= NaryadSetup.CurrentVersion) && File.Exists(TablePath)) {
             try {
                 header = DbfTable.LoadHeader(TablePath);
                 if (header.FieldIndex(setup.Number) >= 0 && header.FieldIndex(setup.Date) >= 0 && header.FieldIndex(setup.Done) >= 0) { Ready(); return; }
@@ -8666,22 +8853,101 @@ public class NaryadForm : Form {
         tableLabel.Text = "Таблица нарядов " + setup.Describe() + (setup.How == "сама" ? " (найдена программой - если не та, нажмите справа)" : "");
         ShowIndex();
         OpenAccountTables();
+        StartBuild();
+    }
+
+    // индексы последних лет - сразу при открытии окна, в фоне (первый раз - создать, потом - дописать новые наряды)
+    void StartBuild() {
+        if (building || header == null) return;
+        building = true;
+        stop = false;
+        List<int> years = Wanted();
+        System.Threading.Thread th = new System.Threading.Thread(delegate() {
+            List<string> notes = new List<string>();
+            string err = null;
+            try { EnsureAll(years, notes); } catch (Exception ex) { err = ex.Message; }
+            Post(delegate {
+                building = false;
+                findButton.Text = "Найти";
+                ShowIndex();
+                status.Text = err != null ? "Индексы нарядов не созданы: " + err : stop ? "Создание индексов остановлено - продолжится при поиске." :
+                    notes.Count > 0 ? "Индексы нарядов: " + string.Join("; ", notes.ToArray()) + "." : "Индексы нарядов готовы.";
+                if (pendingRun) { pendingRun = false; if (!stop) Run(); }
+            });
+        });
+        th.IsBackground = true;
+        th.Start();
+    }
+
+    static List<string> Codes(DbfTable t, string field) {
+        List<string> r = new List<string>();
+        int j = t.FieldIndex(field);
+        if (j < 0) return r;
+        for (int i = 0; i < t.Count; i++) {
+            string v = DbfTable.Format(t.GetValue(i, j, null), true).Trim();
+            if (v.Length > 0 && v != "0" && !r.Contains(v)) r.Add(v);
+        }
+        return r;
     }
 
     // в фоне: таблица нарядов и таблицы обходов - по индексу NAB программы базы (лицевой -> все записи)
     void OpenAccountTables() {
         string path = TablePath, fold = folder;
         obHead.Text = "Обходы лицевого (как Ctrl+O) - открываю таблицы обходов...";
+        NaryadSetup st = setup;
+        string setupPath = setupFile;
         System.Threading.Thread th = new System.Threading.Thread(delegate() {
             AccountTable nz = null;
             ObhodSource ob = null;
+            CodeNames wn = null, sn = null;
+            Dictionary<long, string> pl = new Dictionary<long, string>();
+            // названия работ и Ф.И.О. по табельным: запомненный справочник, иначе найти по кодам последних нарядов
+            try {
+                wn = st.WorkBook.Length > 0 ? CodeNames.Load(fold, st.WorkBook) : null;
+                sn = st.StaffBook.Length > 0 ? CodeNames.Load(fold, st.StaffBook) : null;
+                if (wn == null && st.Work.Length > 0 || sn == null && (st.Taker.Length > 0 || st.Done.Length > 0)) {
+                    DbfTable h = DbfTable.LoadHeader(path);
+                    DbfTable tail = NaryadFinder.Tail(path, h, 1500);
+                    if (wn == null && st.Work.Length > 0 && tail.FieldIndex(st.Work) >= 0 && (tail.Fields[tail.FieldIndex(st.Work)].Type == 'N'))
+                        wn = CodeNames.Find(fold, st.Work, Codes(tail, st.Work), false, st.Table);
+                    if (sn == null) {
+                        List<string> c = new List<string>();
+                        foreach (string f in new string[] { st.Taker, st.Done })
+                            if (f.Length > 0 && tail.FieldIndex(f) >= 0 && tail.Fields[tail.FieldIndex(f)].Type == 'N') c.AddRange(Codes(tail, f));
+                        if (c.Count > 0) sn = CodeNames.Find(fold, st.Done, c, true, st.Table);
+                    }
+                    if (wn != null) st.WorkBook = wn.Saved;
+                    if (sn != null) st.StaffBook = sn.Saved;
+                    if (wn != null || sn != null) st.Save(setupPath);
+                }
+            } catch (Exception) { }
+            // «назначено на дату»: график нарядов GRAF_NZ (UNNAR -> DVIP_PLAN)
+            try {
+                string g = Path.Combine(fold, "GRAF_NZ.DBF");
+                foreach (string f in Directory.GetFiles(fold)) if (string.Compare(Path.GetFileName(f), "GRAF_NZ.DBF", StringComparison.OrdinalIgnoreCase) == 0) g = f;
+                if (File.Exists(g)) {
+                    DbfTable gt = DbfTable.Load(g, null, null, 0);
+                    int u = gt.FieldIndex("UNNAR"), d = gt.FieldIndex("DVIP_PLAN");
+                    if (u >= 0 && d >= 0)
+                        for (int r = 0; r < gt.Count; r++) {
+                            long un;
+                            if (long.TryParse(DbfTable.Format(gt.GetValue(r, u, null), true), out un)) pl[un] = DbfTable.Format(gt.GetValue(r, d, null), true);
+                        }
+                }
+            } catch (Exception) { }
             try { nz = AccountTable.Open(path); } catch (Exception) { nz = null; }
             try { ob = ObhodSource.Find(fold); } catch (Exception ex) { ob = new ObhodSource(); ob.Note = "не получилось: " + ex.Message; }
             Post(delegate {
                 nzByLs = nz;
                 obhod = ob;
+                workNames = wn;
+                staffNames = sn;
+                plan = pl;
+                Report.Line("Наряды: названия работ - " + (wn == null ? "справочник не найден" : wn.Note) + "; Ф.И.О. по табельным - " + (sn == null ? "справочник не найден" : sn.Note)
+                    + "; назначено на дату (GRAF_NZ): " + pl.Count);
                 Report.Line("Наряды лицевого: " + (nz == null ? "-" : nz.Name + " - " + nz.Note));
-                Report.Line("Обходы (Ctrl+O): " + ob.Note + (ob.CodeField.Length > 0 ? "; код - поле " + ob.CodeField + (ob.Names != null ? ", названия: " + ob.Names.Note : ", справочник названий не найден") : ""));
+                Report.Line("Обходы (Ctrl+O): " + ob.Note + (ob.CodeField.Length > 0 ? "; код - поле " + ob.CodeField + (ob.NameField.Length > 0 ? ", название - поле " + ob.NameField
+                    : ob.Names != null ? ", названия: " + ob.Names.Note : ", справочник названий не найден") : "") + (ob.Reading.Length > 0 ? "; ср. сутки - считаются по " + ob.Reading + " и " + ob.DateField : ""));
                 BuildObhodColumns();
                 obHead.Text = ob.Tables.Count > 0 ? "Обходы лицевого (как Ctrl+O) - выберите найденный наряд" : "Обходы (Ctrl+O): " + ob.Note;
                 if (shownHit != null) ShowAccount(shownHit);
@@ -8709,7 +8975,8 @@ public class NaryadForm : Form {
         List<ObhodRow> rows = obhod.Rows(ls, out err);
         List<string> names = new List<string>();
         foreach (AccountTable t in obhod.Tables) names.Add(t.Name);
-        obHead.Text = "Обходы лицевого " + ls + " (как Ctrl+O): записей " + rows.Count + "  - таблицы " + string.Join(", ", names.ToArray())
+        string fio = rows.Count > 0 ? rows[0].Fio : "";
+        obHead.Text = "Обходы лицевого " + ls + (fio.Length > 0 ? " " + fio : "") + " (как Ctrl+O): записей " + rows.Count + "  - таблицы " + string.Join(", ", names.ToArray())
             + (err != null ? "; ошибка: " + err : "");
         foreach (ObhodRow r in rows) {
             string[] v = new string[r.Values.Length];
@@ -8764,6 +9031,7 @@ public class NaryadForm : Form {
         NaryadSetup g0 = list[0].Setup;
         setup.Number = g0.Number; setup.Date = g0.Date; setup.Done = g0.Done; setup.DoneDate = g0.DoneDate; setup.Work = g0.Work; setup.Taker = g0.Taker;
         setup.Account = g0.Account; setup.Meter = g0.Meter; setup.Name = g0.Name; setup.How = "сама";
+        setup.Version = NaryadSetup.CurrentVersion; setup.WorkBook = ""; setup.StaffBook = "";
         setup.Save(setupFile);
         try { header = DbfTable.LoadHeader(TablePath); } catch (Exception ex) { status.Text = "Таблица " + setup.Table + " не открывается: " + ex.Message; return; }
         status.Text = "Таблица нарядов найдена: " + setup.Table + ". Выполнен - зелёным, не выполнен - красным, не найден - серым.";
@@ -8782,9 +9050,10 @@ public class NaryadForm : Form {
             NaryadSetup s = d.Result;
             s.Year = setup.Year;
             s.How = "вручную";
+            s.Version = NaryadSetup.CurrentVersion;
             setup = s;
             setup.Save(setupFile);
-            indexes.Clear();
+            lock (indexes) indexes.Clear();
             try { header = DbfTable.LoadHeader(TablePath); } catch (Exception ex) { status.Text = "Таблица " + setup.Table + " не открывается: " + ex.Message; return; }
             Report.Line("Наряды: таблица выбрана вручную - " + setup.Describe());
             Ready();
@@ -8808,6 +9077,8 @@ public class NaryadForm : Form {
             columns.Add(f[0]);
             titles.Add(f[1]);
             AddColumn(f[1], f[1] == "Работа" ? 200 : f[1].Contains("Дата") ? 75 : 120);
+            // после лицевого - абонент из базы абонентов (Ф.И.О., адрес), если в таблице нарядов Ф.И.О. нет
+            if (f[1] == "Лицевой" && live != null && setup.Name.Length == 0) { columns.Add("*abon"); titles.Add("Абонент"); AddColumn("Абонент", 220); }
         }
         grid.RowCount = hits.Count;
         grid.Invalidate();
@@ -8824,7 +9095,7 @@ public class NaryadForm : Form {
     string Cell(NaryadHit h, int c) {
         if (c == 0) return h.Line.ToString();
         if (c == 1) return h.Query;
-        if (c == 2) return h.Number > 0 ? h.Year.ToString() + h.Number : "";
+        if (c == 2) return h.Number > 0 ? FullNumber(h.Year, h.Number) : "";
         if (c == 3) return h.Result;
         int k = c - 4;
         return h.Values != null && k >= 0 && k < h.Values.Length ? h.Values[k] : "";
@@ -8834,10 +9105,10 @@ public class NaryadForm : Form {
 
     NaryadIndex IndexOf(int year) {
         NaryadIndex x;
-        if (indexes.TryGetValue(year, out x)) return x;
+        lock (indexes) if (indexes.TryGetValue(year, out x)) return x;
         try { x = NaryadIndex.Load(NaryadIndex.FileFor(dir, year)); } catch (Exception) { x = null; }
         if (x != null && header != null && !x.Fits(setup, header)) x = null;     // от другой таблицы - не годится
-        if (x != null) indexes[year] = x;
+        if (x != null) lock (indexes) indexes[year] = x;
         return x;
     }
 
@@ -8875,7 +9146,7 @@ public class NaryadForm : Form {
             NaryadIndex x = IndexOf(y);
             if (x == null) { missing.Add(y); continue; }
             int a = x.Update(TablePath, header);
-            if (a < 0) { indexes.Remove(y); missing.Add(y); continue; }
+            if (a < 0) { lock (indexes) indexes.Remove(y); missing.Add(y); continue; }
             if (a > 0) { x.Save(NaryadIndex.FileFor(dir, y)); added += a; }
             ready[y] = x;
         }
@@ -8893,7 +9164,7 @@ public class NaryadForm : Form {
         double seconds = 0;
         foreach (KeyValuePair<int, NaryadIndex> kv in built) {
             kv.Value.Save(NaryadIndex.FileFor(dir, kv.Key));
-            indexes[kv.Key] = kv.Value;
+            lock (indexes) indexes[kv.Key] = kv.Value;
             ready[kv.Key] = kv.Value;
             count += kv.Value.Count;
             seconds = kv.Value.Seconds;
@@ -8933,6 +9204,14 @@ public class NaryadForm : Form {
     }
 
     internal void Run() {
+        if (building) {
+            // кнопка «Стоп» во время создания индексов - остановить; иначе - найти, как только индексы будут готовы
+            if (pendingRun) { stop = true; return; }
+            pendingRun = true;
+            findButton.Text = "Стоп";
+            status.Text = "Создаются индексы нарядов (один раз) - найду сразу, как будут готовы...   «Стоп» - прервать";
+            return;
+        }
         if (busy) { stop = true; return; }
         if (header == null) { MessageBox.Show(this, "Таблица нарядов ещё не выбрана.", Text); return; }
         List<string> lines = new List<string>();
@@ -9003,7 +9282,14 @@ public class NaryadForm : Form {
             k.State = done.Length > 0 && done != "0" ? 0 : 1;
             k.Result = k.State == 0 ? "ВЫПОЛНЕН" : "НЕ ВЫПОЛНЕН";
             k.Values = new string[columns.Count];
-            for (int c = 0; c < columns.Count; c++) k.Values[c] = DbfTable.Format(one.GetValue(0, one.FieldIndex(columns[c]), null), false).Trim();
+            for (int c = 0; c < columns.Count; c++) {
+                if (columns[c] == "*abon") {
+                    int a = setup.Account.Length > 0 ? one.FieldIndex(setup.Account) : -1;
+                    k.Values[c] = a >= 0 ? AbonentOf(DbfTable.Format(one.GetValue(0, a, null), true).Trim()) : "";
+                    continue;
+                }
+                k.Values[c] = MapValue(columns[c], DbfTable.Format(one.GetValue(0, one.FieldIndex(columns[c]), null), false).Trim());
+            }
             r.Add(k);
         }
         if (r.Count == 0) {
@@ -9055,6 +9341,22 @@ public class NaryadForm : Form {
         return sb.Append(status.Text).ToString();
     }
     public string IndexText { get { return indexLabel.Text + " | " + tableLabel.Text; } }
+
+    // значение для показа: код работы -> название, табельный -> Ф.И.О. (как в программе базы), 0 - пусто
+    string MapValue(string field, string value) {
+        bool work = string.Compare(field, setup.Work, StringComparison.OrdinalIgnoreCase) == 0;
+        bool staff = string.Compare(field, setup.Taker, StringComparison.OrdinalIgnoreCase) == 0 || string.Compare(field, setup.Done, StringComparison.OrdinalIgnoreCase) == 0;
+        if (!work && !staff) return value;
+        if (value == "0") return "";
+        CodeNames c = work ? workNames : staffNames;
+        string n = c != null && value.Length > 0 ? c.Name(value) : null;
+        return n != null ? n : value.Length > 0 && staff ? "таб. № " + value : value;
+    }
+
+    // ГодНомер как в программе базы: 202620936, 202600015
+    static string FullNumber(int year, long number) {
+        return year <= 0 ? number.ToString() : number < 100000 ? (year * 100000L + number).ToString() : year.ToString() + number;
+    }
 
     // ---------- наряды лицевого (как Ctrl+Z в программе базы) ----------
 
@@ -9127,7 +9429,9 @@ public class NaryadForm : Form {
         obList.Items.Clear();
         if (h == null || h.RecNo <= 0) { lsHead.Text = "Наряды лицевого - выберите найденный наряд"; return; }
         NaryadIndex own;
-        if (!indexes.TryGetValue(h.Year, out own)) return;
+        bool known;
+        lock (indexes) known = indexes.TryGetValue(h.Year, out own);
+        if (!known) return;
         string ls = own.AccountOf(h.RecNo);
         List<int> years = new List<int>();
         List<int> recs = new List<int>();
@@ -9153,7 +9457,7 @@ public class NaryadForm : Form {
         try {
             using (FileStream fs = new FileStream(TablePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 4096, FileOptions.RandomAccess))
                 foreach (int n in recs) {
-                    NaryadRow row = NaryadRow.Read(fs, header, setup, n);
+                    NaryadRow row = NaryadRow.Read(fs, header, setup, n, MapValue);
                     if (row != null) lsRows.Add(row);
                 }
         } catch (Exception ex) { lsHead.Text = "Наряды лицевого не прочитались: " + ex.Message; return; }
@@ -9163,7 +9467,7 @@ public class NaryadForm : Form {
             + (from.Length > 0 ? " (" + from + ")" : " (смотрим годы с индексом: " + JoinYears(KnownYears()) + ")");
         ShowObhod(ls);
         foreach (NaryadRow r in lsRows) {
-            ListViewItem it = new ListViewItem(new string[] { r.Year > 0 ? r.Year.ToString() + r.Number : r.Number.ToString(),
+            ListViewItem it = new ListViewItem(new string[] { FullNumber(r.Year, r.Number),
                 r.Date == DateTime.MinValue ? "" : r.Date.ToString("dd.MM.yyyy"), r.Work, r.Done ? "выполнен" : "НЕТ" });
             it.BackColor = r.Done ? DoneColor : OpenColor;
             lsList.Items.Add(it);
@@ -9179,7 +9483,8 @@ public class NaryadForm : Form {
 
     // года, у которых есть индекс (файлы в папке программы и открытые)
     List<int> KnownYears() {
-        List<int> r = new List<int>(indexes.Keys);
+        List<int> r;
+        lock (indexes) r = new List<int>(indexes.Keys);
         try {
             foreach (string f in Directory.GetFiles(dir, "indeks_naryady_*.txt")) {
                 int y;
@@ -9188,6 +9493,16 @@ public class NaryadForm : Form {
         } catch (Exception) { }
         r.Sort();
         return r;
+    }
+
+    // «Иванов И.И., Широкая ул. 6//23» - для столбца итога
+    string AbonentOf(string ls) {
+        string a = AddressOf(ls);
+        if (a.Length == 0) return "";
+        int p = a.IndexOf("  (");
+        string adr = (p >= 0 ? a.Substring(0, p) : a).Replace("▶", "").Trim();
+        string fio = p >= 0 ? a.Substring(p + 3).TrimEnd(')') : "";
+        return (fio + (fio.Length > 0 && adr.Length > 0 ? ", " : "") + adr).Trim();
     }
 
     // адрес лицевого из базы абонентов (по индексу): « ▶ Широкая ул. 6//23 (Иванов И.И.)»
@@ -9213,16 +9528,23 @@ public class NaryadForm : Form {
     void ShowDetails(NaryadRow r) {
         details.Items.Clear();
         List<int> order = new List<int>();
-        foreach (string f in new string[] { setup.Number, setup.Date, setup.Work, setup.Taker, setup.Done, setup.DoneDate, setup.Meter }) {
+        foreach (string f in new string[] { setup.Number, setup.Date, setup.Work, setup.Taker, setup.Done, setup.DoneDate, setup.Meter, "TIPCH", "TEL", "PRIM" }) {
             int j = f.Length > 0 ? header.FieldIndex(f) : -1;
             if (j >= 0 && !order.Contains(j)) order.Add(j);
         }
         for (int j = 0; j < header.Fields.Count; j++) if (!order.Contains(j)) order.Add(j);
+        int un = header.FieldIndex("UNNAR"), tip = header.FieldIndex("TIPCH");
         foreach (int j in order) {
             string name = header.Fields[j].Name;
             ListViewItem it = new ListViewItem(new string[] { LabelOf(name), r.Values[j] });
             if (string.Compare(name, setup.Done, StringComparison.OrdinalIgnoreCase) == 0) it.BackColor = r.Done ? DoneColor : OpenColor;
             details.Items.Add(it);
+            // «Назначено на дату» - из графика нарядов (GRAF_NZ), после типа счётчика
+            if (j == (tip >= 0 ? tip : order[order.Count - 1]) && un >= 0) {
+                long u;
+                string d;
+                if (long.TryParse(r.Values[un], out u) && plan.TryGetValue(u, out d)) details.Items.Insert(details.Items.Count, new ListViewItem(new string[] { "Назначено на дату", d }));
+            }
         }
     }
 
@@ -9233,6 +9555,7 @@ public class NaryadForm : Form {
         foreach (string[] r in roles) if (r[0].Length > 0 && string.Compare(r[0], field, StringComparison.OrdinalIgnoreCase) == 0) return r[1];
         string up = field.ToUpperInvariant();
         if (up.Contains("TIP") && up.Contains("SCH") || up == "TIPCH") return "Тип сч.";
+        if (up == "UNNAR") return "Полный № наряда";
         if (up.Contains("NAZ")) return "Назначено на дату";
         if (up.StartsWith("TEL")) return "Тел.";
         if (up.StartsWith("PRIM")) return "Примечание";
