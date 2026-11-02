@@ -6133,6 +6133,13 @@ public class AbonentSearch : Form {
         listButton.Margin = new Padding(12, 3, 3, 0);
         listButton.Click += delegate { OpenBatch(); };
         row.Controls.Add(listButton);
+        Button naryadButton = new Button();
+        naryadButton.Text = "&Наряды...";
+        naryadButton.AutoSize = true;
+        naryadButton.Margin = new Padding(6, 3, 3, 0);
+        naryadButton.Click += delegate { OpenNaryady(); };
+        new ToolTip().SetToolTip(naryadButton, "Номер наряда (или список) - выполнен он или нет");
+        row.Controls.Add(naryadButton);
         ssButton.Text = "Сельсоветы ▼";
         ssButton.AutoSize = true;
         ssButton.Margin = new Padding(6, 3, 3, 0);
@@ -6981,6 +6988,19 @@ public class AbonentSearch : Form {
         LastBatch.Show(this);
     }
 
+    internal NaryadForm LastNaryad;
+
+    // окно нарядов: по номеру - выполнен или нет (таблица нарядов - в папке базы)
+    internal void OpenNaryady() {
+        if (folder == null || !Directory.Exists(folder)) {
+            MessageBox.Show(this, "Папка базы не найдена. Нажмите \"Где искать...\" и выберите её.", Text);
+            return;
+        }
+        if (LastNaryad != null && !LastNaryad.IsDisposed) { LastNaryad.Activate(); return; }
+        LastNaryad = new NaryadForm(Dir, folder);
+        LastNaryad.Show(this);
+    }
+
     // Выбор папки и таблицы абонентов, если сама не нашлась или нашлась не та
     void ChooseBase() {
         Form d = new Form();
@@ -7535,6 +7555,1214 @@ public class BatchSearch : Form {
         }
         try { Spreadsheet.Open("Поиск_по_списку", headers, rows, styles); }
         catch (Exception ex) { MessageBox.Show(this, "Не удалось выгрузить в Excel:\n" + ex.Message, Text); }
+    }
+}
+
+// ===================== Наряды (Н-З) =====================
+// В программе базы наряды видны по Ctrl+Z (по адресу). Здесь - по номеру: ГодНомер (202620936 = 2026 год, наряд 20936)
+// или просто номер за выбранный год; выполнен - заполнено «Выполнил Н-З». Индексов у таблицы нарядов нет - программа
+// делает свой индекс года (номер наряда -> номер записи) в своей папке: для нового года таблица читается с конца
+// (новые наряды - в конце), до старых лет; дальше индекс только дополняется новыми записями. Таблица - только чтение.
+
+// какая таблица - наряды и какое поле что значит (naryady.txt в папке программы)
+public class NaryadSetup {
+    public string Table = "", Number = "", Date = "", Done = "", DoneDate = "", Work = "", Taker = "", Account = "", Meter = "", Name = "";
+    public string How = "";          // «сама» - найдена программой, «вручную» - выбрана в настройке
+    public int Year;                 // последний выбранный год
+
+    static readonly string[] Keys = { "таблица", "номер", "дата", "выполнил", "дата_выполнения", "работа", "принял", "лицевой", "счётчик", "фио", "как", "год" };
+
+    string[] Values() { return new string[] { Table, Number, Date, Done, DoneDate, Work, Taker, Account, Meter, Name, How, Year > 0 ? Year.ToString() : "" }; }
+
+    public bool Ready { get { return Table.Length > 0 && Number.Length > 0 && Date.Length > 0 && Done.Length > 0; } }
+
+    public static NaryadSetup Load(string file) {
+        NaryadSetup s = new NaryadSetup();
+        try {
+            if (!File.Exists(file)) return s;
+            Dictionary<string, string> d = new Dictionary<string, string>();
+            foreach (string line in File.ReadAllLines(file, Encoding.UTF8)) {
+                int e = line.IndexOf('=');
+                if (line.StartsWith("#") || e <= 0) continue;
+                d[line.Substring(0, e).Trim()] = line.Substring(e + 1).Trim();
+            }
+            string v;
+            if (d.TryGetValue("таблица", out v)) s.Table = v;
+            if (d.TryGetValue("номер", out v)) s.Number = v;
+            if (d.TryGetValue("дата", out v)) s.Date = v;
+            if (d.TryGetValue("выполнил", out v)) s.Done = v;
+            if (d.TryGetValue("дата_выполнения", out v)) s.DoneDate = v;
+            if (d.TryGetValue("работа", out v)) s.Work = v;
+            if (d.TryGetValue("принял", out v)) s.Taker = v;
+            if (d.TryGetValue("лицевой", out v)) s.Account = v;
+            if (d.TryGetValue("счётчик", out v)) s.Meter = v;
+            if (d.TryGetValue("фио", out v)) s.Name = v;
+            if (d.TryGetValue("как", out v)) s.How = v;
+            if (d.TryGetValue("год", out v)) int.TryParse(v, out s.Year);
+        } catch (Exception) { }
+        return s;
+    }
+
+    public void Save(string file) {
+        try {
+            List<string> lines = new List<string>();
+            lines.Add("# Наряды (окно «Наряды» программы «Поиск абонента»): таблица нарядов в папке базы и её поля. Файл можно удалить - программа найдёт таблицу заново.");
+            string[] v = Values();
+            for (int i = 0; i < Keys.Length; i++) lines.Add(Keys[i] + "=" + v[i]);
+            File.WriteAllLines(file, lines.ToArray(), Encoding.UTF8);
+        } catch (Exception) { }
+    }
+
+    public string Describe() {
+        if (!Ready) return "таблица нарядов не выбрана";
+        return Table + ": номер - " + Number + ", дата - " + Date + ", выполнил - " + Done + (DoneDate.Length > 0 ? ", дата выполнения - " + DoneDate : "");
+    }
+}
+
+// поля записи наряда прямо из байтов (для индекса не нужно разбирать всю запись)
+public static class NaryadBytes {
+    // целое число поля (номер наряда): N, F, I или текст из цифр; нет - -1
+    public static long Number(byte[] r, int start, DbfField f) {
+        int at = start + f.Offset;
+        if (f.Type == 'I' && f.Length == 4) return BitConverter.ToInt32(r, at);
+        if (f.Type != 'N' && f.Type != 'F' && f.Type != 'C') return -1;
+        long n = 0;
+        int digits = 0;
+        for (int k = 0; k < f.Length; k++) {
+            byte b = r[at + k];
+            if (b >= (byte)'0' && b <= (byte)'9') {
+                if (digits > 12) return -1;
+                n = n * 10 + (b - (byte)'0');
+                digits++;
+            } else if (b == (byte)' ' || b == 0) {
+                if (digits > 0) {
+                    // число кончилось - дальше только пробелы
+                    for (int q = k; q < f.Length; q++) if (r[at + q] != (byte)' ' && r[at + q] != 0) return -1;
+                    break;
+                }
+            } else if (b == (byte)'.' && f.Type != 'C') {
+                // дробная часть - только нули
+                for (int q = k + 1; q < f.Length; q++) if (r[at + q] != (byte)'0' && r[at + q] != (byte)' ') return -1;
+                break;
+            } else return -1;
+        }
+        return digits == 0 ? -1 : n;
+    }
+
+    // год даты: D (ГГГГММДД) или T (юлианский день); нет - 0
+    public static int Year(byte[] r, int start, DbfField f) {
+        int at = start + f.Offset;
+        if (f.Type == 'D') {
+            int y = 0;
+            for (int k = 0; k < 4; k++) {
+                byte b = r[at + k];
+                if (b < (byte)'0' || b > (byte)'9') return 0;
+                y = y * 10 + (b - (byte)'0');
+            }
+            return y;
+        }
+        if (f.Type == 'T' && f.Length == 8) {
+            int day = BitConverter.ToInt32(r, at);
+            if (day <= 1721426) return 0;
+            try { return new DateTime(1, 1, 1).AddDays(day - 1721426).Year; } catch (ArgumentOutOfRangeException) { return 0; }
+        }
+        return 0;
+    }
+}
+
+// Свой индекс нарядов одного года: номер -> номера записей таблицы. Файл indeks_naryady_ГГГГ.txt в папке программы.
+public class NaryadIndex {
+    public int Year;
+    public string Table = "", NumberField = "", DateField = "";
+    public int RecordLength, From, To;      // просмотрены записи From..To (с 1)
+    public bool Whole;                      // смотрели всю таблицу (иначе - с конца до старых лет)
+    public DateTime Built, Updated;
+    public double Seconds;
+    readonly Dictionary<long, List<int>> map = new Dictionary<long, List<int>>();
+    public int Count;
+
+    public const int StopRun = 20000;       // столько записей старых лет подряд - дальше не смотрим
+
+    public static string FileFor(string dir, int year) { return Path.Combine(dir, "indeks_naryady_" + year + ".txt"); }
+
+    public void Add(long number, int recNo) {
+        List<int> l;
+        if (!map.TryGetValue(number, out l)) { l = new List<int>(1); map[number] = l; }
+        if (!l.Contains(recNo)) { l.Add(recNo); Count++; }
+    }
+
+    public List<int> Find(long number) {
+        List<int> l;
+        return map.TryGetValue(number, out l) ? l : new List<int>();
+    }
+
+    public long MinNumber, MaxNumber;
+
+    void Range() {
+        MinNumber = long.MaxValue; MaxNumber = 0;
+        foreach (long k in map.Keys) { if (k < MinNumber) MinNumber = k; if (k > MaxNumber) MaxNumber = k; }
+        if (map.Count == 0) MinNumber = 0;
+    }
+
+    // индекс подходит к этой таблице и этим полям
+    public bool Fits(NaryadSetup s, DbfTable h) {
+        return string.Compare(Table, s.Table, StringComparison.OrdinalIgnoreCase) == 0 && string.Compare(NumberField, s.Number, StringComparison.OrdinalIgnoreCase) == 0
+            && string.Compare(DateField, s.Date, StringComparison.OrdinalIgnoreCase) == 0 && RecordLength == h.RecordLength;
+    }
+
+    public static NaryadIndex Load(string file) {
+        if (!File.Exists(file)) return null;
+        NaryadIndex x = new NaryadIndex();
+        bool data = false;
+        foreach (string line in File.ReadAllLines(file, Encoding.UTF8)) {
+            if (line.Length == 0 || line.StartsWith("#")) continue;
+            if (data) {
+                int t = line.IndexOf('\t');
+                long n;
+                if (t <= 0 || !long.TryParse(line.Substring(0, t), out n)) continue;
+                foreach (string rn in line.Substring(t + 1).Split(',')) {
+                    int r;
+                    if (int.TryParse(rn, out r)) x.Add(n, r);
+                }
+                continue;
+            }
+            if (line == "записи:") { data = true; continue; }
+            int e = line.IndexOf('=');
+            if (e <= 0) continue;
+            string k = line.Substring(0, e), v = line.Substring(e + 1);
+            DateTime d;
+            switch (k) {
+                case "год": int.TryParse(v, out x.Year); break;
+                case "таблица": x.Table = v; break;
+                case "номер": x.NumberField = v; break;
+                case "дата": x.DateField = v; break;
+                case "длина_записи": int.TryParse(v, out x.RecordLength); break;
+                case "с_записи": int.TryParse(v, out x.From); break;
+                case "по_запись": int.TryParse(v, out x.To); break;
+                case "вся_таблица": x.Whole = v == "да"; break;
+                case "создан": if (DateTime.TryParseExact(v, "dd.MM.yyyy HH:mm", CultureInfo.InvariantCulture, DateTimeStyles.None, out d)) x.Built = d; break;
+                case "обновлён": if (DateTime.TryParseExact(v, "dd.MM.yyyy HH:mm", CultureInfo.InvariantCulture, DateTimeStyles.None, out d)) x.Updated = d; break;
+            }
+        }
+        if (!data || x.Year == 0) return null;
+        x.Range();
+        return x;
+    }
+
+    // запись через временный файл: свет погас при записи - старый индекс цел
+    public void Save(string file) {
+        StringBuilder sb = new StringBuilder();
+        sb.Append("# Свой индекс нарядов программы «Поиск абонента»: номер наряда -> номера записей таблицы. Можно удалить - создастся заново.\r\n");
+        sb.Append("год=").Append(Year).Append("\r\n");
+        sb.Append("таблица=").Append(Table).Append("\r\n");
+        sb.Append("номер=").Append(NumberField).Append("\r\n");
+        sb.Append("дата=").Append(DateField).Append("\r\n");
+        sb.Append("длина_записи=").Append(RecordLength).Append("\r\n");
+        sb.Append("с_записи=").Append(From).Append("\r\n");
+        sb.Append("по_запись=").Append(To).Append("\r\n");
+        sb.Append("вся_таблица=").Append(Whole ? "да" : "нет").Append("\r\n");
+        sb.Append("создан=").Append(Built.ToString("dd.MM.yyyy HH:mm", CultureInfo.InvariantCulture)).Append("\r\n");
+        sb.Append("обновлён=").Append(Updated.ToString("dd.MM.yyyy HH:mm", CultureInfo.InvariantCulture)).Append("\r\n");
+        sb.Append("записи:\r\n");
+        List<long> keys = new List<long>(map.Keys);
+        keys.Sort();
+        foreach (long k in keys) {
+            List<int> l = map[k];
+            sb.Append(k).Append('\t');
+            for (int i = 0; i < l.Count; i++) { if (i > 0) sb.Append(','); sb.Append(l[i]); }
+            sb.Append("\r\n");
+        }
+        string tmp = file + ".tmp";
+        File.WriteAllText(tmp, sb.ToString(), new UTF8Encoding(true));
+        if (File.Exists(file)) File.Delete(file);
+        File.Move(tmp, file);
+    }
+
+    // новый индекс года: с конца таблицы к началу (новые наряды - в конце), пока не пойдут подряд StopRun записей
+    // прошлых лет; whole - вся таблица. stop() - прервать (вернёт null)
+    public static NaryadIndex Build(string path, DbfTable h, NaryadSetup s, int year, bool whole, LoadProgress progress, StopCheck stop) {
+        DateTime started = DateTime.Now;
+        NaryadIndex x = new NaryadIndex();
+        x.Year = year;
+        x.Table = s.Table;
+        x.NumberField = s.Number;
+        x.DateField = s.Date;
+        x.RecordLength = h.RecordLength;
+        x.Whole = whole;
+        DbfField nf = h.Fields[h.FieldIndex(s.Number)], df = h.Fields[h.FieldIndex(s.Date)];
+        int len = h.RecordLength;
+        using (FileStream fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 1 << 16)) {
+            int count = NameIndex.RecordCount(fs);
+            long fit = (fs.Length - h.HeaderLength) / len;
+            if (fit < count) count = (int)fit;
+            x.To = count;
+            x.From = count + 1;
+            const int chunk = 2048;
+            byte[] buf = new byte[chunk * len];
+            int older = 0, seen = 0;
+            int end = count;          // читаем записи (end - n, end]
+            while (end > 0) {
+                int n = Math.Min(chunk, end);
+                int first = end - n + 1;
+                fs.Seek(h.HeaderLength + (long)(first - 1) * len, SeekOrigin.Begin);
+                int got = DbfTable.ReadUpTo(fs, buf, n * len) / len;
+                bool enough = false;
+                for (int i = got - 1; i >= 0; i--) {
+                    int p = i * len, recNo = first + i;
+                    x.From = recNo;
+                    seen++;
+                    if (buf[p] == (byte)'*' || buf[p] == 0x1A) continue;
+                    int y = NaryadBytes.Year(buf, p, df);
+                    if (y == year) {
+                        long num = NaryadBytes.Number(buf, p, nf);
+                        if (num > 0) x.Add(num, recNo);
+                        older = 0;
+                    } else if (y > year) older = 0;
+                    else if (y > 0 && y < year) {
+                        older++;
+                        if (!whole && older >= StopRun) { enough = true; break; }
+                    }
+                }
+                end = first - 1;
+                if (progress != null) progress(seen, count);
+                if (stop != null && stop()) return null;
+                if (enough) break;
+            }
+        }
+        x.Built = x.Updated = DateTime.Now;
+        x.Seconds = (DateTime.Now - started).TotalSeconds;
+        x.Range();
+        return x;
+    }
+
+    // дописать наряды года из новых записей таблицы (после To); -1 - таблица стала короче (её пересобрали) - индекс создать заново
+    public int Update(string path, DbfTable h) {
+        DbfField nf = h.Fields[h.FieldIndex(NumberField)], df = h.Fields[h.FieldIndex(DateField)];
+        int len = h.RecordLength, was = Count;
+        using (FileStream fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 1 << 16)) {
+            int count = NameIndex.RecordCount(fs);
+            long fit = (fs.Length - h.HeaderLength) / len;
+            if (fit < count) count = (int)fit;
+            if (count < To) return -1;
+            const int chunk = 2048;
+            byte[] buf = new byte[chunk * len];
+            int next = To + 1;
+            fs.Seek(h.HeaderLength + (long)(next - 1) * len, SeekOrigin.Begin);
+            while (next <= count) {
+                int n = Math.Min(chunk, count - next + 1);
+                int got = DbfTable.ReadUpTo(fs, buf, n * len) / len;
+                for (int i = 0; i < got; i++) {
+                    int p = i * len;
+                    if (buf[p] == (byte)'*' || buf[p] == 0x1A) continue;
+                    if (NaryadBytes.Year(buf, p, df) != Year) continue;
+                    long num = NaryadBytes.Number(buf, p, nf);
+                    if (num > 0) Add(num, next + i);
+                }
+                if (got < n) { count = next + got - 1; break; }
+                next += got;
+            }
+            To = count;
+        }
+        Updated = DateTime.Now;
+        Range();
+        return Count - was;
+    }
+}
+
+public delegate bool StopCheck();
+
+// Какая таблица папки - наряды: смотрим последние записи каждой таблицы с датами и угадываем поля по виду значений
+// (номер - целое, растёт от записи к записи; дата оформления; «выполнил» - Ф.И.О., заполнено не у всех, вместе с датой
+// выполнения; принял, работа, лицевой) и по именам полей (NZ, NAR, VYP, ISP, PRIN...)
+public class NaryadGuess {
+    public NaryadSetup Setup = new NaryadSetup();
+    public int Score, Records;
+    public string Path = "", Why = "";
+    public DbfTable Sample;            // последние записи (для отчёта - только вид значений)
+    public bool Usable { get { return Setup.Ready; } }
+}
+
+public static class NaryadFinder {
+    const int SampleSize = 600;
+
+    public static List<NaryadGuess> Guess(string folder, LoadProgress progress) {
+        List<NaryadGuess> r = new List<NaryadGuess>();
+        List<string> files = new List<string>();
+        foreach (string f in Directory.GetFiles(folder))
+            if (string.Compare(System.IO.Path.GetExtension(f), ".dbf", StringComparison.OrdinalIgnoreCase) == 0) files.Add(f);
+        for (int i = 0; i < files.Count; i++) {
+            if (progress != null) progress(i, files.Count);
+            NaryadGuess g;
+            try { g = Judge(files[i]); } catch (Exception) { g = null; }
+            if (g != null) r.Add(g);
+        }
+        r.Sort(delegate(NaryadGuess a, NaryadGuess b) {
+            if (a.Usable != b.Usable) return a.Usable ? -1 : 1;
+            return b.Score.CompareTo(a.Score);
+        });
+        return r;
+    }
+
+    // последние записи таблицы (в порядке файла)
+    public static DbfTable Tail(string path, DbfTable h, int want) {
+        DbfTable part = DbfTable.CreateLike(h);
+        part.FilePath = path;
+        int len = h.RecordLength;
+        using (FileStream fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 1 << 16)) {
+            int count = NameIndex.RecordCount(fs);
+            long fit = (fs.Length - h.HeaderLength) / len;
+            if (fit < count) count = (int)fit;
+            int n = Math.Min(count, want * 2);
+            if (n <= 0) return part;
+            byte[] buf = new byte[n * len];
+            fs.Seek(h.HeaderLength + (long)(count - n) * len, SeekOrigin.Begin);
+            int got = DbfTable.ReadUpTo(fs, buf, n * len) / len;
+            List<int> keep = new List<int>();
+            for (int i = got - 1; i >= 0 && keep.Count < want; i--) {
+                byte f = buf[i * len];
+                if (f != (byte)'*' && f != 0x1A) keep.Insert(0, i);
+            }
+            foreach (int i in keep) part.AddRecord(buf, i * len, count - n + i + 1);
+        }
+        return part;
+    }
+
+    static bool Has(string name, params string[] parts) {
+        string n = name.ToUpperInvariant();
+        foreach (string p in parts) if (n.Contains(p)) return true;
+        return false;
+    }
+
+    // похоже на Ф.И.О.: инициалы «А.С.» или два-три слова с заглавной буквы (кириллица)
+    public static bool NameLike(string s) {
+        s = s.Trim();
+        if (s.Length < 4) return false;
+        int cyr = 0, other = 0;
+        foreach (char c in s) {
+            if (c >= 'А' && c <= 'я' || c == 'Ё' || c == 'ё') cyr++;
+            else if (!(c == ' ' || c == '.' || c == '-' || c == ',')) other++;
+        }
+        if (cyr < 3 || other * 4 > s.Length) return false;
+        for (int i = 0; i + 3 < s.Length; i++)
+            if (char.IsUpper(s[i]) && s[i + 1] == '.' && (char.IsUpper(s[i + 2]) || s[i + 2] == ' ' && char.IsUpper(s[i + 3]))) return true;
+        int caps = 0, words = 0;
+        foreach (string w in s.Split(new char[] { ' ' }, StringSplitOptions.RemoveEmptyEntries)) {
+            words++;
+            if (char.IsUpper(w[0]) && (w.Length == 1 || char.IsLower(w[1]))) caps++;
+        }
+        return words >= 2 && caps >= 2;
+    }
+
+    static string Text(DbfTable t, int row, int j) { return DbfTable.Format(t.GetValue(row, j, null), true).Trim(); }
+
+    public static NaryadGuess Judge(string path) {
+        DbfTable h = DbfTable.LoadHeader(path);
+        bool dates = false;
+        foreach (DbfField f in h.Fields) if (f.Type == 'D' || f.Type == 'T') dates = true;
+        if (!dates || h.Expected < 20) return null;
+        DbfTable t = Tail(path, h, SampleSize);
+        int n = t.Count;
+        if (n < 20) return null;
+        NaryadGuess g = new NaryadGuess();
+        g.Path = path;
+        g.Sample = t;
+        g.Records = h.Expected;
+        g.Setup.Table = System.IO.Path.GetFileName(path);
+        int nf = t.Fields.Count;
+        int[] filled = new int[nf];
+        bool[,] has = new bool[nf, n];
+        for (int j = 0; j < nf; j++)
+            for (int r = 0; r < n; r++) {
+                string v = Text(t, r, j);
+                bool ok = v.Length > 0 && v != "0";
+                has[j, r] = ok;
+                if (ok) filled[j]++;
+            }
+
+        // номер наряда: целое, почти у всех, разное, растёт от записи к записи
+        int bestNum = -1, numScore = 0;
+        for (int j = 0; j < nf; j++) {
+            DbfField f = t.Fields[j];
+            if (!(f.Type == 'N' && f.Decimals == 0 && f.Length <= 10 || f.Type == 'I' || f.Type == 'C' && f.Length <= 12)) continue;
+            if (Has(f.Name, "NAB", "TEL", "PHON", "KUL", "DOM", "KV", "INDEX", "ULIC") || f.Name.ToUpperInvariant() == "UL") continue;
+            List<long> vals = new List<long>();
+            bool bad = false;
+            for (int r = 0; r < n && !bad; r++) {
+                if (!has[j, r]) continue;
+                string v = Text(t, r, j);
+                long x;
+                if (!long.TryParse(v, NumberStyles.Integer, CultureInfo.InvariantCulture, out x)) {
+                    decimal d;
+                    if (decimal.TryParse(v, NumberStyles.Float, CultureInfo.InvariantCulture, out d) && d == Math.Floor(d)) x = (long)d;
+                    else { bad = true; break; }
+                }
+                if (x <= 0 || x >= 10000000) { bad = true; break; }
+                vals.Add(x);
+            }
+            if (bad || vals.Count < n * 9 / 10) continue;
+            Dictionary<long, bool> distinct = new Dictionary<long, bool>();
+            foreach (long v in vals) distinct[v] = true;
+            int up = 0;
+            for (int i = 1; i < vals.Count; i++) if (vals[i] > vals[i - 1]) up++;
+            int sc = 2;
+            if (distinct.Count * 10 >= vals.Count * 9) sc += 2;
+            if (distinct.Count * 100 >= vals.Count * 98) sc += 1;
+            if (up * 10 >= (vals.Count - 1) * 7) sc += 3;
+            if (up * 10 >= (vals.Count - 1) * 9) sc += 1;
+            if (Has(f.Name, "NZ", "NAR", "NOM", "NUM", "NN") || f.Name.ToUpperInvariant().StartsWith("N_")) sc += 2;
+            if (sc > numScore) { numScore = sc; bestNum = j; }
+        }
+
+        // дата оформления: почти у всех, не убывает
+        int bestDate = -1, dateScore = 0;
+        for (int j = 0; j < nf; j++) {
+            DbfField f = t.Fields[j];
+            if (f.Type != 'D' && f.Type != 'T') continue;
+            if (filled[j] * 10 < n * 9) continue;
+            int up = 0, pairs = 0;
+            DateTime prev = DateTime.MinValue;
+            for (int r = 0; r < n; r++) {
+                object o = t.GetValue(r, j, null);
+                if (!(o is DateTime)) continue;
+                DateTime d = (DateTime)o;
+                if (prev != DateTime.MinValue) { pairs++; if (d >= prev) up++; }
+                prev = d;
+            }
+            int sc = 2;
+            if (pairs > 0 && up * 10 >= pairs * 8) sc += 2;
+            if (Has(f.Name, "OF", "DAT", "DT")) sc += 1;
+            if (Has(f.Name, "VYP", "VIP", "ISP", "NAZ")) sc -= 2;
+            if (sc > dateScore) { dateScore = sc; bestDate = j; }
+        }
+
+        // «выполнил»: Ф.И.О. (обычно), заполнено не у всех; вместе с ним заполнена дата выполнения
+        int bestDone = -1, doneScore = 0, doneDate = -1;
+        for (int j = 0; j < nf; j++) {
+            DbfField f = t.Fields[j];
+            if (f.Type != 'C' || f.Length < 6 || j == bestNum) continue;
+            int names = 0;
+            for (int r = 0; r < n; r++) if (has[j, r] && NameLike(Text(t, r, j))) names++;
+            bool hint = Has(f.Name, "VYP", "VIP", "ISP", "IZP", "WYP", "VYPOL", "VIPOL");
+            if (filled[j] == 0 && !hint) continue;
+            if (filled[j] > 0 && names * 2 < filled[j] && !hint) continue;
+            int sc = filled[j] > 0 ? names * 3 / Math.Max(1, filled[j]) + 1 : 0;
+            if (filled[j] < n && filled[j] > 0) sc += 1;
+            if (hint) sc += 4;
+            if (Has(f.Name, "PRIN", "PRN", "FIO", "OFOR", "OPER")) sc -= 3;
+            // дата, заполненная вместе с ним
+            int dd = -1;
+            for (int k = 0; k < nf; k++) {
+                if (k == bestDate || t.Fields[k].Type != 'D' && t.Fields[k].Type != 'T') continue;
+                int same = 0;
+                for (int r = 0; r < n; r++) if (has[j, r] == has[k, r]) same++;
+                if (same * 100 >= n * 85 && filled[k] < n && filled[k] > 0) { dd = k; break; }
+            }
+            if (dd >= 0) sc += 3;
+            if (sc > doneScore) { doneScore = sc; bestDone = j; doneDate = dd; }
+        }
+
+        // остальное - для показа: принял, работа, лицевой, счётчик, ФИО абонента
+        int taker = -1, work = -1, account = -1, meter = -1, fio = -1, workLen = 0;
+        for (int j = 0; j < nf; j++) {
+            if (j == bestNum || j == bestDate || j == bestDone || j == doneDate) continue;
+            DbfField f = t.Fields[j];
+            string up = f.Name.ToUpperInvariant();
+            if (up == "FIO" || up == "FAM") { fio = j; continue; }
+            if (up == "NAB" || up == "LS" || up == "LIC") { account = j; continue; }
+            if (f.Type == 'C' && Has(up, "PRIN", "PRN")) { taker = j; continue; }
+            if (Has(up, "NSCH", "NOMSC", "N_SCH", "NSC") || up.StartsWith("SCH")) { if (meter < 0) meter = j; continue; }
+            // работа: длинный текст почти у всех, не Ф.И.О.; поле RAB/WORK/SOD - сразу оно
+            if (f.Type == 'C' && f.Length >= 15 && filled[j] * 2 >= n) {
+                int names = 0;
+                for (int r = 0; r < n; r++) if (has[j, r] && NameLike(Text(t, r, j))) names++;
+                int sc = Has(up, "RAB", "WORK", "SOD") ? 1000 : names * 2 > filled[j] ? -1 : f.Length;
+                if (sc > workLen) { workLen = sc; work = j; }
+            }
+        }
+        if (taker < 0)
+            for (int j = 0; j < nf; j++) {
+                if (j == bestDone || t.Fields[j].Type != 'C' || j == fio || j == work) continue;
+                int names = 0;
+                for (int r = 0; r < n; r++) if (has[j, r] && NameLike(Text(t, r, j))) names++;
+                if (filled[j] * 100 >= n * 95 && names * 10 >= filled[j] * 8) { taker = j; break; }
+            }
+
+        List<string> why = new List<string>();
+        if (bestNum >= 0) g.Setup.Number = t.Fields[bestNum].Name; else why.Add("нет поля номера");
+        if (bestDate >= 0) g.Setup.Date = t.Fields[bestDate].Name; else why.Add("нет даты, заполненной у всех");
+        if (bestDone >= 0) g.Setup.Done = t.Fields[bestDone].Name; else why.Add("нет поля «выполнил»");
+        if (doneDate >= 0) g.Setup.DoneDate = t.Fields[doneDate].Name;
+        if (work >= 0) g.Setup.Work = t.Fields[work].Name;
+        if (taker >= 0) g.Setup.Taker = t.Fields[taker].Name;
+        if (account >= 0) g.Setup.Account = t.Fields[account].Name;
+        if (meter >= 0) g.Setup.Meter = t.Fields[meter].Name;
+        if (fio >= 0) g.Setup.Name = t.Fields[fio].Name;
+        g.Setup.How = "сама";
+        g.Score = numScore + dateScore + doneScore + (taker >= 0 ? 1 : 0) + (work >= 0 ? 1 : 0) + (account >= 0 ? 2 : 0) + (meter >= 0 ? 1 : 0)
+            + (Has(System.IO.Path.GetFileNameWithoutExtension(path), "NZ", "NAR", "ZAK") ? 3 : 0);
+        g.Why = why.Count > 0 ? string.Join(", ", why.ToArray()) : "";
+        return g;
+    }
+}
+
+// найденный наряд (или строка списка, которая не нашлась)
+public class NaryadHit {
+    public int Line;
+    public string Query = "", Result = "";
+    public int Year;
+    public long Number;
+    public int RecNo;
+    public int State;               // 0 - выполнен, 1 - не выполнен, 2 - не найден, 3 - не понять номер / нет индекса
+    public string[] Values;         // значения показываемых полей
+}
+
+// Окно «Наряды»: номер или список номеров -> выполнен (зелёным) / не выполнен (красным)
+public class NaryadForm : Form {
+    readonly string dir, folder;
+    readonly string setupFile;
+    NaryadSetup setup;
+    DbfTable header;                 // поля таблицы нарядов
+    readonly Dictionary<int, NaryadIndex> indexes = new Dictionary<int, NaryadIndex>();
+    readonly ComboBox yearBox = new ComboBox();
+    readonly Label indexLabel = new Label(), tableLabel = new Label();
+    internal readonly TextBox input = new TextBox();
+    readonly DataGridView grid = new DataGridView();
+    internal readonly Label status = new Label();
+    readonly Button findButton = new Button(), updateButton = new Button(), rebuildButton = new Button(), setupButton = new Button();
+    readonly List<NaryadHit> hits = new List<NaryadHit>();
+    readonly List<string> columns = new List<string>();     // поля таблицы в столбцах
+    readonly List<string> titles = new List<string>();
+    bool busy;
+    volatile bool stop;
+
+    static readonly Color DoneColor = Color.FromArgb(205, 240, 205), OpenColor = Color.FromArgb(255, 205, 205), MissColor = Color.FromArgb(235, 235, 235);
+    Font bold;                       // «ВЫПОЛНЕН» / «НЕ ВЫПОЛНЕН» - жирным (один шрифт на все ячейки)
+
+    public bool Busy { get { return busy; } }
+
+    public NaryadForm(string dir, string folder) {
+        this.dir = dir;
+        this.folder = folder;
+        setupFile = Path.Combine(dir, "naryady.txt");
+        setup = NaryadSetup.Load(setupFile);
+        Text = "Наряды - выполнен или нет (только чтение)";
+        Size = new Size(1150, 720);
+        StartPosition = FormStartPosition.CenterScreen;
+
+        SplitContainer split = new SplitContainer();
+        split.Dock = DockStyle.Fill;
+        split.Orientation = Orientation.Horizontal;
+
+        Panel head = new Panel();
+        head.Dock = DockStyle.Top;
+        head.Height = 92;
+        Label yl = new Label();
+        yl.Text = "Год:";
+        yl.AutoSize = true;
+        yl.Location = new Point(10, 12);
+        yearBox.DropDownStyle = ComboBoxStyle.DropDownList;
+        yearBox.Location = new Point(48, 8);
+        yearBox.Width = 80;
+        int now = DateTime.Today.Year;
+        for (int y = now; y >= now - 9; y--) yearBox.Items.Add(y.ToString());
+        int chosen = setup.Year >= now - 9 && setup.Year <= now ? setup.Year : now;
+        yearBox.SelectedItem = chosen.ToString();
+        yearBox.SelectedIndexChanged += delegate { setup.Year = SelectedYear; setup.Save(setupFile); ShowIndex(); };
+        indexLabel.AutoSize = false;
+        indexLabel.Location = new Point(140, 12);
+        indexLabel.Size = new Size(560, 20);
+        indexLabel.Anchor = AnchorStyles.Left | AnchorStyles.Top | AnchorStyles.Right;
+        updateButton.Text = "Обновить индекс";
+        updateButton.Size = new Size(140, 28);
+        updateButton.Anchor = AnchorStyles.Right | AnchorStyles.Top;
+        updateButton.Click += delegate { UpdateIndex(false); };
+        new ToolTip().SetToolTip(updateButton, "Дописать в индекс года новые наряды (зарегистрированные после прошлого раза). Перед каждым поиском это делается и само.");
+        rebuildButton.Text = "Создать заново...";
+        rebuildButton.Size = new Size(130, 28);
+        rebuildButton.Anchor = AnchorStyles.Right | AnchorStyles.Top;
+        rebuildButton.Click += delegate { Rebuild(); };
+        new ToolTip().SetToolTip(rebuildButton, "Создать индекс года заново: с конца таблицы до старых лет или всю таблицу (дольше)");
+        tableLabel.AutoSize = false;
+        tableLabel.Location = new Point(10, 40);
+        tableLabel.Size = new Size(800, 20);
+        tableLabel.ForeColor = SystemColors.GrayText;
+        tableLabel.Anchor = AnchorStyles.Left | AnchorStyles.Top | AnchorStyles.Right;
+        setupButton.Text = "Таблица нарядов...";
+        setupButton.Size = new Size(140, 26);
+        setupButton.Anchor = AnchorStyles.Right | AnchorStyles.Top;
+        setupButton.Click += delegate { ChooseTable(); };
+        Label l2 = new Label();
+        l2.Text = "Номера нарядов - по одному в строке (можно столбик из Excel): 202620936 (год и номер) или 20936 (номер за выбранный год). Ctrl+Enter - найти.";
+        l2.AutoSize = true;
+        l2.Location = new Point(10, 68);
+        head.Controls.AddRange(new Control[] { yl, yearBox, indexLabel, updateButton, rebuildButton, tableLabel, setupButton, l2 });
+        head.Resize += delegate {
+            rebuildButton.Location = new Point(head.ClientSize.Width - 10 - rebuildButton.Width, 6);
+            updateButton.Location = new Point(rebuildButton.Left - 8 - updateButton.Width, 6);
+            indexLabel.Width = Math.Max(100, updateButton.Left - 10 - indexLabel.Left);
+            setupButton.Location = new Point(head.ClientSize.Width - 10 - setupButton.Width, 36);
+            tableLabel.Width = Math.Max(100, setupButton.Left - 10 - tableLabel.Left);
+        };
+
+        input.Multiline = true;
+        input.AcceptsReturn = true;
+        input.ScrollBars = ScrollBars.Both;
+        input.WordWrap = false;
+        input.Dock = DockStyle.Fill;
+        input.Font = new Font(FontFamily.GenericMonospace, 11f);
+        ResultColumns.SelectAllKey(input);
+        input.KeyDown += delegate(object s, KeyEventArgs e) { if (e.Control && e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; Run(); } };
+
+        Panel buttons = new Panel();
+        buttons.Dock = DockStyle.Right;
+        buttons.Width = 130;
+        findButton.Text = "Найти";
+        findButton.Location = new Point(10, 6);
+        findButton.Size = new Size(110, 32);
+        findButton.Click += delegate { Run(); };
+        Button clear = new Button();
+        clear.Text = "Очистить";
+        clear.Location = new Point(10, 44);
+        clear.Size = new Size(110, 28);
+        clear.Click += delegate { input.Clear(); input.Focus(); };
+        buttons.Controls.Add(findButton);
+        buttons.Controls.Add(clear);
+
+        split.Panel1.Controls.Add(input);
+        split.Panel1.Controls.Add(buttons);
+        split.Panel1.Controls.Add(head);
+
+        grid.Dock = DockStyle.Fill;
+        grid.VirtualMode = true;
+        grid.ReadOnly = true;
+        grid.AllowUserToAddRows = false;
+        grid.AllowUserToDeleteRows = false;
+        grid.AllowUserToResizeRows = false;
+        grid.RowHeadersVisible = false;
+        grid.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
+        grid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
+        grid.ClipboardCopyMode = DataGridViewClipboardCopyMode.EnableWithoutHeaderText;
+        grid.CellValueNeeded += delegate(object s, DataGridViewCellValueEventArgs e) { if (e.RowIndex < hits.Count) e.Value = Cell(hits[e.RowIndex], e.ColumnIndex); };
+        grid.CellFormatting += delegate(object s, DataGridViewCellFormattingEventArgs e) {
+            if (e.RowIndex < 0 || e.RowIndex >= hits.Count) return;
+            int st = hits[e.RowIndex].State;
+            e.CellStyle.BackColor = st == 0 ? DoneColor : st == 1 ? OpenColor : MissColor;
+            e.CellStyle.SelectionBackColor = st == 0 ? Color.FromArgb(40, 140, 60) : st == 1 ? Color.FromArgb(190, 40, 40) : Color.FromArgb(110, 110, 110);
+            if (e.ColumnIndex == 3 && st <= 1) {
+                if (bold == null) bold = new Font(grid.Font, FontStyle.Bold);
+                e.CellStyle.Font = bold;
+            }
+        };
+
+        Panel bottom = new Panel();
+        bottom.Dock = DockStyle.Bottom;
+        bottom.Height = 40;
+        status.Dock = DockStyle.Fill;
+        status.TextAlign = ContentAlignment.MiddleLeft;
+        status.Text = "Выполнен (заполнено «Выполнил Н-З») - зелёным, не выполнен - красным, не найден - серым.";
+        Button excel = new Button();
+        excel.Text = "В Excel";
+        excel.Dock = DockStyle.Right;
+        excel.Width = 120;
+        excel.Click += delegate { Export(); };
+        bottom.Controls.Add(status);
+        bottom.Controls.Add(excel);
+
+        split.Panel2.Controls.Add(grid);
+        split.Panel2.Controls.Add(bottom);
+        Controls.Add(split);
+        Shown += delegate { split.SplitterDistance = 200; input.Focus(); Prepare(); };
+        FormClosing += delegate { stop = true; };
+        FormClosed += delegate { if (bold != null) bold.Dispose(); };
+    }
+
+    public int SelectedYear {
+        get { int y; return int.TryParse(Convert.ToString(yearBox.SelectedItem), out y) ? y : DateTime.Today.Year; }
+        set { yearBox.SelectedItem = value.ToString(); }
+    }
+
+    string TablePath { get { return Path.Combine(folder, setup.Table); } }
+
+    void Post(MethodInvoker m) {
+        try { if (!IsDisposed && IsHandleCreated) BeginInvoke(m); } catch (Exception) { }
+    }
+
+    void SetBusy(bool on, string text) {
+        busy = on;
+        findButton.Text = on ? "Стоп" : "Найти";
+        updateButton.Enabled = rebuildButton.Enabled = setupButton.Enabled = yearBox.Enabled = !on;
+        if (text != null) status.Text = text;
+    }
+
+    // таблица нарядов: запомненная, иначе - найти самой
+    void Prepare() {
+        if (setup.Ready && File.Exists(TablePath)) {
+            try {
+                header = DbfTable.LoadHeader(TablePath);
+                if (header.FieldIndex(setup.Number) >= 0 && header.FieldIndex(setup.Date) >= 0 && header.FieldIndex(setup.Done) >= 0) { Ready(); return; }
+            } catch (Exception) { }
+        }
+        FindTable(false);
+    }
+
+    void Ready() {
+        BuildColumns();
+        tableLabel.Text = "Таблица нарядов " + setup.Describe() + (setup.How == "сама" ? " (найдена программой - если не та, нажмите справа)" : "");
+        ShowIndex();
+    }
+
+    // поиск таблицы нарядов среди таблиц папки базы (в фоне)
+    void FindTable(bool showChoice) {
+        if (folder == null || !Directory.Exists(folder)) { tableLabel.Text = "Папка базы не найдена - откройте базу в главном окне."; return; }
+        SetBusy(true, "Ищу таблицу нарядов в папке " + folder + "...");
+        stop = false;
+        System.Threading.Thread th = new System.Threading.Thread(delegate() {
+            List<NaryadGuess> list = null;
+            string err = null;
+            try { list = NaryadFinder.Guess(folder, delegate(int done, int total) { Post(delegate { status.Text = "Ищу таблицу нарядов: таблиц просмотрено " + done + " из " + total + "..."; }); }); }
+            catch (Exception ex) { err = ex.Message; }
+            Post(delegate { TableFound(list, err, showChoice); });
+        });
+        th.IsBackground = true;
+        th.Start();
+    }
+
+    void TableFound(List<NaryadGuess> list, string err, bool showChoice) {
+        SetBusy(false, "");
+        if (err != null) { status.Text = "Не удалось посмотреть таблицы базы: " + err; return; }
+        Report.Line("");
+        Report.Line("Наряды: таблицы папки базы, похожие на наряды (по последним записям; данных нет - только поля и вид значений):");
+        for (int i = 0; i < list.Count && i < 6; i++) {
+            NaryadGuess g = list[i];
+            Report.Line("  " + g.Setup.Table + " - записей " + g.Records + ", баллов " + g.Score + (g.Usable ? ": " + g.Setup.Describe() : ": не подходит - " + g.Why)
+                + (g.Setup.Work.Length > 0 ? ", работа - " + g.Setup.Work : "") + (g.Setup.Taker.Length > 0 ? ", принял - " + g.Setup.Taker : "")
+                + (g.Setup.Account.Length > 0 ? ", лицевой - " + g.Setup.Account : ""));
+            if (i < 3) Report.Fields(g.Sample, "      ");
+        }
+        if (showChoice || list.Count == 0 || !list[0].Usable) {
+            if (list.Count == 0 || !list[0].Usable)
+                status.Text = "Таблица нарядов сама не нашлась - выберите её (кнопка «Таблица нарядов...»). Если не знаете какая - нажмите «Отчёт» в главном окне и пришлите otchet.txt.";
+            ChooseFrom(list);
+            return;
+        }
+        setup.Table = list[0].Setup.Table;
+        NaryadSetup g0 = list[0].Setup;
+        setup.Number = g0.Number; setup.Date = g0.Date; setup.Done = g0.Done; setup.DoneDate = g0.DoneDate; setup.Work = g0.Work; setup.Taker = g0.Taker;
+        setup.Account = g0.Account; setup.Meter = g0.Meter; setup.Name = g0.Name; setup.How = "сама";
+        setup.Save(setupFile);
+        try { header = DbfTable.LoadHeader(TablePath); } catch (Exception ex) { status.Text = "Таблица " + setup.Table + " не открывается: " + ex.Message; return; }
+        status.Text = "Таблица нарядов найдена: " + setup.Table + ". Выполнен - зелёным, не выполнен - красным, не найден - серым.";
+        Ready();
+    }
+
+    internal void ChooseTable() {
+        if (busy) return;
+        FindTable(true);
+    }
+
+    void ChooseFrom(List<NaryadGuess> list) {
+        if (list == null || list.Count == 0) { MessageBox.Show(this, "В папке базы нет таблиц с датами - наряды не найти.", Text); return; }
+        using (NaryadSetupDialog d = new NaryadSetupDialog(list, setup)) {
+            if (d.ShowDialog(this) != DialogResult.OK) { if (setup.Ready) Ready(); return; }
+            NaryadSetup s = d.Result;
+            s.Year = setup.Year;
+            s.How = "вручную";
+            setup = s;
+            setup.Save(setupFile);
+            indexes.Clear();
+            try { header = DbfTable.LoadHeader(TablePath); } catch (Exception ex) { status.Text = "Таблица " + setup.Table + " не открывается: " + ex.Message; return; }
+            Report.Line("Наряды: таблица выбрана вручную - " + setup.Describe());
+            Ready();
+        }
+    }
+
+    // столбцы итога: что искали, наряд, состояние и поля таблицы
+    void BuildColumns() {
+        grid.Columns.Clear();
+        columns.Clear();
+        titles.Clear();
+        AddColumn("№", 30);
+        AddColumn("Искали", 90);
+        AddColumn("Наряд", 85);
+        AddColumn("Состояние", 110);
+        string[][] fields = { new string[] { setup.Date, "Дата оф." }, new string[] { setup.Work, "Работа" }, new string[] { setup.Account, "Лицевой" },
+            new string[] { setup.Name, "Ф.И.О." }, new string[] { setup.Taker, "Принял Н-З" }, new string[] { setup.Done, "Выполнил Н-З" },
+            new string[] { setup.DoneDate, "Дата выпол." }, new string[] { setup.Meter, "Номер сч." } };
+        foreach (string[] f in fields) {
+            if (f[0].Length == 0 || header == null || header.FieldIndex(f[0]) < 0) continue;
+            columns.Add(f[0]);
+            titles.Add(f[1]);
+            AddColumn(f[1], f[1] == "Работа" ? 200 : f[1].Contains("Дата") ? 75 : 120);
+        }
+        grid.RowCount = hits.Count;
+        grid.Invalidate();
+    }
+
+    void AddColumn(string title, int weight) {
+        DataGridViewTextBoxColumn c = new DataGridViewTextBoxColumn();
+        c.HeaderText = title;
+        c.FillWeight = weight;
+        c.SortMode = DataGridViewColumnSortMode.NotSortable;
+        grid.Columns.Add(c);
+    }
+
+    string Cell(NaryadHit h, int c) {
+        if (c == 0) return h.Line.ToString();
+        if (c == 1) return h.Query;
+        if (c == 2) return h.Number > 0 ? h.Year.ToString() + h.Number : "";
+        if (c == 3) return h.Result;
+        int k = c - 4;
+        return h.Values != null && k >= 0 && k < h.Values.Length ? h.Values[k] : "";
+    }
+
+    // ---------- индекс года ----------
+
+    NaryadIndex IndexOf(int year) {
+        NaryadIndex x;
+        if (indexes.TryGetValue(year, out x)) return x;
+        try { x = NaryadIndex.Load(NaryadIndex.FileFor(dir, year)); } catch (Exception) { x = null; }
+        if (x != null && header != null && !x.Fits(setup, header)) x = null;     // от другой таблицы - не годится
+        if (x != null) indexes[year] = x;
+        return x;
+    }
+
+    void ShowIndex() {
+        if (header == null) { indexLabel.Text = ""; return; }
+        int y = SelectedYear;
+        NaryadIndex x = IndexOf(y);
+        if (x == null) {
+            indexLabel.Text = "Индекса нарядов за " + y + " ещё нет - создастся при первом поиске (таблица читается с конца, до старых лет).";
+            indexLabel.ForeColor = Color.FromArgb(160, 90, 0);
+            return;
+        }
+        indexLabel.Text = "Индекс " + y + ": нарядов " + x.Count + (x.Count > 0 ? " (№ " + x.MinNumber + " - " + x.MaxNumber + ")" : "") + ", обновлён "
+            + x.Updated.ToString("dd.MM.yyyy HH:mm") + (x.Whole ? ", вся таблица" : "");
+        indexLabel.ForeColor = Color.FromArgb(0, 100, 40);
+    }
+
+    // в фоне: индекс года есть - дописать новые записи, нет - создать (с конца таблицы)
+    NaryadIndex Ensure(int year, bool rebuild, bool whole, out string note) {
+        note = null;
+        NaryadIndex x = rebuild ? null : IndexOf(year);
+        string file = NaryadIndex.FileFor(dir, year);
+        if (x != null) {
+            int added = x.Update(TablePath, header);
+            if (added >= 0) {
+                if (added > 0) { x.Save(file); note = "в индекс " + year + " добавлено нарядов: " + added; }
+                return x;
+            }
+            note = "таблица нарядов стала короче (её пересобрали) - индекс " + year + " создан заново";
+        }
+        int y = year;
+        x = NaryadIndex.Build(TablePath, header, setup, year, whole, delegate(int done, int total) {
+            Post(delegate { status.Text = "Создаю индекс нарядов " + y + ": просмотрено записей " + done + " из " + total + " (с конца таблицы)...   «Стоп» - прервать"; });
+        }, delegate { return stop; });
+        if (x == null) return null;
+        x.Save(file);
+        indexes[year] = x;
+        Report.Line("Наряды: индекс " + year + " создан за " + x.Seconds.ToString("0.0") + " с: нарядов " + x.Count + ", просмотрены записи " + x.From + "-" + x.To
+            + (x.Whole ? " (вся таблица)" : " (с конца до старых лет)"));
+        return x;
+    }
+
+    public void UpdateIndex(bool rebuild) { UpdateIndex(rebuild, false); }
+
+    void UpdateIndex(bool rebuild, bool whole) {
+        if (busy || header == null) return;
+        int year = SelectedYear;
+        SetBusy(true, (rebuild ? "Создаю индекс " : "Обновляю индекс ") + year + "...");
+        stop = false;
+        System.Threading.Thread th = new System.Threading.Thread(delegate() {
+            string note = null, err = null;
+            NaryadIndex x = null;
+            try { x = Ensure(year, rebuild, whole, out note); } catch (Exception ex) { err = ex.Message; }
+            Post(delegate {
+                SetBusy(false, err != null ? "Индекс не создан: " + err : x == null ? "Остановлено - индекс не создан." :
+                    (note ?? "Индекс " + year + " в порядке, новых нарядов нет") + ". Нарядов за " + year + ": " + x.Count + ".");
+                ShowIndex();
+            });
+        });
+        th.IsBackground = true;
+        th.Start();
+    }
+
+    void Rebuild() {
+        if (busy || header == null) return;
+        DialogResult r = MessageBox.Show(this, "Создать индекс нарядов за " + SelectedYear + " заново?\n\nДа - с конца таблицы до старых лет (быстро)\nНет - всю таблицу (если наряды лежат не по порядку; дольше)\nОтмена - не создавать",
+            Text, MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
+        if (r == DialogResult.Cancel) return;
+        UpdateIndex(true, r == DialogResult.No);
+    }
+
+    // ---------- поиск ----------
+
+    // «202620936» -> 2026 и 20936; «2026-20936» тоже; короткий номер - за выбранный год
+    public static bool ParseNumber(string line, int defaultYear, out int year, out long number) {
+        year = defaultYear;
+        number = 0;
+        string s = line.Trim().TrimStart('№', 'N', 'n').Trim();
+        if (s.Length == 0) return false;
+        int sep = -1;
+        for (int i = 0; i < s.Length; i++) if (!char.IsDigit(s[i])) { sep = i; break; }
+        int now = DateTime.Today.Year;
+        if (sep == 4) {
+            int y;
+            string rest = s.Substring(5).Trim(' ', '-', '/', '.');
+            if (int.TryParse(s.Substring(0, 4), out y) && y >= 2000 && y <= now + 1 && long.TryParse(rest, out number) && number > 0) { year = y; return true; }
+        }
+        StringBuilder d = new StringBuilder();
+        foreach (char c in s) { if (char.IsDigit(c)) d.Append(c); else if (c != ' ' && c != '-' && c != '/') return false; }
+        string digits = d.ToString();
+        if (digits.Length == 0 || digits.Length > 12) return false;
+        if (digits.Length >= 6) {
+            int y = int.Parse(digits.Substring(0, 4));
+            if (y >= 2000 && y <= now + 1) { year = y; number = long.Parse(digits.Substring(4)); return number > 0; }
+        }
+        number = long.Parse(digits);
+        return number > 0;
+    }
+
+    internal void Run() {
+        if (busy) { stop = true; return; }
+        if (header == null) { MessageBox.Show(this, "Таблица нарядов ещё не выбрана.", Text); return; }
+        List<string> lines = new List<string>();
+        foreach (string raw in input.Text.Replace("\r\n", "\n").Split('\n')) {
+            string line = raw.Replace('\t', ' ').Trim();
+            if (line.Length > 0) lines.Add(line);
+        }
+        if (lines.Count == 0) { MessageBox.Show(this, "Впишите номер наряда (или вставьте список - по одному в строке).", Text); return; }
+        int defYear = SelectedYear;
+        stop = false;
+        SetBusy(true, "Ищу...");
+        hits.Clear();
+        grid.RowCount = 0;
+        System.Threading.Thread th = new System.Threading.Thread(delegate() {
+            DateTime started = DateTime.Now;
+            List<NaryadHit> found = new List<NaryadHit>();
+            List<string> notes = new List<string>();
+            Dictionary<int, NaryadIndex> ready = new Dictionary<int, NaryadIndex>();
+            string err = null;
+            try {
+                // года из списка: индекс каждого - дописать новые наряды (или создать)
+                List<int> years = new List<int>();
+                foreach (string l in lines) { int y; long n; if (ParseNumber(l, defYear, out y, out n) && !years.Contains(y)) years.Add(y); }
+                foreach (int y in years) {
+                    if (stop) break;
+                    string note;
+                    NaryadIndex x = Ensure(y, false, false, out note);
+                    if (x != null) ready[y] = x;
+                    if (note != null) notes.Add(note);
+                }
+                using (FileStream fs = new FileStream(TablePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 4096, FileOptions.RandomAccess)) {
+                    for (int i = 0; i < lines.Count && !stop; i++) found.AddRange(Look(fs, i + 1, lines[i], defYear, ready));
+                }
+            } catch (Exception ex) { err = ex.Message; }
+            double seconds = (DateTime.Now - started).TotalSeconds;
+            Post(delegate { Finish(found, notes, err, lines.Count, seconds); });
+        });
+        th.IsBackground = true;
+        th.Start();
+    }
+
+    // одна строка списка -> наряды (обычно один)
+    List<NaryadHit> Look(FileStream fs, int line, string text, int defYear, Dictionary<int, NaryadIndex> ready) {
+        List<NaryadHit> r = new List<NaryadHit>();
+        int year;
+        long number;
+        NaryadHit h = new NaryadHit();
+        h.Line = line;
+        h.Query = text;
+        if (!ParseNumber(text, defYear, out year, out number)) { h.State = 3; h.Result = "не номер наряда"; r.Add(h); return r; }
+        h.Year = year;
+        h.Number = number;
+        NaryadIndex x;
+        if (!ready.TryGetValue(year, out x)) { h.State = 3; h.Result = "нет индекса " + year; r.Add(h); return r; }
+        DbfField nf = header.Fields[header.FieldIndex(setup.Number)], df = header.Fields[header.FieldIndex(setup.Date)];
+        int doneField = header.FieldIndex(setup.Done);
+        foreach (int recNo in x.Find(number)) {
+            long at = header.HeaderLength + (long)(recNo - 1) * header.RecordLength;
+            if (at + header.RecordLength > fs.Length) continue;
+            byte[] rec = new byte[header.RecordLength];
+            fs.Seek(at, SeekOrigin.Begin);
+            if (DbfTable.ReadUpTo(fs, rec, rec.Length) < rec.Length || rec[0] == (byte)'*') continue;
+            // запись могли поменять - сверить номер и год
+            if (NaryadBytes.Number(rec, 0, nf) != number || NaryadBytes.Year(rec, 0, df) != year) continue;
+            DbfTable one = DbfTable.CreateLike(header);
+            one.AddRecord(rec, 0, recNo);
+            NaryadHit k = new NaryadHit();
+            k.Line = line;
+            k.Query = text;
+            k.Year = year;
+            k.Number = number;
+            k.RecNo = recNo;
+            string done = DbfTable.Format(one.GetValue(0, doneField, null), true).Trim();
+            k.State = done.Length > 0 && done != "0" ? 0 : 1;
+            k.Result = k.State == 0 ? "ВЫПОЛНЕН" : "НЕ ВЫПОЛНЕН";
+            k.Values = new string[columns.Count];
+            for (int c = 0; c < columns.Count; c++) k.Values[c] = DbfTable.Format(one.GetValue(0, one.FieldIndex(columns[c]), null), false).Trim();
+            r.Add(k);
+        }
+        if (r.Count == 0) {
+            h.State = 2;
+            h.Result = "не найден в " + year + (x.Whole ? "" : number > x.MaxNumber && x.MaxNumber > 0 ? " (последний № " + x.MaxNumber + ")" : "");
+            r.Add(h);
+        } else if (r.Count > 1) foreach (NaryadHit k in r) k.Result += " (" + r.Count + " записи)";
+        return r;
+    }
+
+    void Finish(List<NaryadHit> found, List<string> notes, string err, int lines, double seconds) {
+        SetBusy(false, null);
+        hits.Clear();
+        hits.AddRange(found);
+        grid.RowCount = hits.Count;
+        grid.Invalidate();
+        ShowIndex();
+        int done = 0, open = 0, miss = 0;
+        foreach (NaryadHit h in hits) { if (h.State == 0) done++; else if (h.State == 1) open++; else miss++; }
+        string text = err != null ? "Ошибка: " + err : (stop ? "Остановлено. " : "") + "Строк " + lines + ": выполнено " + done + ", не выполнено " + open + ", не найдено " + miss + ".";
+        if (notes.Count > 0) text += "  (" + string.Join("; ", notes.ToArray()) + ")";
+        status.Text = text;
+        Report.Search("Наряды: строк " + lines + ", выполнено " + done + ", не выполнено " + open + ", не найдено " + miss + ", время " + seconds.ToString("0.0") + " с");
+    }
+
+    void Export() {
+        if (hits.Count == 0) { MessageBox.Show(this, "Сначала найдите наряды.", Text); return; }
+        string[] headers = new string[grid.Columns.Count];
+        for (int c = 0; c < headers.Length; c++) headers[c] = grid.Columns[c].HeaderText;
+        List<string[]> rows = new List<string[]>();
+        List<string> styles = new List<string>();
+        foreach (NaryadHit h in hits) {
+            string[] v = new string[headers.Length];
+            for (int c = 0; c < v.Length; c++) v[c] = Cell(h, c);
+            rows.Add(v);
+            styles.Add(h.State == 0 ? "t" : h.State == 1 ? "n" : "y");
+        }
+        try { Spreadsheet.Open("Наряды", headers, rows, styles); }
+        catch (Exception ex) { MessageBox.Show(this, "Не удалось выгрузить в Excel:\n" + ex.Message, Text); }
+    }
+
+    // для проверки: строки итога текстом
+    public string Dump() {
+        StringBuilder sb = new StringBuilder();
+        foreach (NaryadHit h in hits) {
+            for (int c = 0; c < grid.Columns.Count; c++) sb.Append(c > 0 ? " | " : "").Append(Cell(h, c));
+            sb.Append(h.State == 0 ? "  [зелёная]" : h.State == 1 ? "  [красная]" : "  [серая]").Append('\n');
+        }
+        return sb.Append(status.Text).ToString();
+    }
+    public string IndexText { get { return indexLabel.Text + " | " + tableLabel.Text; } }
+}
+
+// Выбор таблицы нарядов и её полей (если программа сама не нашла или нашла не ту). Рядом с полем - пример из последней записи.
+public class NaryadSetupDialog : Form {
+    readonly List<NaryadGuess> list;
+    readonly ComboBox table = new ComboBox();
+    readonly ComboBox[] boxes = new ComboBox[8];
+    static readonly string[] Labels = { "Номер наряда", "Дата оформления", "Выполнил Н-З (пусто - не выполнен)", "Дата выполнения", "Работа", "Принял Н-З", "Лицевой счёт", "Номер счётчика" };
+    public NaryadSetup Result;
+
+    public NaryadSetupDialog(List<NaryadGuess> list, NaryadSetup current) {
+        this.list = list;
+        Text = "Таблица нарядов";
+        StartPosition = FormStartPosition.CenterParent;
+        FormBorderStyle = FormBorderStyle.FixedDialog;
+        MaximizeBox = MinimizeBox = false;
+        ClientSize = new Size(720, 440);
+        Label tl = new Label();
+        tl.Text = "Таблица (подходящие - вверху; в скобках - записей):";
+        tl.AutoSize = true;
+        tl.Location = new Point(12, 12);
+        table.DropDownStyle = ComboBoxStyle.DropDownList;
+        table.Location = new Point(12, 32);
+        table.Width = 696;
+        foreach (NaryadGuess g in list) table.Items.Add(g.Setup.Table + "  (" + g.Records + ")" + (g.Usable ? "" : "  - " + g.Why));
+        Controls.Add(tl);
+        Controls.Add(table);
+        int y = 70;
+        for (int i = 0; i < boxes.Length; i++) {
+            Label l = new Label();
+            l.Text = Labels[i] + ":";
+            l.AutoSize = false;
+            l.Location = new Point(12, y + 4);
+            l.Size = new Size(250, 20);
+            ComboBox b = new ComboBox();
+            b.DropDownStyle = ComboBoxStyle.DropDownList;
+            b.Location = new Point(266, y);
+            b.Width = 442;
+            boxes[i] = b;
+            Controls.Add(l);
+            Controls.Add(b);
+            y += 34;
+        }
+        Label hint = new Label();
+        hint.Text = "Рядом с полем - что в нём у последнего наряда. Обязательны первые три.";
+        hint.AutoSize = true;
+        hint.ForeColor = SystemColors.GrayText;
+        hint.Location = new Point(12, y + 4);
+        Controls.Add(hint);
+        Button ok = new Button();
+        ok.Text = "OK";
+        ok.Location = new Point(520, ClientSize.Height - 40);
+        ok.Size = new Size(90, 28);
+        ok.Click += delegate { Accept(); };
+        Button cancel = new Button();
+        cancel.Text = "Отмена";
+        cancel.DialogResult = DialogResult.Cancel;
+        cancel.Location = new Point(618, ClientSize.Height - 40);
+        cancel.Size = new Size(90, 28);
+        Controls.Add(ok);
+        Controls.Add(cancel);
+        AcceptButton = ok;
+        CancelButton = cancel;
+        table.SelectedIndexChanged += delegate { FillFields(null); };
+        int start = 0;
+        for (int i = 0; i < list.Count; i++)
+            if (string.Compare(list[i].Setup.Table, current.Table, StringComparison.OrdinalIgnoreCase) == 0) start = i;
+        table.SelectedIndex = list.Count > 0 ? start : -1;
+        if (list.Count > 0 && string.Compare(list[start].Setup.Table, current.Table, StringComparison.OrdinalIgnoreCase) == 0 && current.Ready) FillFields(current);
+    }
+
+    // поля выбранной таблицы с примером значения из последней записи
+    void FillFields(NaryadSetup pick) {
+        if (table.SelectedIndex < 0) return;
+        NaryadGuess g = list[table.SelectedIndex];
+        NaryadSetup s = pick ?? g.Setup;
+        string[] want = { s.Number, s.Date, s.Done, s.DoneDate, s.Work, s.Taker, s.Account, s.Meter };
+        DbfTable t = g.Sample;
+        for (int i = 0; i < boxes.Length; i++) {
+            ComboBox b = boxes[i];
+            b.Items.Clear();
+            b.Items.Add("(нет)");
+            int sel = 0;
+            for (int j = 0; j < t.Fields.Count; j++) {
+                string ex = "";
+                for (int r = t.Count - 1; r >= 0 && ex.Length == 0; r--) ex = DbfTable.Format(t.GetValue(r, j, null), false).Trim();
+                if (ex.Length > 40) ex = ex.Substring(0, 40) + "...";
+                b.Items.Add(t.Fields[j].Name + (ex.Length > 0 ? "  - «" + ex + "»" : "  - пусто"));
+                if (string.Compare(t.Fields[j].Name, want[i], StringComparison.OrdinalIgnoreCase) == 0) sel = j + 1;
+            }
+            b.SelectedIndex = sel;
+        }
+    }
+
+    string Field(int i) {
+        ComboBox b = boxes[i];
+        if (b.SelectedIndex <= 0) return "";
+        return list[table.SelectedIndex].Sample.Fields[b.SelectedIndex - 1].Name;
+    }
+
+    void Accept() {
+        if (table.SelectedIndex < 0 || Field(0).Length == 0 || Field(1).Length == 0 || Field(2).Length == 0) {
+            MessageBox.Show(this, "Выберите таблицу и поля: номер наряда, дата оформления, выполнил.", Text);
+            return;
+        }
+        NaryadSetup s = new NaryadSetup();
+        s.Table = list[table.SelectedIndex].Setup.Table;
+        s.Number = Field(0); s.Date = Field(1); s.Done = Field(2); s.DoneDate = Field(3); s.Work = Field(4); s.Taker = Field(5); s.Account = Field(6); s.Meter = Field(7);
+        s.Name = list[table.SelectedIndex].Setup.Name;
+        Result = s;
+        DialogResult = DialogResult.OK;
+        Close();
     }
 }
 '@
