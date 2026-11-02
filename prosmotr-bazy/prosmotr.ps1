@@ -7569,13 +7569,17 @@ public class NaryadSetup {
     public string Table = "", Number = "", Date = "", Done = "", DoneDate = "", Work = "", Taker = "", Account = "", Meter = "", Name = "";
     public string How = "";          // «сама» - найдена программой, «вручную» - выбрана в настройке
     public string WorkBook = "", StaffBook = "";   // справочники: «таблица:код:название» (вид работы, работники)
+    public string YearFrom = "";     // поле полного номера ГодНомер (UNNAR) - год наряда из него; пусто - год из даты оформления
+
+    // поле, из которого берётся год наряда (для индексов и проверки)
+    public string YearField { get { return YearFrom.Length > 0 ? YearFrom : Date; } }
     public int Year;                 // последний выбранный год
     public int Version;              // 2 - найдено новой программой (знает таблицу REGNZ); старую «сама» - найти заново
-    public const int CurrentVersion = 2;
+    public const int CurrentVersion = 3;
 
-    static readonly string[] Keys = { "таблица", "номер", "дата", "выполнил", "дата_выполнения", "работа", "принял", "лицевой", "счётчик", "фио", "как", "год", "версия", "справочник_работ", "справочник_работников" };
+    static readonly string[] Keys = { "таблица", "номер", "дата", "выполнил", "дата_выполнения", "работа", "принял", "лицевой", "счётчик", "фио", "как", "год", "версия", "справочник_работ", "справочник_работников", "год_из" };
 
-    string[] Values() { return new string[] { Table, Number, Date, Done, DoneDate, Work, Taker, Account, Meter, Name, How, Year > 0 ? Year.ToString() : "", Version.ToString(), WorkBook, StaffBook }; }
+    string[] Values() { return new string[] { Table, Number, Date, Done, DoneDate, Work, Taker, Account, Meter, Name, How, Year > 0 ? Year.ToString() : "", Version.ToString(), WorkBook, StaffBook, YearFrom }; }
 
     public bool Ready { get { return Table.Length > 0 && Number.Length > 0 && Date.Length > 0 && Done.Length > 0; } }
 
@@ -7605,6 +7609,7 @@ public class NaryadSetup {
             if (d.TryGetValue("версия", out v)) int.TryParse(v, out s.Version);
             if (d.TryGetValue("справочник_работ", out v)) s.WorkBook = v;
             if (d.TryGetValue("справочник_работников", out v)) s.StaffBook = v;
+            if (d.TryGetValue("год_из", out v)) s.YearFrom = v;
         } catch (Exception) { }
         return s;
     }
@@ -7621,7 +7626,8 @@ public class NaryadSetup {
 
     public string Describe() {
         if (!Ready) return "таблица нарядов не выбрана";
-        return Table + ": номер - " + Number + ", дата - " + Date + ", выполнил - " + Done + (DoneDate.Length > 0 ? ", дата выполнения - " + DoneDate : "");
+        return Table + ": номер - " + Number + (YearFrom.Length > 0 ? ", год - из полного номера " + YearFrom : "") + ", дата - " + Date + ", выполнил - " + Done
+            + (DoneDate.Length > 0 ? ", дата выполнения - " + DoneDate : "");
     }
 }
 
@@ -7672,9 +7678,13 @@ public static class NaryadBytes {
     // лицевой для сравнения: без нулей впереди («053300450» и «53300450» - один)
     public static string Key(string ls) { return ls.TrimStart('0'); }
 
-    // год даты: D (ГГГГММДД) или T (юлианский день); нет - 0
+    // год записи: из даты D (ГГГГММДД) или T (юлианский день), или из полного номера ГодНомер (поле N: 202655555 -> 2026); нет - 0
     public static int Year(byte[] r, int start, DbfField f) {
         int at = start + f.Offset;
+        if (f.Type == 'N' || f.Type == 'I') {
+            long v = Number(r, start, f);
+            return v >= 200000000 && v < 210000000 ? (int)(v / 100000) : 0;
+        }
         if (f.Type == 'D') {
             int y = 0;
             for (int k = 0; k < 4; k++) {
@@ -7746,7 +7756,7 @@ public class NaryadIndex {
     // индекс подходит к этой таблице и этим полям
     public bool Fits(NaryadSetup s, DbfTable h) {
         return string.Compare(Table, s.Table, StringComparison.OrdinalIgnoreCase) == 0 && string.Compare(NumberField, s.Number, StringComparison.OrdinalIgnoreCase) == 0
-            && string.Compare(DateField, s.Date, StringComparison.OrdinalIgnoreCase) == 0 && string.Compare(AccountField, s.Account, StringComparison.OrdinalIgnoreCase) == 0
+            && string.Compare(DateField, s.YearField, StringComparison.OrdinalIgnoreCase) == 0 && string.Compare(AccountField, s.Account, StringComparison.OrdinalIgnoreCase) == 0
             && RecordLength == h.RecordLength;
     }
 
@@ -7836,11 +7846,11 @@ public class NaryadIndex {
         x.Year = year;
         x.Table = s.Table;
         x.NumberField = s.Number;
-        x.DateField = s.Date;
+        x.DateField = s.YearField;
         x.AccountField = s.Account;
         x.RecordLength = h.RecordLength;
         x.Whole = whole;
-        DbfField nf = h.Fields[h.FieldIndex(s.Number)], df = h.Fields[h.FieldIndex(s.Date)];
+        DbfField nf = h.Fields[h.FieldIndex(s.Number)], df = h.Fields[h.FieldIndex(s.YearField)];
         DbfField af = s.Account.Length > 0 && h.FieldIndex(s.Account) >= 0 ? h.Fields[h.FieldIndex(s.Account)] : null;
         int len = h.RecordLength;
         using (FileStream fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 1 << 16)) {
@@ -7897,13 +7907,13 @@ public class NaryadIndex {
             x.Year = year;
             x.Table = s.Table;
             x.NumberField = s.Number;
-            x.DateField = s.Date;
+            x.DateField = s.YearField;
             x.AccountField = s.Account;
             x.RecordLength = h.RecordLength;
             all[year] = x;
             if (year < min) min = year;
         }
-        DbfField nf = h.Fields[h.FieldIndex(s.Number)], df = h.Fields[h.FieldIndex(s.Date)];
+        DbfField nf = h.Fields[h.FieldIndex(s.Number)], df = h.Fields[h.FieldIndex(s.YearField)];
         DbfField af = s.Account.Length > 0 && h.FieldIndex(s.Account) >= 0 ? h.Fields[h.FieldIndex(s.Account)] : null;
         int len = h.RecordLength, from;
         using (FileStream fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 1 << 16)) {
@@ -8096,6 +8106,16 @@ public static class NaryadFinder {
                 else if (m[1] == "t") g.Setup.Taker = m[0];
                 else if (m[1] == "a") g.Setup.Account = m[0];
                 else g.Setup.Meter = m[0];
+            }
+            // UNNAR = ГодНомер (202655555): год наряда - из него (совпадает с номером в последних нарядах)
+            int un = t.FieldIndex("UNNAR"), nn = t.FieldIndex("N_NAR");
+            if (un >= 0 && t.Fields[un].Type == 'N') {
+                int same = 0;
+                for (int r = 0; r < t.Count; r++) {
+                    long u, k;
+                    if (long.TryParse(Text(t, r, un), out u) && long.TryParse(Text(t, r, nn), out k) && u % 100000 == k && u / 100000 >= 2000 && u / 100000 < 2100) same++;
+                }
+                if (same * 10 >= t.Count * 9) g.Setup.YearFrom = "UNNAR";
             }
             g.Setup.How = "сама";
             g.Score = 100;
@@ -8386,6 +8406,10 @@ public class NaryadRow {
         r.Number = NaryadBytes.Number(rec, 0, h.Fields[h.FieldIndex(s.Number)]);
         object d = one.GetValue(0, h.FieldIndex(s.Date), null);
         if (d is DateTime) { r.Date = (DateTime)d; r.Year = r.Date.Year; }
+        if (s.YearFrom.Length > 0 && h.FieldIndex(s.YearFrom) >= 0) {
+            int y = NaryadBytes.Year(rec, 0, h.Fields[h.FieldIndex(s.YearFrom)]);
+            if (y > 0) r.Year = y;
+        }
         if (s.Work.Length > 0 && h.FieldIndex(s.Work) >= 0) r.Work = r.Values[h.FieldIndex(s.Work)];
         string done = r.Values[h.FieldIndex(s.Done)];
         r.Done = done.Length > 0 && done != "0";
@@ -8721,7 +8745,7 @@ public class NaryadForm : Form {
         setupLink.LinkClicked += delegate { ChooseTable(); };
         new ToolTip().SetToolTip(setupLink, "Выбрать таблицу нарядов и её поля вручную (если программа взяла не ту)");
         Label l2 = new Label();
-        l2.Text = "Номера нарядов - по одному в строке (можно столбик из Excel): 202620936 - год и номер; просто 20936 - номер текущего года. Ctrl+Enter - найти.";
+        l2.Text = "Номера нарядов ПОЛНОСТЬЮ - год и номер: 202655555 (или 2026-55555), по одному в строке (можно столбик из Excel). Ctrl+Enter - найти.";
         l2.AutoSize = true;
         l2.Location = new Point(10, 50);
         head.Controls.AddRange(new Control[] { indexLabel, tableLabel, setupLink, l2 });
@@ -8838,7 +8862,18 @@ public class NaryadForm : Form {
 
     // таблица нарядов: запомненная, иначе - найти самой
     void Prepare() {
-        // таблицу «сама» нашла прежняя программа (не знала REGNZ) - найти заново
+        // таблицу «сама» нашла прежняя программа - эту же таблицу посмотреть заново (новая знает больше), не та - искать среди всех
+        if (setup.Ready && setup.How == "сама" && setup.Version < NaryadSetup.CurrentVersion && File.Exists(TablePath)) {
+            try {
+                NaryadGuess g = NaryadFinder.Judge(TablePath);
+                if (g != null && g.Score >= 100) {
+                    g.Setup.Year = setup.Year;
+                    setup = g.Setup;
+                    setup.Save(setupFile);
+                    lock (indexes) indexes.Clear();
+                }
+            } catch (Exception) { }
+        }
         if (setup.Ready && (setup.How == "вручную" || setup.Version >= NaryadSetup.CurrentVersion) && File.Exists(TablePath)) {
             try {
                 header = DbfTable.LoadHeader(TablePath);
@@ -9177,9 +9212,10 @@ public class NaryadForm : Form {
 
     // ---------- поиск ----------
 
-    // «202620936» -> 2026 и 20936; «2026-20936» тоже; короткий номер - за текущий год
-    public static bool ParseNumber(string line, int defaultYear, out int year, out long number) {
-        year = defaultYear;
+    // только полный номер: «202620936» -> 2026 и 20936; «2026-20936», «2026 20936» тоже. Номера в каждом году свои (с 1),
+    // поэтому номер без года не принимается - иначе нашёлся бы наряд другого года
+    public static bool ParseNumber(string line, out int year, out long number) {
+        year = 0;
         number = 0;
         string s = line.Trim().TrimStart('№', 'N', 'n').Trim();
         if (s.Length == 0) return false;
@@ -9194,12 +9230,11 @@ public class NaryadForm : Form {
         StringBuilder d = new StringBuilder();
         foreach (char c in s) { if (char.IsDigit(c)) d.Append(c); else if (c != ' ' && c != '-' && c != '/') return false; }
         string digits = d.ToString();
-        if (digits.Length == 0 || digits.Length > 12) return false;
-        if (digits.Length >= 6) {
-            int y = int.Parse(digits.Substring(0, 4));
-            if (y >= 2000 && y <= now + 1) { year = y; number = long.Parse(digits.Substring(4)); return number > 0; }
-        }
-        number = long.Parse(digits);
+        if (digits.Length < 6 || digits.Length > 12) return false;
+        int yy = int.Parse(digits.Substring(0, 4));
+        if (yy < 2000 || yy > now + 1) return false;
+        year = yy;
+        number = long.Parse(digits.Substring(4));
         return number > 0;
     }
 
@@ -9220,7 +9255,6 @@ public class NaryadForm : Form {
             if (line.Length > 0) lines.Add(line);
         }
         if (lines.Count == 0) { MessageBox.Show(this, "Впишите номер наряда (или вставьте список - по одному в строке).", Text); return; }
-        int defYear = DateTime.Today.Year;
         stop = false;
         SetBusy(true, "Ищу...");
         hits.Clear();
@@ -9234,10 +9268,10 @@ public class NaryadForm : Form {
             try {
                 // индексы последних лет (и лет из списка, если они старше): дописать новые наряды или создать
                 List<int> years = Wanted();
-                foreach (string l in lines) { int y; long n; if (ParseNumber(l, defYear, out y, out n) && !years.Contains(y)) years.Add(y); }
+                foreach (string l in lines) { int y; long n; if (ParseNumber(l, out y, out n) && !years.Contains(y)) years.Add(y); }
                 ready = EnsureAll(years, notes);
                 using (FileStream fs = new FileStream(TablePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 4096, FileOptions.RandomAccess)) {
-                    for (int i = 0; i < lines.Count && !stop; i++) found.AddRange(Look(fs, i + 1, lines[i], defYear, ready));
+                    for (int i = 0; i < lines.Count && !stop; i++) found.AddRange(Look(fs, i + 1, lines[i], ready));
                 }
             } catch (Exception ex) { err = ex.Message; }
             double seconds = (DateTime.Now - started).TotalSeconds;
@@ -9248,19 +9282,25 @@ public class NaryadForm : Form {
     }
 
     // одна строка списка -> наряды (обычно один)
-    List<NaryadHit> Look(FileStream fs, int line, string text, int defYear, Dictionary<int, NaryadIndex> ready) {
+    List<NaryadHit> Look(FileStream fs, int line, string text, Dictionary<int, NaryadIndex> ready) {
         List<NaryadHit> r = new List<NaryadHit>();
         int year;
         long number;
         NaryadHit h = new NaryadHit();
         h.Line = line;
         h.Query = text;
-        if (!ParseNumber(text, defYear, out year, out number)) { h.State = 3; h.Result = "не номер наряда"; r.Add(h); return r; }
+        if (!ParseNumber(text, out year, out number)) {
+            h.State = 3;
+            string dg = AccountTable.OnlyDigits(text);
+            h.Result = dg.Length > 0 && dg.Length < 6 ? "впишите полностью: год и номер (" + DateTime.Today.Year + dg.PadLeft(5, '0') + ")" : "не номер наряда";
+            r.Add(h);
+            return r;
+        }
         h.Year = year;
         h.Number = number;
         NaryadIndex x;
         if (!ready.TryGetValue(year, out x)) { h.State = 3; h.Result = "нет индекса " + year; r.Add(h); return r; }
-        DbfField nf = header.Fields[header.FieldIndex(setup.Number)], df = header.Fields[header.FieldIndex(setup.Date)];
+        DbfField nf = header.Fields[header.FieldIndex(setup.Number)], df = header.Fields[header.FieldIndex(setup.YearField)];
         int doneField = header.FieldIndex(setup.Done);
         foreach (int recNo in x.Find(number)) {
             long at = header.HeaderLength + (long)(recNo - 1) * header.RecordLength;
