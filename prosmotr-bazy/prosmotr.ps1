@@ -7756,7 +7756,8 @@ public class NaryadIndex {
     // индекс подходит к этой таблице и этим полям
     public bool Fits(NaryadSetup s, DbfTable h) {
         return string.Compare(Table, s.Table, StringComparison.OrdinalIgnoreCase) == 0 && string.Compare(NumberField, s.Number, StringComparison.OrdinalIgnoreCase) == 0
-            && string.Compare(DateField, s.YearField, StringComparison.OrdinalIgnoreCase) == 0 && string.Compare(AccountField, s.Account, StringComparison.OrdinalIgnoreCase) == 0
+            && (string.Compare(DateField, s.YearField, StringComparison.OrdinalIgnoreCase) == 0 || string.Compare(DateField, s.Date, StringComparison.OrdinalIgnoreCase) == 0)
+            && string.Compare(AccountField, s.Account, StringComparison.OrdinalIgnoreCase) == 0
             && RecordLength == h.RecordLength;
     }
 
@@ -8379,6 +8380,7 @@ public class NaryadHit {
     public long Number;
     public int RecNo;
     public int State;               // 0 - выполнен, 1 - не выполнен, 2 - не найден, 3 - не понять номер / нет индекса
+    public string Account = "";     // лицевой наряда - для нарядов лицевого и обходов
     public string[] Values;         // значения показываемых полей
 }
 
@@ -8868,6 +8870,7 @@ public class NaryadForm : Form {
                 NaryadGuess g = NaryadFinder.Judge(TablePath);
                 if (g != null && g.Score >= 100) {
                     g.Setup.Year = setup.Year;
+                    if (string.Compare(g.Setup.Table, setup.Table, StringComparison.OrdinalIgnoreCase) == 0) { g.Setup.WorkBook = setup.WorkBook; g.Setup.StaffBook = setup.StaffBook; }
                     setup = g.Setup;
                     setup.Save(setupFile);
                     lock (indexes) indexes.Clear();
@@ -9302,7 +9305,15 @@ public class NaryadForm : Form {
         if (!ready.TryGetValue(year, out x)) { h.State = 3; h.Result = "нет индекса " + year; r.Add(h); return r; }
         DbfField nf = header.Fields[header.FieldIndex(setup.Number)], df = header.Fields[header.FieldIndex(setup.YearField)];
         int doneField = header.FieldIndex(setup.Done);
-        foreach (int recNo in x.Find(number)) {
+        int acc = setup.Account.Length > 0 ? header.FieldIndex(setup.Account) : -1;
+        // кандидаты: индекс этого года и соседних (индексы по дате оформления: наряд декабря, оформленный в январе, - в следующем)
+        List<int> cand = new List<int>(x.Find(number));
+        if (string.Compare(x.DateField, setup.YearField, StringComparison.OrdinalIgnoreCase) != 0)
+            foreach (int y in new int[] { year - 1, year + 1 }) {
+                NaryadIndex nb;
+                if (ready.TryGetValue(y, out nb)) foreach (int rn in nb.Find(number)) if (!cand.Contains(rn)) cand.Add(rn);
+            }
+        foreach (int recNo in cand) {
             long at = header.HeaderLength + (long)(recNo - 1) * header.RecordLength;
             if (at + header.RecordLength > fs.Length) continue;
             byte[] rec = new byte[header.RecordLength];
@@ -9318,6 +9329,7 @@ public class NaryadForm : Form {
             k.Year = year;
             k.Number = number;
             k.RecNo = recNo;
+            if (acc >= 0) k.Account = AccountTable.OnlyDigits(DbfTable.Format(one.GetValue(0, acc, null), true));
             string done = DbfTable.Format(one.GetValue(0, doneField, null), true).Trim();
             k.State = done.Length > 0 && done != "0" ? 0 : 1;
             k.Result = k.State == 0 ? "ВЫПОЛНЕН" : "НЕ ВЫПОЛНЕН";
@@ -9468,11 +9480,7 @@ public class NaryadForm : Form {
         shownHit = h;
         obList.Items.Clear();
         if (h == null || h.RecNo <= 0) { lsHead.Text = "Наряды лицевого - выберите найденный наряд"; return; }
-        NaryadIndex own;
-        bool known;
-        lock (indexes) known = indexes.TryGetValue(h.Year, out own);
-        if (!known) return;
-        string ls = own.AccountOf(h.RecNo);
+        string ls = h.Account;
         List<int> years = new List<int>();
         List<int> recs = new List<int>();
         string from = "";
