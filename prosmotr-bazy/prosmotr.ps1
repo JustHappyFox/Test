@@ -7881,6 +7881,67 @@ public class NaryadIndex {
         return x;
     }
 
+    // индексы нескольких лет сразу - один проход с конца таблицы, пока не пойдут подряд StopRun записей старше самого раннего года
+    public static Dictionary<int, NaryadIndex> BuildYears(string path, DbfTable h, NaryadSetup s, List<int> years, LoadProgress progress, StopCheck stop) {
+        DateTime started = DateTime.Now;
+        Dictionary<int, NaryadIndex> all = new Dictionary<int, NaryadIndex>();
+        int min = int.MaxValue;
+        foreach (int year in years) {
+            NaryadIndex x = new NaryadIndex();
+            x.Year = year;
+            x.Table = s.Table;
+            x.NumberField = s.Number;
+            x.DateField = s.Date;
+            x.AccountField = s.Account;
+            x.RecordLength = h.RecordLength;
+            all[year] = x;
+            if (year < min) min = year;
+        }
+        DbfField nf = h.Fields[h.FieldIndex(s.Number)], df = h.Fields[h.FieldIndex(s.Date)];
+        DbfField af = s.Account.Length > 0 && h.FieldIndex(s.Account) >= 0 ? h.Fields[h.FieldIndex(s.Account)] : null;
+        int len = h.RecordLength, from;
+        using (FileStream fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 1 << 16)) {
+            int count = NameIndex.RecordCount(fs);
+            long fit = (fs.Length - h.HeaderLength) / len;
+            if (fit < count) count = (int)fit;
+            from = count + 1;
+            const int chunk = 2048;
+            byte[] buf = new byte[chunk * len];
+            int older = 0, seen = 0, end = count;
+            while (end > 0) {
+                int n = Math.Min(chunk, end), first = end - n + 1;
+                fs.Seek(h.HeaderLength + (long)(first - 1) * len, SeekOrigin.Begin);
+                int got = DbfTable.ReadUpTo(fs, buf, n * len) / len;
+                bool enough = false;
+                for (int i = got - 1; i >= 0; i--) {
+                    int p = i * len, recNo = first + i;
+                    from = recNo;
+                    seen++;
+                    if (buf[p] == (byte)'*' || buf[p] == 0x1A) continue;
+                    int y = NaryadBytes.Year(buf, p, df);
+                    NaryadIndex x;
+                    if (all.TryGetValue(y, out x)) {
+                        long num = NaryadBytes.Number(buf, p, nf);
+                        if (num > 0) x.Add(num, recNo, NaryadBytes.Digits(buf, p, af));
+                        older = 0;
+                    } else if (y >= min) older = 0;
+                    else if (y > 0 && ++older >= StopRun) { enough = true; break; }
+                }
+                end = first - 1;
+                if (progress != null) progress(seen, count);
+                if (stop != null && stop()) return null;
+                if (enough) break;
+            }
+            foreach (NaryadIndex x in all.Values) { x.From = from; x.To = count; }
+        }
+        foreach (NaryadIndex x in all.Values) {
+            x.Built = x.Updated = DateTime.Now;
+            x.Seconds = (DateTime.Now - started).TotalSeconds;
+            x.Range();
+        }
+        return all;
+    }
+
     // дописать наряды года из новых записей таблицы (после To); -1 - таблица стала короче (её пересобрали) - индекс создать заново
     public int Update(string path, DbfTable h) {
         DbfField nf = h.Fields[h.FieldIndex(NumberField)], df = h.Fields[h.FieldIndex(DateField)];
@@ -8425,12 +8486,13 @@ public class NaryadForm : Form {
     NaryadSetup setup;
     DbfTable header;                 // поля таблицы нарядов
     readonly Dictionary<int, NaryadIndex> indexes = new Dictionary<int, NaryadIndex>();
-    readonly ComboBox yearBox = new ComboBox();
     readonly Label indexLabel = new Label(), tableLabel = new Label();
     internal readonly TextBox input = new TextBox();
     readonly DataGridView grid = new DataGridView();
     internal readonly Label status = new Label();
-    readonly Button findButton = new Button(), updateButton = new Button(), rebuildButton = new Button(), setupButton = new Button();
+    readonly Button findButton = new Button();
+    readonly LinkLabel setupLink = new LinkLabel();
+    public const int Years = 6;      // индексы - за столько последних лет (создаются при первом поиске, дальше дополняются сами)
     readonly List<NaryadHit> hits = new List<NaryadHit>();
     readonly List<string> columns = new List<string>();     // поля таблицы в столбцах
     readonly List<string> titles = new List<string>();
@@ -8461,53 +8523,30 @@ public class NaryadForm : Form {
 
         Panel head = new Panel();
         head.Dock = DockStyle.Top;
-        head.Height = 92;
-        Label yl = new Label();
-        yl.Text = "Год:";
-        yl.AutoSize = true;
-        yl.Location = new Point(10, 12);
-        yearBox.DropDownStyle = ComboBoxStyle.DropDownList;
-        yearBox.Location = new Point(48, 8);
-        yearBox.Width = 80;
-        int now = DateTime.Today.Year;
-        for (int y = now; y >= now - 9; y--) yearBox.Items.Add(y.ToString());
-        int chosen = setup.Year >= now - 9 && setup.Year <= now ? setup.Year : now;
-        yearBox.SelectedItem = chosen.ToString();
-        yearBox.SelectedIndexChanged += delegate { setup.Year = SelectedYear; setup.Save(setupFile); ShowIndex(); };
+        head.Height = 72;
         indexLabel.AutoSize = false;
-        indexLabel.Location = new Point(140, 12);
-        indexLabel.Size = new Size(560, 20);
+        indexLabel.Location = new Point(10, 8);
+        indexLabel.Size = new Size(900, 20);
         indexLabel.Anchor = AnchorStyles.Left | AnchorStyles.Top | AnchorStyles.Right;
-        updateButton.Text = "Обновить индекс";
-        updateButton.Size = new Size(140, 28);
-        updateButton.Anchor = AnchorStyles.Right | AnchorStyles.Top;
-        updateButton.Click += delegate { UpdateIndex(false); };
-        new ToolTip().SetToolTip(updateButton, "Дописать в индекс года новые наряды (зарегистрированные после прошлого раза). Перед каждым поиском это делается и само.");
-        rebuildButton.Text = "Создать заново...";
-        rebuildButton.Size = new Size(130, 28);
-        rebuildButton.Anchor = AnchorStyles.Right | AnchorStyles.Top;
-        rebuildButton.Click += delegate { Rebuild(); };
-        new ToolTip().SetToolTip(rebuildButton, "Создать индекс года заново: с конца таблицы до старых лет или всю таблицу (дольше)");
         tableLabel.AutoSize = false;
-        tableLabel.Location = new Point(10, 40);
-        tableLabel.Size = new Size(800, 20);
+        tableLabel.Location = new Point(10, 28);
+        tableLabel.Size = new Size(800, 18);
         tableLabel.ForeColor = SystemColors.GrayText;
         tableLabel.Anchor = AnchorStyles.Left | AnchorStyles.Top | AnchorStyles.Right;
-        setupButton.Text = "Таблица нарядов...";
-        setupButton.Size = new Size(140, 26);
-        setupButton.Anchor = AnchorStyles.Right | AnchorStyles.Top;
-        setupButton.Click += delegate { ChooseTable(); };
+        setupLink.Text = "таблица не та?";
+        setupLink.AutoSize = true;
+        setupLink.Anchor = AnchorStyles.Right | AnchorStyles.Top;
+        setupLink.LinkClicked += delegate { ChooseTable(); };
+        new ToolTip().SetToolTip(setupLink, "Выбрать таблицу нарядов и её поля вручную (если программа взяла не ту)");
         Label l2 = new Label();
-        l2.Text = "Номера нарядов - по одному в строке (можно столбик из Excel): 202620936 (год и номер) или 20936 (номер за выбранный год). Ctrl+Enter - найти.";
+        l2.Text = "Номера нарядов - по одному в строке (можно столбик из Excel): 202620936 - год и номер; просто 20936 - номер текущего года. Ctrl+Enter - найти.";
         l2.AutoSize = true;
-        l2.Location = new Point(10, 68);
-        head.Controls.AddRange(new Control[] { yl, yearBox, indexLabel, updateButton, rebuildButton, tableLabel, setupButton, l2 });
+        l2.Location = new Point(10, 50);
+        head.Controls.AddRange(new Control[] { indexLabel, tableLabel, setupLink, l2 });
         head.Resize += delegate {
-            rebuildButton.Location = new Point(head.ClientSize.Width - 10 - rebuildButton.Width, 6);
-            updateButton.Location = new Point(rebuildButton.Left - 8 - updateButton.Width, 6);
-            indexLabel.Width = Math.Max(100, updateButton.Left - 10 - indexLabel.Left);
-            setupButton.Location = new Point(head.ClientSize.Width - 10 - setupButton.Width, 36);
-            tableLabel.Width = Math.Max(100, setupButton.Left - 10 - tableLabel.Left);
+            setupLink.Location = new Point(head.ClientSize.Width - 10 - setupLink.PreferredWidth, 28);
+            tableLabel.Width = Math.Max(100, setupLink.Left - 10 - tableLabel.Left);
+            indexLabel.Width = Math.Max(100, head.ClientSize.Width - 20);
         };
 
         input.Multiline = true;
@@ -8590,9 +8629,12 @@ public class NaryadForm : Form {
         FormClosed += delegate { if (bold != null) bold.Dispose(); if (headFont != null) headFont.Dispose(); };
     }
 
-    public int SelectedYear {
-        get { int y; return int.TryParse(Convert.ToString(yearBox.SelectedItem), out y) ? y : DateTime.Today.Year; }
-        set { yearBox.SelectedItem = value.ToString(); }
+    // года индексов: последние Years лет
+    static List<int> Wanted() {
+        List<int> r = new List<int>();
+        int now = DateTime.Today.Year;
+        for (int y = now - Years + 1; y <= now; y++) r.Add(y);
+        return r;
     }
 
     string TablePath { get { return Path.Combine(folder, setup.Table); } }
@@ -8604,7 +8646,7 @@ public class NaryadForm : Form {
     void SetBusy(bool on, string text) {
         busy = on;
         findButton.Text = on ? "Стоп" : "Найти";
-        updateButton.Enabled = rebuildButton.Enabled = setupButton.Enabled = yearBox.Enabled = !on;
+        setupLink.Enabled = !on;
         if (text != null) status.Text = text;
     }
 
@@ -8799,77 +8841,72 @@ public class NaryadForm : Form {
         return x;
     }
 
+    // состояние индексов последних лет
     void ShowIndex() {
         if (header == null) { indexLabel.Text = ""; return; }
-        int y = SelectedYear;
-        NaryadIndex x = IndexOf(y);
-        if (x == null) {
-            indexLabel.Text = "Индекса нарядов за " + y + " ещё нет - создастся при первом поиске (таблица читается с конца, до старых лет).";
+        List<int> years = Wanted();
+        int count = 0, have = 0;
+        DateTime updated = DateTime.MinValue;
+        foreach (int y in years) {
+            NaryadIndex x = IndexOf(y);
+            if (x == null) continue;
+            have++;
+            count += x.Count;
+            if (x.Updated > updated) updated = x.Updated;
+        }
+        string span = years[0] + "-" + years[years.Count - 1];
+        if (have < years.Count) {
+            indexLabel.Text = "Индексы нарядов за " + span + (have > 0 ? " (есть за " + have + " из " + years.Count + " лет)" : "")
+                + " создадутся при первом поиске - один раз, в папке программы; дальше дополняются сами.";
             indexLabel.ForeColor = Color.FromArgb(160, 90, 0);
             return;
         }
-        indexLabel.Text = "Индекс " + y + ": нарядов " + x.Count + (x.Count > 0 ? " (№ " + x.MinNumber + " - " + x.MaxNumber + ")" : "") + ", обновлён "
-            + x.Updated.ToString("dd.MM.yyyy HH:mm") + (x.Whole ? ", вся таблица" : "");
+        indexLabel.Text = "Индексы нарядов за " + span + ": нарядов " + count + ", обновлены " + updated.ToString("dd.MM.yyyy HH:mm")
+            + " (дополняются сами при каждом поиске; файлы indeks_naryady_ГГГГ.txt в папке программы)";
         indexLabel.ForeColor = Color.FromArgb(0, 100, 40);
     }
 
-    // в фоне: индекс года есть - дописать новые записи, нет - создать (с конца таблицы)
-    NaryadIndex Ensure(int year, bool rebuild, bool whole, out string note) {
-        note = null;
-        NaryadIndex x = rebuild ? null : IndexOf(year);
-        string file = NaryadIndex.FileFor(dir, year);
-        if (x != null) {
-            int added = x.Update(TablePath, header);
-            if (added >= 0) {
-                if (added > 0) { x.Save(file); note = "в индекс " + year + " добавлено нарядов: " + added; }
-                return x;
-            }
-            note = "таблица нарядов стала короче (её пересобрали) - индекс " + year + " создан заново";
+    // в фоне: индексы этих лет - есть: дописать новые наряды; нет (или таблицу пересобрали): создать все недостающие за один проход
+    Dictionary<int, NaryadIndex> EnsureAll(List<int> years, List<string> notes) {
+        Dictionary<int, NaryadIndex> ready = new Dictionary<int, NaryadIndex>();
+        List<int> missing = new List<int>();
+        int added = 0;
+        foreach (int y in years) {
+            NaryadIndex x = IndexOf(y);
+            if (x == null) { missing.Add(y); continue; }
+            int a = x.Update(TablePath, header);
+            if (a < 0) { indexes.Remove(y); missing.Add(y); continue; }
+            if (a > 0) { x.Save(NaryadIndex.FileFor(dir, y)); added += a; }
+            ready[y] = x;
         }
-        int y = year;
-        x = NaryadIndex.Build(TablePath, header, setup, year, whole, delegate(int done, int total) {
-            Post(delegate { status.Text = "Создаю индекс нарядов " + y + ": просмотрено записей " + done + " из " + total + " (с конца таблицы)...   «Стоп» - прервать"; });
+        if (added > 0) notes.Add("в индексы добавлено новых нарядов: " + added);
+        if (missing.Count == 0) return ready;
+        missing.Sort();
+        // «2021-2026» (подряд) или «2019, 2021, ...»
+        string span = missing.Count == 1 ? missing[0].ToString() : missing[missing.Count - 1] - missing[0] == missing.Count - 1
+            ? missing[0] + "-" + missing[missing.Count - 1] : JoinYears(missing);
+        Dictionary<int, NaryadIndex> built = NaryadIndex.BuildYears(TablePath, header, setup, missing, delegate(int done, int total) {
+            Post(delegate { status.Text = "Создаю индексы нарядов за " + span + " (один раз): просмотрено записей " + done + " из " + total + " (с конца таблицы)...   «Стоп» - прервать"; });
         }, delegate { return stop; });
-        if (x == null) return null;
-        x.Save(file);
-        indexes[year] = x;
-        Report.Line("Наряды: индекс " + year + " создан за " + x.Seconds.ToString("0.0") + " с: нарядов " + x.Count + ", просмотрены записи " + x.From + "-" + x.To
-            + (x.Whole ? " (вся таблица)" : " (с конца до старых лет)"));
-        return x;
-    }
-
-    public void UpdateIndex(bool rebuild) { UpdateIndex(rebuild, false); }
-
-    void UpdateIndex(bool rebuild, bool whole) {
-        if (busy || header == null) return;
-        int year = SelectedYear;
-        SetBusy(true, (rebuild ? "Создаю индекс " : "Обновляю индекс ") + year + "...");
-        stop = false;
-        System.Threading.Thread th = new System.Threading.Thread(delegate() {
-            string note = null, err = null;
-            NaryadIndex x = null;
-            try { x = Ensure(year, rebuild, whole, out note); } catch (Exception ex) { err = ex.Message; }
-            Post(delegate {
-                SetBusy(false, err != null ? "Индекс не создан: " + err : x == null ? "Остановлено - индекс не создан." :
-                    (note ?? "Индекс " + year + " в порядке, новых нарядов нет") + ". Нарядов за " + year + ": " + x.Count + ".");
-                ShowIndex();
-            });
-        });
-        th.IsBackground = true;
-        th.Start();
-    }
-
-    void Rebuild() {
-        if (busy || header == null) return;
-        DialogResult r = MessageBox.Show(this, "Создать индекс нарядов за " + SelectedYear + " заново?\n\nДа - с конца таблицы до старых лет (быстро)\nНет - всю таблицу (если наряды лежат не по порядку; дольше)\nОтмена - не создавать",
-            Text, MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
-        if (r == DialogResult.Cancel) return;
-        UpdateIndex(true, r == DialogResult.No);
+        if (built == null) return ready;
+        int count = 0;
+        double seconds = 0;
+        foreach (KeyValuePair<int, NaryadIndex> kv in built) {
+            kv.Value.Save(NaryadIndex.FileFor(dir, kv.Key));
+            indexes[kv.Key] = kv.Value;
+            ready[kv.Key] = kv.Value;
+            count += kv.Value.Count;
+            seconds = kv.Value.Seconds;
+        }
+        NaryadIndex any = built[missing[0]];
+        notes.Add("созданы индексы за " + span + ": нарядов " + count);
+        Report.Line("Наряды: индексы " + span + " созданы за " + seconds.ToString("0.0") + " с: нарядов " + count + ", просмотрены записи " + any.From + "-" + any.To);
+        return ready;
     }
 
     // ---------- поиск ----------
 
-    // «202620936» -> 2026 и 20936; «2026-20936» тоже; короткий номер - за выбранный год
+    // «202620936» -> 2026 и 20936; «2026-20936» тоже; короткий номер - за текущий год
     public static bool ParseNumber(string line, int defaultYear, out int year, out long number) {
         year = defaultYear;
         number = 0;
@@ -8904,7 +8941,7 @@ public class NaryadForm : Form {
             if (line.Length > 0) lines.Add(line);
         }
         if (lines.Count == 0) { MessageBox.Show(this, "Впишите номер наряда (или вставьте список - по одному в строке).", Text); return; }
-        int defYear = SelectedYear;
+        int defYear = DateTime.Today.Year;
         stop = false;
         SetBusy(true, "Ищу...");
         hits.Clear();
@@ -8916,16 +8953,10 @@ public class NaryadForm : Form {
             Dictionary<int, NaryadIndex> ready = new Dictionary<int, NaryadIndex>();
             string err = null;
             try {
-                // года из списка: индекс каждого - дописать новые наряды (или создать)
-                List<int> years = new List<int>();
+                // индексы последних лет (и лет из списка, если они старше): дописать новые наряды или создать
+                List<int> years = Wanted();
                 foreach (string l in lines) { int y; long n; if (ParseNumber(l, defYear, out y, out n) && !years.Contains(y)) years.Add(y); }
-                foreach (int y in years) {
-                    if (stop) break;
-                    string note;
-                    NaryadIndex x = Ensure(y, false, false, out note);
-                    if (x != null) ready[y] = x;
-                    if (note != null) notes.Add(note);
-                }
+                ready = EnsureAll(years, notes);
                 using (FileStream fs = new FileStream(TablePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 4096, FileOptions.RandomAccess)) {
                     for (int i = 0; i < lines.Count && !stop; i++) found.AddRange(Look(fs, i + 1, lines[i], defYear, ready));
                 }
