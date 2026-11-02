@@ -8194,6 +8194,219 @@ public class NaryadRow {
     }
 }
 
+// Таблица с индексом программы базы по лицевому (NAB в своём .CDX): все записи лицевого сразу, за все годы
+public class AccountTable {
+    public string Path = "", Name = "";
+    public LiveBase Base;
+    public bool Indexed;            // индекс NAB есть и проверен
+    public string Note = "";
+
+    // открыть и проверить индекс (в фоне - читает заголовок, первые записи и индекс)
+    public static AccountTable Open(string path) {
+        AccountTable t = new AccountTable();
+        t.Path = path;
+        t.Name = System.IO.Path.GetFileName(path);
+        try {
+            t.Base = LiveBase.Open(path);
+            IndexTag tag = t.Base.Header.FieldIndex("NAB") >= 0 ? t.Base.TagFor("NAB") : null;
+            t.Indexed = tag != null;
+            t.Note = tag != null ? "индекс " + tag.Label : "нет годного индекса по NAB";
+        } catch (Exception ex) { t.Note = "не открылась: " + ex.Message; }
+        return t;
+    }
+
+    // записи лицевого: таблица из найденных записей и их строки (только этот лицевой)
+    public DbfTable Find(string ls, out List<int> rows) {
+        rows = new List<int>();
+        SearchResult r = Base.Search(ls, SearchMode.Account, null, 3000, false);
+        if (r.Error != null) throw new Exception(r.Error);
+        int nab = r.Table.FieldIndex("NAB");
+        string key = NaryadBytes.Key(OnlyDigits(ls));
+        foreach (int row in r.Rows)
+            if (nab >= 0 && NaryadBytes.Key(OnlyDigits(DbfTable.Format(r.Table.GetValue(row, nab, null), true))) == key) rows.Add(row);
+        return r.Table;
+    }
+
+    public static string OnlyDigits(string s) {
+        StringBuilder sb = new StringBuilder();
+        foreach (char c in s) if (c >= '0' && c <= '9') sb.Append(c);
+        return sb.ToString();
+    }
+}
+
+// строка обходов (показание)
+public class ObhodRow {
+    public DateTime Date = DateTime.MinValue;
+    public string[] Values;
+    public string Table = "";
+}
+
+// Обходы лицевого - как окно Ctrl+O программы базы: дата проверки, показание, ср. сутки, № участка, код и его название.
+// Таблицы OBH (текущие) и ARCOBH... (архив) - с индексом NAB программы базы; название кода - из справочника с тем же полем.
+public class ObhodSource {
+    public readonly List<AccountTable> Tables = new List<AccountTable>();
+    public readonly List<string> Columns = new List<string>();     // поля в столбцах (по первой таблице)
+    public readonly List<string> Titles = new List<string>();
+    public string CodeField = "", Note = "";
+    public CodeBook Names;
+    public int NameColumn = -1;                                    // столбец «Наименование» (после кода)
+
+    public static ObhodSource Find(string folder) {
+        ObhodSource o = new ObhodSource();
+        List<string> files = new List<string>();
+        foreach (string f in Directory.GetFiles(folder)) {
+            string n = Path.GetFileNameWithoutExtension(f).ToUpperInvariant();
+            if (string.Compare(Path.GetExtension(f), ".dbf", StringComparison.OrdinalIgnoreCase) == 0 && n.Contains("OBH")) files.Add(f);
+        }
+        // сначала текущие (OBH), потом архивы по порядку
+        files.Sort(delegate(string a, string b) {
+            string x = Path.GetFileNameWithoutExtension(a).ToUpperInvariant(), y = Path.GetFileNameWithoutExtension(b).ToUpperInvariant();
+            int ra = x == "OBH" ? 0 : x.StartsWith("ARC") ? 1 : 2, rb = y == "OBH" ? 0 : y.StartsWith("ARC") ? 1 : 2;
+            return ra != rb ? ra.CompareTo(rb) : string.Compare(x, y, StringComparison.Ordinal);
+        });
+        List<string> notes = new List<string>();
+        foreach (string f in files) {
+            DbfTable h;
+            try { h = DbfTable.LoadHeader(f); } catch (Exception) { continue; }
+            bool date = false;
+            foreach (DbfField fl in h.Fields) if (fl.Type == 'D') date = true;
+            if (h.FieldIndex("NAB") < 0 || !date) continue;
+            AccountTable t = AccountTable.Open(f);
+            notes.Add(t.Name + " (" + h.Expected + "): " + t.Note);
+            if (t.Indexed) o.Tables.Add(t);
+        }
+        o.Note = notes.Count > 0 ? string.Join("; ", notes.ToArray()) : "таблиц обходов (OBH, ARCOBH...) с лицевым и датой в папке нет";
+        if (o.Tables.Count > 0) o.Arrange(folder);
+        return o;
+    }
+
+    // столбцы как в окне Ctrl+O: № абонента, дата пров., показ., ср. сут., № уч., код, наименование, остальное
+    void Arrange(string folder) {
+        DbfTable h = Tables[0].Base.Header;
+        DbfTable sample = Tables[0].Base.Sample;
+        List<int> order = new List<int>();
+        int nab = h.FieldIndex("NAB");
+        if (nab >= 0) order.Add(nab);
+        // дата проверки: DPR, иначе первая дата
+        int dpr = h.FieldIndex("DPR");
+        for (int j = 0; j < h.Fields.Count && dpr < 0; j++) if (h.Fields[j].Type == 'D') dpr = j;
+        if (dpr >= 0) order.Add(dpr);
+        for (int j = 0; j < h.Fields.Count; j++) if (h.Fields[j].Name.ToUpperInvariant().StartsWith("POK") && !order.Contains(j)) order.Add(j);
+        for (int j = 0; j < h.Fields.Count; j++) if ((h.Fields[j].Type == 'N' || h.Fields[j].Type == 'F') && h.Fields[j].Decimals >= 2 && !order.Contains(j)) order.Add(j);
+        int uch = h.FieldIndex("N_UCH");
+        if (uch >= 0 && !order.Contains(uch)) order.Add(uch);
+        // код: числовое поле KOD.../VID.../IST... или маленькие целые с немногими значениями
+        int code = -1;
+        for (int j = 0; j < h.Fields.Count && code < 0; j++) {
+            string n = h.Fields[j].Name.ToUpperInvariant();
+            if (!order.Contains(j) && (n.StartsWith("KOD") || n.StartsWith("KD") || n.Contains("VID") || n.Contains("IST"))) code = j;
+        }
+        for (int j = 0; j < h.Fields.Count && code < 0; j++) {
+            DbfField f = h.Fields[j];
+            if (order.Contains(j) || f.Type != 'N' || f.Decimals != 0 || f.Length > 4) continue;
+            Dictionary<string, bool> d = new Dictionary<string, bool>();
+            for (int r = 0; r < sample.Count; r++) d[DbfTable.Format(sample.GetValue(r, j, null), true)] = true;
+            if (d.Count >= 2 && d.Count <= 60) code = j;
+        }
+        if (code >= 0) {
+            order.Add(code);
+            CodeField = h.Fields[code].Name;
+            string dir = CodeDirectory(folder, CodeField, sample, code);
+            if (dir != null) Names = CodeBook.Get(folder, dir, new string[] { CodeField });
+        }
+        for (int j = 0; j < h.Fields.Count; j++) if (!order.Contains(j)) order.Add(j);
+        foreach (int j in order) {
+            string n = h.Fields[j].Name, up = n.ToUpperInvariant();
+            Columns.Add(n);
+            string t;
+            if (j == nab) t = "№ Абонента";
+            else if (j == dpr) t = "Дата пров.";
+            else if (up.StartsWith("POK")) t = "Показ.";
+            else if (h.Fields[j].Decimals >= 2 && (up.Contains("SR") || up.Contains("SUT"))) t = "Ср. сут.";
+            else if (j == uch) t = "№ Уч.";
+            else if (j == code) t = "Код";
+            else t = FieldNames.Label(n) ?? n;
+            if (Titles.Contains(t)) t = FieldNames.Label(n) ?? n;
+            Titles.Add(t);
+            if (j == code) { Columns.Add(""); Titles.Add("Наименование"); NameColumn = Columns.Count - 1; }
+        }
+        Columns.Add("");
+        Titles.Add("Таблица");
+    }
+
+    // справочник кодов: небольшая таблица с полем того же имени (каждый код один раз, при нём текст), где нашлось больше кодов
+    static string CodeDirectory(string folder, string field, DbfTable sample, int code) {
+        Dictionary<string, bool> codes = new Dictionary<string, bool>();
+        for (int r = 0; r < sample.Count; r++) {
+            string v = DbfTable.Format(sample.GetValue(r, code, null), true).Trim();
+            if (v.Length > 0 && v != "0") codes[v] = true;
+        }
+        string best = null;
+        int bestHits = 0;
+        foreach (string f in Directory.GetFiles(folder)) {
+            if (string.Compare(Path.GetExtension(f), ".dbf", StringComparison.OrdinalIgnoreCase) != 0) continue;
+            if (Path.GetFileNameWithoutExtension(f).ToUpperInvariant().Contains("OBH")) continue;
+            try {
+                DbfTable h = DbfTable.LoadHeader(f);
+                int k = h.FieldIndex(field);
+                if (k < 0 || h.Expected > 5000) continue;
+                bool text = false;
+                foreach (DbfField fl in h.Fields) if (fl.Type == 'C' && fl.Length >= 8) text = true;
+                if (!text) continue;
+                DbfTable t = DbfTable.Load(f, null, null, 5000);
+                Dictionary<string, int> seen = new Dictionary<string, int>();
+                for (int r = 0; r < t.Count; r++) {
+                    string v = DbfTable.Format(t.GetValue(r, k, null), true).Trim();
+                    int c;
+                    seen.TryGetValue(v, out c);
+                    seen[v] = c + 1;
+                }
+                int hits = 0;
+                bool unique = true;
+                foreach (string c in codes.Keys) { int n; if (seen.TryGetValue(c, out n)) { hits++; if (n > 1) unique = false; } }
+                if (unique && hits > bestHits) { bestHits = hits; best = Path.GetFileName(f); }
+            } catch (Exception) { }
+        }
+        return codes.Count > 0 && bestHits * 10 >= codes.Count * 6 ? best : null;
+    }
+
+    // обходы лицевого из всех таблиц, новые сверху; одинаковые строки (в текущих и в архиве) - один раз
+    public List<ObhodRow> Rows(string ls, out string error) {
+        error = null;
+        List<ObhodRow> r = new List<ObhodRow>();
+        Dictionary<string, bool> seen = new Dictionary<string, bool>();
+        foreach (AccountTable t in Tables) {
+            List<int> rows;
+            DbfTable part;
+            try { part = t.Find(ls, out rows); } catch (Exception ex) { error = t.Name + ": " + ex.Message; continue; }
+            int date = -1;
+            for (int j = 0; j < part.Fields.Count && date < 0; j++) if (part.Fields[j].Type == 'D') date = j;
+            int dpr = part.FieldIndex("DPR");
+            if (dpr >= 0) date = dpr;
+            foreach (int row in rows) {
+                ObhodRow o = new ObhodRow();
+                o.Table = t.Name;
+                o.Values = new string[Columns.Count];
+                for (int c = 0; c < Columns.Count; c++) {
+                    if (Columns[c].Length == 0) continue;
+                    int j = part.FieldIndex(Columns[c]);
+                    if (j >= 0) o.Values[c] = DbfTable.Format(part.GetValue(row, j, null), false).Trim();
+                }
+                if (NameColumn > 0 && Names != null) o.Values[NameColumn] = Names.Name(o.Values[NameColumn - 1] ?? "");
+                o.Values[Columns.Count - 1] = t.Name;
+                object d = date >= 0 ? part.GetValue(row, date, null) : null;
+                if (d is DateTime) o.Date = (DateTime)d;
+                string key = string.Join("|", o.Values, 0, Columns.Count - 1);
+                if (seen.ContainsKey(key)) continue;
+                seen[key] = true;
+                r.Add(o);
+            }
+        }
+        r.Sort(delegate(ObhodRow a, ObhodRow b) { return b.Date.CompareTo(a.Date); });
+        return r;
+    }
+}
+
 // Окно «Наряды»: номер или список номеров -> выполнен (зелёным) / не выполнен (красным)
 public class NaryadForm : Form {
     readonly string dir, folder;
@@ -8202,6 +8415,12 @@ public class NaryadForm : Form {
     readonly Label lsHead = new Label();
     readonly ListView lsList = new ListView(), details = new ListView();
     readonly List<NaryadRow> lsRows = new List<NaryadRow>();
+    // обходы лицевого (как окно Ctrl+O программы базы) и наряды лицевого по индексу NAB программы базы (все годы)
+    readonly Label obHead = new Label();
+    readonly ListView obList = new ListView();
+    ObhodSource obhod;
+    AccountTable nzByLs;
+    NaryadHit shownHit;
     readonly string setupFile;
     NaryadSetup setup;
     DbfTable header;                 // поля таблицы нарядов
@@ -8404,6 +8623,58 @@ public class NaryadForm : Form {
         BuildColumns();
         tableLabel.Text = "Таблица нарядов " + setup.Describe() + (setup.How == "сама" ? " (найдена программой - если не та, нажмите справа)" : "");
         ShowIndex();
+        OpenAccountTables();
+    }
+
+    // в фоне: таблица нарядов и таблицы обходов - по индексу NAB программы базы (лицевой -> все записи)
+    void OpenAccountTables() {
+        string path = TablePath, fold = folder;
+        obHead.Text = "Обходы лицевого (как Ctrl+O) - открываю таблицы обходов...";
+        System.Threading.Thread th = new System.Threading.Thread(delegate() {
+            AccountTable nz = null;
+            ObhodSource ob = null;
+            try { nz = AccountTable.Open(path); } catch (Exception) { nz = null; }
+            try { ob = ObhodSource.Find(fold); } catch (Exception ex) { ob = new ObhodSource(); ob.Note = "не получилось: " + ex.Message; }
+            Post(delegate {
+                nzByLs = nz;
+                obhod = ob;
+                Report.Line("Наряды лицевого: " + (nz == null ? "-" : nz.Name + " - " + nz.Note));
+                Report.Line("Обходы (Ctrl+O): " + ob.Note + (ob.CodeField.Length > 0 ? "; код - поле " + ob.CodeField + (ob.Names != null ? ", названия: " + ob.Names.Note : ", справочник названий не найден") : ""));
+                BuildObhodColumns();
+                obHead.Text = ob.Tables.Count > 0 ? "Обходы лицевого (как Ctrl+O) - выберите найденный наряд" : "Обходы (Ctrl+O): " + ob.Note;
+                if (shownHit != null) ShowAccount(shownHit);
+            });
+        });
+        th.IsBackground = true;
+        th.Start();
+    }
+
+    void BuildObhodColumns() {
+        obList.Columns.Clear();
+        if (obhod == null) return;
+        for (int c = 0; c < obhod.Titles.Count; c++) {
+            string t = obhod.Titles[c];
+            obList.Columns.Add(t, t == "Наименование" ? 240 : t == "№ Абонента" ? 100 : t == "Таблица" ? 90 : t.Contains("Дата") ? 85 : 70);
+        }
+    }
+
+    // обходы лицевого - внизу
+    void ShowObhod(string ls) {
+        obList.Items.Clear();
+        if (obhod == null || obhod.Tables.Count == 0) return;
+        if (ls.Length == 0) { obHead.Text = "Обходы лицевого - у наряда нет лицевого"; return; }
+        string err;
+        List<ObhodRow> rows = obhod.Rows(ls, out err);
+        List<string> names = new List<string>();
+        foreach (AccountTable t in obhod.Tables) names.Add(t.Name);
+        obHead.Text = "Обходы лицевого " + ls + " (как Ctrl+O): записей " + rows.Count + "  - таблицы " + string.Join(", ", names.ToArray())
+            + (err != null ? "; ошибка: " + err : "");
+        foreach (ObhodRow r in rows) {
+            string[] v = new string[r.Values.Length];
+            for (int i = 0; i < v.Length; i++) v[i] = r.Values[i] ?? "";
+            obList.Items.Add(new ListViewItem(v));
+        }
+        if (obList.Items.Count > 0) obList.Items[0].Selected = true;
     }
 
     // поиск таблицы нарядов среди таблиц папки базы (в фоне)
@@ -8790,7 +9061,30 @@ public class NaryadForm : Form {
         p.Controls.Add(two);
         p.Controls.Add(lsHead);
         p.Resize += delegate { if (p.Width > 300) two.SplitterDistance = Math.Max(200, p.Width * 45 / 100); };
-        return p;
+
+        // снизу - обходы лицевого (как Ctrl+O)
+        Panel ob = new Panel();
+        ob.Dock = DockStyle.Fill;
+        obHead.Dock = DockStyle.Top;
+        obHead.Height = 26;
+        obHead.TextAlign = ContentAlignment.MiddleLeft;
+        obHead.Font = headFont;
+        obHead.ForeColor = Color.FromArgb(0, 60, 150);
+        obList.Dock = DockStyle.Fill;
+        obList.View = View.Details;
+        obList.FullRowSelect = true;
+        obList.HideSelection = false;
+        obList.MultiSelect = false;
+        obList.GridLines = true;
+        ob.Controls.Add(obList);
+        ob.Controls.Add(obHead);
+        SplitContainer both = new SplitContainer();
+        both.Dock = DockStyle.Fill;
+        both.Orientation = Orientation.Horizontal;
+        both.Panel1.Controls.Add(p);
+        both.Panel2.Controls.Add(ob);
+        both.SizeChanged += delegate { if (both.Height > 200) both.SplitterDistance = both.Height / 2; };
+        return both;
     }
 
     // все наряды лицевого выбранной строки - из индексов годов (какие созданы); выбранный наряд - выделен
@@ -8798,14 +9092,26 @@ public class NaryadForm : Form {
         lsList.Items.Clear();
         details.Items.Clear();
         lsRows.Clear();
+        shownHit = h;
+        obList.Items.Clear();
         if (h == null || h.RecNo <= 0) { lsHead.Text = "Наряды лицевого - выберите найденный наряд"; return; }
         NaryadIndex own;
         if (!indexes.TryGetValue(h.Year, out own)) return;
         string ls = own.AccountOf(h.RecNo);
         List<int> years = new List<int>();
         List<int> recs = new List<int>();
-        if (ls.Length == 0) recs.Add(h.RecNo);
-        else
+        string from = "";
+        if (ls.Length > 0 && nzByLs != null && nzByLs.Indexed) {
+            // индекс программы базы по лицевому - все годы
+            try {
+                List<int> rows;
+                DbfTable part = nzByLs.Find(ls, out rows);
+                foreach (int row in rows) recs.Add(part.RecNos[row]);
+                from = "все годы - по индексу программы базы";
+            } catch (Exception) { recs.Clear(); }
+        }
+        if (!recs.Contains(h.RecNo)) recs.Add(h.RecNo);
+        if (from.Length == 0 && ls.Length > 0)
             foreach (int y in KnownYears()) {
                 NaryadIndex x = IndexOf(y);
                 if (x == null) continue;
@@ -8823,7 +9129,8 @@ public class NaryadForm : Form {
         lsRows.Sort(delegate(NaryadRow a, NaryadRow b) { int c = b.Date.CompareTo(a.Date); return c != 0 ? c : b.Number.CompareTo(a.Number); });
         years.Sort();
         lsHead.Text = (ls.Length > 0 ? "Наряды лицевого " + ls + AddressOf(ls) : "Наряд (лицевого в таблице нарядов нет)") + "   - нарядов " + lsRows.Count
-            + " (смотрим годы с индексом: " + JoinYears(KnownYears()) + ")";
+            + (from.Length > 0 ? " (" + from + ")" : " (смотрим годы с индексом: " + JoinYears(KnownYears()) + ")");
+        ShowObhod(ls);
         foreach (NaryadRow r in lsRows) {
             ListViewItem it = new ListViewItem(new string[] { r.Year > 0 ? r.Year.ToString() + r.Number : r.Number.ToString(),
                 r.Date == DateTime.MinValue ? "" : r.Date.ToString("dd.MM.yyyy"), r.Work, r.Done ? "выполнен" : "НЕТ" });
@@ -8911,6 +9218,17 @@ public class NaryadForm : Form {
                 for (int c = 0; c < it.SubItems.Count; c++) sb.Append(c > 0 ? " | " : "").Append(it.SubItems[c].Text);
             }
             foreach (ListViewItem it in details.Items) sb.Append("\n      ").Append(it.SubItems[0].Text).Append(": ").Append(it.SubItems[1].Text);
+            return sb.ToString();
+        }
+    }
+    public string ObhodText {
+        get {
+            StringBuilder sb = new StringBuilder(obHead.Text);
+            foreach (ColumnHeader c in obList.Columns) sb.Append(c.Index == 0 ? "\n   " : " | ").Append(c.Text);
+            foreach (ListViewItem it in obList.Items) {
+                sb.Append("\n   ");
+                for (int c = 0; c < it.SubItems.Count; c++) sb.Append(c > 0 ? " | " : "").Append(it.SubItems[c].Text);
+            }
             return sb.ToString();
         }
     }
