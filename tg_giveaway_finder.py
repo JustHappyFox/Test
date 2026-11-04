@@ -137,7 +137,23 @@ def make_client() -> TelegramClient:
         session: Any = StringSession(string_session)
     else:
         session = session_file
-    return TelegramClient(session, int(api_id), api_hash)
+    kwargs: dict[str, Any] = {}
+    if use_websocket():
+        # Только HTTPS через прокси (облачные среды): подключаемся как Telegram Web
+        from tg_ws_transport import ConnectionWebSocket
+        kwargs["connection"] = ConnectionWebSocket
+        log.info("Подключение к Telegram через WebSocket (*.web.telegram.org)")
+    return TelegramClient(session, int(api_id), api_hash, **kwargs)
+
+
+def use_websocket() -> bool:
+    """TG_TRANSPORT=ws|tcp. По умолчанию WebSocket, если задан HTTPS-прокси (через него TCP не пройдёт)."""
+    mode = os.environ.get("TG_TRANSPORT", "").strip().lower()
+    if mode in ("ws", "websocket", "wss"):
+        return True
+    if mode == "tcp":
+        return False
+    return bool(os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy"))
 
 
 def login_state_path() -> Path:

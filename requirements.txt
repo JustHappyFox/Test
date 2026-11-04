@@ -1,1 +1,3 @@
 telethon>=1.45,<2
+# для подключения через WebSocket (TG_TRANSPORT=ws, нужен в средах только с HTTPS-прокси)
+aiohttp>=3.9
