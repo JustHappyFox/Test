@@ -123,12 +123,18 @@ def make_client() -> TelegramClient:
             "и положите в файл .env рядом со скриптом (см. .env.example)."
         )
     string_session = os.environ.get("TG_STRING_SESSION")
+    session_file = os.environ.get("TG_SESSION", str(here / "giveaway_finder"))
     if string_session:  # удобно для облака (Colab / GitHub Actions): сессия хранится в секрете
         from telethon.sessions import StringSession
         session: Any = StringSession(string_session)
     else:
-        session = os.environ.get("TG_SESSION", str(here / "giveaway_finder"))
+        session = session_file
     return TelegramClient(session, int(api_id), api_hash)
+
+
+def login_state_path() -> Path:
+    here = Path(__file__).resolve().parent
+    return Path(os.environ.get("TG_SESSION", str(here / "giveaway_finder")) + ".login.json")
 
 
 # --------------------------------------------------------------------------- #
@@ -769,13 +775,71 @@ def build_parser() -> argparse.ArgumentParser:
 
     w = sub.add_parser("watch", help="следить за новыми розыгрышами в ваших чатах в реальном времени")
     w.add_argument("--notify", action="store_true", help="пересылать найденные розыгрыши в «Избранное»")
+
+    lg = sub.add_parser("login", help="вход по шагам (для серверов/облака): --phone, затем --code")
+    g = lg.add_mutually_exclusive_group()
+    g.add_argument("--phone", help="номер телефона, на него придёт код в Telegram")
+    g.add_argument("--code", help="код из Telegram")
+    g.add_argument("--password", action="store_true", help="пароль 2FA из переменной TG_2FA_PASSWORD")
+    sub.add_parser("logout", help="завершить сессию в Telegram и удалить её файл")
     return p
+
+
+async def cmd_login(client: TelegramClient, args: argparse.Namespace) -> None:
+    """Вход по шагам без интерактивного ввода: --phone, затем --code, затем (если есть 2FA) --password."""
+    state = login_state_path()
+    if await client.is_user_authorized():
+        me = await client.get_me()
+        print(f"✅ Уже выполнен вход: {me.first_name or ''} (@{me.username or '—'})")
+        state.unlink(missing_ok=True)
+        return
+    if args.phone:
+        sent = await client.send_code_request(args.phone)
+        state.write_text(json.dumps({"phone": args.phone, "hash": sent.phone_code_hash}), encoding="utf-8")
+        print("📨 Telegram отправил код входа в приложение. Дальше: login --code КОД")
+        return
+    if not state.is_file():
+        sys.exit("Сначала: login --phone +79991234567")
+    st = json.loads(state.read_text(encoding="utf-8"))
+    try:
+        if args.code:
+            await client.sign_in(phone=st["phone"], code=args.code.strip(), phone_code_hash=st["hash"])
+        elif args.password:
+            password = os.environ.get("TG_2FA_PASSWORD")
+            if not password:
+                sys.exit("Пароль 2FA передаётся через переменную окружения TG_2FA_PASSWORD")
+            await client.sign_in(password=password)
+        else:
+            sys.exit("Укажите --phone, --code или --password")
+    except errors.SessionPasswordNeededError:
+        print("🔐 Включена двухэтапная проверка. Дальше: TG_2FA_PASSWORD=... login --password")
+        return
+    except (errors.PhoneCodeInvalidError, errors.PhoneCodeExpiredError) as e:
+        sys.exit(f"Код не подошёл ({type(e).__name__}). Запросите новый: login --phone ...")
+    me = await client.get_me()
+    state.unlink(missing_ok=True)
+    print(f"✅ Вход выполнен: {me.first_name or ''} (@{me.username or '—'})")
+
+
+async def cmd_logout(client: TelegramClient, args: argparse.Namespace) -> None:
+    """Завершает сессию на стороне Telegram (пропадёт из «Устройств») и удаляет её файл."""
+    if await client.is_user_authorized():
+        await client.log_out()
+    login_state_path().unlink(missing_ok=True)
+    print("✅ Сессия завершена")
 
 
 async def amain(args: argparse.Namespace) -> None:
     client = make_client()
     if hasattr(args, "max_flood_wait"):
         client.flood_sleep_threshold = args.max_flood_wait
+    if args.command in ("login", "logout"):
+        await client.connect()
+        try:
+            await (cmd_login if args.command == "login" else cmd_logout)(client, args)
+        finally:
+            await client.disconnect()
+        return
     await client.start()
     try:
         if args.command == "scan":

@@ -100,6 +100,15 @@ python tg_giveaway_finder.py watch --notify
 
 Все опции: `python tg_giveaway_finder.py scan --help`.
 
+**Вход на сервере или в облаке, где нельзя ввести код в окне программы,** делается по шагам:
+
+```bash
+python tg_giveaway_finder.py login --phone +79991234567     # Telegram пришлёт код в приложение
+python tg_giveaway_finder.py login --code 12345
+TG_2FA_PASSWORD='...' python tg_giveaway_finder.py login --password   # только если включена 2FA
+python tg_giveaway_finder.py logout    # завершить сессию (пропадёт из «Настройки → Устройства»)
+```
+
 ## Как получить больше розыгрышей
 
 * **Подпишитесь на 2–3 канала-агрегатора**, которые пересылают официальные розыгрыши, и запускайте `scan --dialogs` или держите включённым `watch --notify`. Это самый надёжный источник. Скрипт понимает пересылки и ведёт на оригинальный пост. Готовых проверенных названий таких каналов я не нашёл, ищите в TGStat или в Telegram по словам «розыгрыши premium».

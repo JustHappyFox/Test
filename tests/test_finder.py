@@ -254,3 +254,71 @@ class CliTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FakeAuthClient:
+    def __init__(self, needs_password=False):
+        self.authorized = False
+        self.needs_password = needs_password
+        self.calls = []
+
+    async def is_user_authorized(self):
+        return self.authorized
+
+    async def send_code_request(self, phone):
+        self.calls.append(("send_code", phone))
+        return argparse.Namespace(phone_code_hash="HASH")
+
+    async def sign_in(self, phone=None, code=None, *, password=None, phone_code_hash=None):
+        self.calls.append(("sign_in", phone, code, password, phone_code_hash))
+        if code and self.needs_password:
+            raise gf.errors.SessionPasswordNeededError(request=None)
+        self.authorized = True
+
+    async def get_me(self):
+        return argparse.Namespace(first_name="Test", username="tester")
+
+    async def log_out(self):
+        self.authorized = False
+        self.calls.append(("log_out",))
+
+
+class LoginTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.old = gf.os.environ.get("TG_SESSION")
+        gf.os.environ["TG_SESSION"] = str(Path(self.tmp.name, "s"))
+
+    def tearDown(self):
+        if self.old is None:
+            gf.os.environ.pop("TG_SESSION", None)
+        else:
+            gf.os.environ["TG_SESSION"] = self.old
+        gf.os.environ.pop("TG_2FA_PASSWORD", None)
+        self.tmp.cleanup()
+
+    def run_login(self, client, *argv):
+        a = gf.build_parser().parse_args(["login", *argv])
+        out = io.StringIO()
+        with redirect_stdout(out):
+            asyncio.run(gf.cmd_login(client, a))
+        return out.getvalue()
+
+    def test_phone_code_password_flow(self):
+        c = FakeAuthClient(needs_password=True)
+        self.assertIn("код входа", self.run_login(c, "--phone", "+70000000000"))
+        self.assertTrue(gf.login_state_path().is_file())
+        self.assertIn("двухэтапная", self.run_login(c, "--code", " 12345 "))
+        self.assertEqual(c.calls[1], ("sign_in", "+70000000000", "12345", None, "HASH"))
+        gf.os.environ["TG_2FA_PASSWORD"] = "secret"
+        self.assertIn("Вход выполнен", self.run_login(c, "--password"))
+        self.assertTrue(c.authorized)
+        self.assertFalse(gf.login_state_path().exists())
+        self.assertIn("Уже выполнен вход", self.run_login(c))
+        with redirect_stdout(io.StringIO()):
+            asyncio.run(gf.cmd_logout(c, None))
+        self.assertFalse(c.authorized)
+
+    def test_code_without_phone_exits(self):
+        with self.assertRaises(SystemExit):
+            self.run_login(FakeAuthClient(), "--code", "1")
