@@ -20,7 +20,7 @@ NOW = datetime.now(timezone.utc)
 
 
 def args(**kw):
-    base = dict(depth=2, delay=(0, 0), page_delay=None, days=31, per_channel_limit=400, max_channels=50,
+    base = dict(depth=2, delay=(0, 0), page_delay=None, batch_size=500, batch_pause=0, days=31, per_channel_limit=400, max_channels=50,
                 prize="any", min_winners=1, hide_ineligible=False)
     base.update(kw)
     return argparse.Namespace(**base)
@@ -200,18 +200,38 @@ class CliTests(unittest.TestCase):
 
     def test_normal_preset(self):
         a = self.parse()
-        self.assertEqual((a.delay, a.page_delay, a.max_channels, a.max_flood_wait), ((1, 3), None, 300, 120))
+        self.assertEqual((a.delay, a.page_delay, a.max_channels, a.batch_pause, a.max_flood_wait),
+                         ((0, 0), None, 2000, 0, 120))
         src = gf.describe_sources(a)
+        self.assertIn("без пауз", src)
         self.assertIn("поиск новых публичных каналов", src)
         self.assertNotIn("ваши подписки", src)
 
     def test_careful_preset_and_overrides(self):
         a = self.parse("--careful")
-        self.assertEqual((a.delay, a.page_delay, a.max_channels, a.per_channel_limit, a.search_pages,
-                          a.max_flood_wait), ((8, 20), (2, 4), 100, 200, 1, 30))
-        self.assertIn("осторожный", gf.describe_sources(a))
-        b = self.parse("--careful", "--delay", "30-60", "--max-channels", "40")
-        self.assertEqual((b.delay, b.max_channels, b.page_delay), ((30, 60), 40, (2, 4)))
+        self.assertEqual((a.delay, a.batch_size, a.batch_pause, a.max_channels, a.max_flood_wait),
+                         ((0, 0), 500, 30, 2000, 300))
+        self.assertIn("пауза 30 с каждые 500 каналов", gf.describe_sources(a))
+        b = self.parse("--careful", "--batch-size", "200", "--batch-pause", "60", "--delay", "1-2")
+        self.assertEqual((b.batch_size, b.batch_pause, b.delay), (200, 60, (1, 2)))
+
+    def test_batch_pause_every_n_channels(self):
+        chans = [channel(i, f"c{i}") for i in range(1, 8)]
+        f = gf.GiveawayFinder(FakeClient(chans, {}), args(batch_size=3, batch_pause=30))
+        for c in chans:
+            f.enqueue(c, 0)
+        sleeps = []
+        real_sleep = asyncio.sleep
+
+        async def fake_sleep(sec):
+            sleeps.append(sec)
+            await real_sleep(0)
+        gf.asyncio.sleep = fake_sleep
+        try:
+            asyncio.run(f.crawl())
+        finally:
+            gf.asyncio.sleep = real_sleep
+        self.assertEqual([s for s in sleeps if s], [30, 30])  # после 3-го и 6-го канала
 
     def test_parse_range(self):
         self.assertEqual(gf.parse_range("5"), (5, 5))

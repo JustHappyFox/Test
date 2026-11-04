@@ -54,11 +54,14 @@ DEFAULT_HASHTAGS = ["розыгрыш", "giveaway", "конкурс", "разд�
 
 # Значения по умолчанию для обычного и осторожного (--careful) режимов.
 # Явно указанные в командной строке опции всегда важнее пресета.
+# Паузы между отдельными каналами по умолчанию нет: частоту запросов регулирует сам Telegram
+# через FloodWait, а Telethon его автоматически пережидает.
 PRESETS = {
-    "normal": dict(delay="1-3", page_delay=None, max_channels=300, per_channel_limit=400,
-                   search_pages=3, max_flood_wait=120),
-    "careful": dict(delay="8-20", page_delay="2-4", max_channels=100, per_channel_limit=200,
-                    search_pages=1, max_flood_wait=30),
+    "normal": dict(delay="0", page_delay=None, max_channels=2000, per_channel_limit=400,
+                   search_pages=3, max_flood_wait=120, batch_size=500, batch_pause=0.0),
+    # Осторожный: пауза 30 с после каждых 500 каналов и терпеливое ожидание FloodWait до 5 минут.
+    "careful": dict(delay="0", page_delay=None, max_channels=2000, per_channel_limit=400,
+                    search_pages=3, max_flood_wait=300, batch_size=500, batch_pause=30.0),
 }
 
 
@@ -119,7 +122,12 @@ def make_client() -> TelegramClient:
             "Получите их на https://my.telegram.org -> API development tools\n"
             "и положите в файл .env рядом со скриптом (см. .env.example)."
         )
-    session = os.environ.get("TG_SESSION", str(here / "giveaway_finder"))
+    string_session = os.environ.get("TG_STRING_SESSION")
+    if string_session:  # удобно для облака (Colab / GitHub Actions): сессия хранится в секрете
+        from telethon.sessions import StringSession
+        session: Any = StringSession(string_session)
+    else:
+        session = os.environ.get("TG_SESSION", str(here / "giveaway_finder"))
     return TelegramClient(session, int(api_id), api_hash)
 
 
@@ -457,6 +465,11 @@ class GiveawayFinder:
                 except (errors.RPCError, ValueError) as e:
                     log.debug("  пропуск: %s", e)
                 await self.pause()
+                batch_size = getattr(self.args, "batch_size", 0)
+                batch_pause = getattr(self.args, "batch_pause", 0)
+                if batch_pause and batch_size and len(self.scanned) % batch_size == 0 and self.queue:
+                    log.info("Просканировано %d каналов — пауза %g с", len(self.scanned), batch_pause)
+                    await asyncio.sleep(batch_pause)
         except errors.FloodWaitError as e:
             self.stopped_reason = f"Telegram ограничил частоту запросов на {e.seconds} с — обход остановлен"
         except (KeyboardInterrupt, asyncio.CancelledError):
@@ -622,8 +635,13 @@ def describe_sources(args: argparse.Namespace) -> str:
     if args.depth:
         parts.append(f"каналы-спонсоры найденных розыгрышей (глубина {args.depth})")
     mode = "осторожный" if args.careful else "обычный"
-    lo, hi = args.delay
-    return (f"Режим: {mode} (паузы {lo:g}–{hi:g} с, до {args.max_channels} каналов). "
+    pauses = []
+    if args.batch_pause:
+        pauses.append(f"пауза {args.batch_pause:g} с каждые {args.batch_size} каналов")
+    if args.delay and args.delay[1]:
+        pauses.append(f"{args.delay[0]:g}–{args.delay[1]:g} с между каналами")
+    pause_text = ", ".join(pauses) or "без пауз"
+    return (f"Режим: {mode} ({pause_text}, до {args.max_channels} каналов). "
             f"Источники: " + "; ".join(parts))
 
 
@@ -720,21 +738,23 @@ def build_parser() -> argparse.ArgumentParser:
 
     lim = s.add_argument_group("обход")
     lim.add_argument("--careful", action="store_true",
-                     help="осторожный режим: случайные паузы 8–20 с между каналами и 2–4 с между "
-                          "страницами, до 100 каналов, остановка при FloodWait > 30 с")
+                     help="осторожный режим: пауза 30 с после каждых 500 каналов, "
+                          "FloodWait до 5 минут пережидается, а не обрывает обход")
     lim.add_argument("--depth", type=int, default=2,
                      help="глубина «снежного кома» по каналам-участникам розыгрышей (2)")
-    lim.add_argument("--max-channels", type=int, help="максимум каналов за запуск (300; --careful: 100)")
+    lim.add_argument("--max-channels", type=int, help="максимум каналов за запуск (2000)")
     lim.add_argument("--days", type=int, default=31, help="насколько старые посты смотреть, дней (31)")
-    lim.add_argument("--per-channel-limit", type=int,
-                     help="макс. сообщений на канал (400; --careful: 200)")
+    lim.add_argument("--per-channel-limit", type=int, help="макс. сообщений на канал (400)")
+    lim.add_argument("--batch-size", type=int, help="размер пачки каналов для --batch-pause (500)")
+    lim.add_argument("--batch-pause", type=float,
+                     help="пауза в секундах после каждой пачки каналов (0; --careful: 30)")
     lim.add_argument("--delay", metavar="СЕК[-СЕК]",
-                     help="случайная пауза между каналами/запросами, напр. 5 или 5-15 (1-3; --careful: 8-20)")
+                     help="пауза между отдельными каналами, напр. 1 или 1-3 (по умолчанию нет)")
     lim.add_argument("--page-delay", metavar="СЕК[-СЕК]",
-                     help="пауза между страницами истории одного канала (нет; --careful: 2-4)")
+                     help="пауза между страницами истории одного канала (по умолчанию нет)")
     lim.add_argument("--max-flood-wait", type=int,
                      help="автоматически ждать FloodWait до N секунд, дольше — остановиться "
-                          "(120; --careful: 30)")
+                          "(120; --careful: 300)")
 
     out = s.add_argument_group("результат")
     out.add_argument("--check", action="store_true",
