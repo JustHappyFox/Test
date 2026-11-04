@@ -20,7 +20,7 @@ NOW = datetime.now(timezone.utc)
 
 
 def args(**kw):
-    base = dict(depth=2, delay=0, days=31, per_channel_limit=400, max_channels=50,
+    base = dict(depth=2, delay=(0, 0), page_delay=None, days=31, per_channel_limit=400, max_channels=50,
                 prize="any", min_winners=1, hide_ineligible=False)
     base.update(kw)
     return argparse.Namespace(**base)
@@ -50,6 +50,7 @@ class FakeClient:
         self.chans = {c.id: c for c in chans}
         self.history = history  # cid -> [Message], новые первыми
         self.scanned = []
+        self.wait_times = []
 
     async def get_entity(self, x):
         cid = x.channel_id if isinstance(x, types.PeerChannel) else None
@@ -64,8 +65,9 @@ class FakeClient:
     async def get_input_entity(self, x):
         return await self.get_entity(x)
 
-    async def iter_messages(self, ent, limit=None):
+    async def iter_messages(self, ent, limit=None, wait_time=None):
         self.scanned.append(ent.id)
+        self.wait_times.append(wait_time)
         for m in self.history.get(ent.id, [])[:limit]:
             yield m
 
@@ -187,11 +189,47 @@ class CrawlTests(unittest.TestCase):
 
 
 class CliTests(unittest.TestCase):
+    def parse(self, *argv):
+        return gf.apply_preset(gf.build_parser().parse_args(["scan", *argv]))
+
     def test_parser(self):
-        a = gf.build_parser().parse_args(["scan", "--dialogs", "-c", "@x", "--check", "--prize", "stars"])
+        a = self.parse("--dialogs", "-c", "@x", "--check", "--prize", "stars")
         self.assertTrue(a.dialogs and a.check)
         self.assertEqual(a.channel, ["@x"])
         self.assertEqual(a.prize, "stars")
+
+    def test_normal_preset(self):
+        a = self.parse()
+        self.assertEqual((a.delay, a.page_delay, a.max_channels, a.max_flood_wait), ((1, 3), None, 300, 120))
+        src = gf.describe_sources(a)
+        self.assertIn("поиск новых публичных каналов", src)
+        self.assertNotIn("ваши подписки", src)
+
+    def test_careful_preset_and_overrides(self):
+        a = self.parse("--careful")
+        self.assertEqual((a.delay, a.page_delay, a.max_channels, a.per_channel_limit, a.search_pages,
+                          a.max_flood_wait), ((8, 20), (2, 4), 100, 200, 1, 30))
+        self.assertIn("осторожный", gf.describe_sources(a))
+        b = self.parse("--careful", "--delay", "30-60", "--max-channels", "40")
+        self.assertEqual((b.delay, b.max_channels, b.page_delay), ((30, 60), 40, (2, 4)))
+
+    def test_parse_range(self):
+        self.assertEqual(gf.parse_range("5"), (5, 5))
+        self.assertEqual(gf.parse_range("2.5-4"), (2.5, 4))
+        with self.assertRaises(argparse.ArgumentTypeError):
+            gf.parse_range("9-3")
+        with self.assertRaises(argparse.ArgumentTypeError):
+            gf.parse_range("abc")
+        for _ in range(50):
+            self.assertTrue(2 <= gf.rand_pause((2, 4)) <= 4)
+        self.assertEqual(gf.rand_pause(None), 0)
+
+    def test_page_delay_passed_to_history(self):
+        client = FakeClient([channel(1, "a")], {})
+        f = gf.GiveawayFinder(client, args(page_delay=(2, 4)))
+        f.enqueue(channel(1, "a"), 0)
+        asyncio.run(f.crawl())
+        self.assertTrue(2 <= client.wait_times[0] <= 4)
 
 
 if __name__ == "__main__":

@@ -33,6 +33,7 @@ import csv
 import json
 import logging
 import os
+import random
 import sys
 from collections import deque
 from dataclasses import asdict, dataclass, field
@@ -50,6 +51,44 @@ DEFAULT_KEYWORDS = [
     "раздача", "конкурс", "халява", "бесплатный премиум",
 ]
 DEFAULT_HASHTAGS = ["розыгрыш", "giveaway", "конкурс", "раздача", "розыгрыши", "giveaways"]
+
+# Значения по умолчанию для обычного и осторожного (--careful) режимов.
+# Явно указанные в командной строке опции всегда важнее пресета.
+PRESETS = {
+    "normal": dict(delay="1-3", page_delay=None, max_channels=300, per_channel_limit=400,
+                   search_pages=3, max_flood_wait=120),
+    "careful": dict(delay="8-20", page_delay="2-4", max_channels=100, per_channel_limit=200,
+                    search_pages=1, max_flood_wait=30),
+}
+
+
+def parse_range(value: str | float | tuple | None) -> tuple[float, float] | None:
+    """'5' -> (5, 5), '5-15' -> (5, 15). Пауза выбирается случайно в этом диапазоне."""
+    if value is None or isinstance(value, tuple):
+        return value
+    lo, _, hi = str(value).partition("-")
+    try:
+        lo_f = float(lo)
+        hi_f = float(hi) if hi else lo_f
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"неверный диапазон пауз: {value!r} (пример: 5 или 5-15)") from None
+    if lo_f < 0 or hi_f < lo_f:
+        raise argparse.ArgumentTypeError(f"неверный диапазон пауз: {value!r}")
+    return lo_f, hi_f
+
+
+def apply_preset(args: argparse.Namespace) -> argparse.Namespace:
+    preset = PRESETS["careful" if getattr(args, "careful", False) else "normal"]
+    for name, default in preset.items():
+        if getattr(args, name, None) is None:
+            setattr(args, name, default)
+    args.delay = parse_range(args.delay)
+    args.page_delay = parse_range(args.page_delay)
+    return args
+
+
+def rand_pause(rng: tuple[float, float] | None) -> float:
+    return random.uniform(*rng) if rng else 0.0
 
 
 # --------------------------------------------------------------------------- #
@@ -209,6 +248,10 @@ class GiveawayFinder:
         self.refs: dict[int, ChannelRef] = {}           # кэш инфо о каналах
         self.stopped_reason: str | None = None
 
+    async def pause(self) -> None:
+        """Случайная пауза между запросами — чтобы не долбить API с ровным интервалом."""
+        await asyncio.sleep(rand_pause(self.args.delay))
+
     # ---------- очередь ----------
 
     def enqueue(self, item: Any, depth: int, front: bool = False) -> None:
@@ -274,7 +317,7 @@ class GiveawayFinder:
             for ch in found.chats:
                 if isinstance(ch, types.Channel):
                     self.enqueue(ch, 1)
-            await asyncio.sleep(self.args.delay)
+            await self.pause()
         log.info("Каналов найдено поиском по названию: %d", len(self.queue) - before)
 
     async def _search_posts(self, label: str, pages: int, **kw: Any) -> None:
@@ -305,7 +348,7 @@ class GiveawayFinder:
             if last_chat is None:
                 break
             offset_rate, offset_peer, offset_id = next_rate, utils.get_input_peer(last_chat), last.id
-            await asyncio.sleep(self.args.delay)
+            await self.pause()
         log.info("%s: постов %d, каналов в очереди: %d", label, hits, len(self.queue))
 
     async def discover_hashtags(self, hashtags: Iterable[str]) -> None:
@@ -383,7 +426,9 @@ class GiveawayFinder:
     async def scan_channel(self, ent: Any, depth: int) -> None:
         cutoff = self.now - timedelta(days=self.args.days)
         cid = utils.get_peer_id(ent, add_mark=False)
-        async for msg in self.client.iter_messages(ent, limit=self.args.per_channel_limit):
+        # wait_time — пауза между страницами истории (по 100 сообщений) одного канала
+        async for msg in self.client.iter_messages(ent, limit=self.args.per_channel_limit,
+                                                   wait_time=rand_pause(self.args.page_delay) or None):
             if msg.date and msg.date < cutoff:
                 break
             fwd = getattr(msg, "forward", None)
@@ -411,7 +456,7 @@ class GiveawayFinder:
                     raise
                 except (errors.RPCError, ValueError) as e:
                     log.debug("  пропуск: %s", e)
-                await asyncio.sleep(self.args.delay)
+                await self.pause()
         except errors.FloodWaitError as e:
             self.stopped_reason = f"Telegram ограничил частоту запросов на {e.seconds} с — обход остановлен"
         except (KeyboardInterrupt, asyncio.CancelledError):
@@ -448,7 +493,7 @@ class GiveawayFinder:
                     break
                 except (ValueError, TypeError, errors.RPCError) as e:
                     log.debug("getGiveawayInfo %s/%s: %s", cid, mid, e)
-            await asyncio.sleep(self.args.delay)
+            await self.pause()
             if info is None:
                 g.status = "не удалось проверить"
                 continue
@@ -564,8 +609,27 @@ def save_sources(gs: list[Giveaway], path: str) -> None:
 # Команды
 # --------------------------------------------------------------------------- #
 
+def describe_sources(args: argparse.Namespace) -> str:
+    parts = []
+    if args.channel or args.channels_file:
+        parts.append("ваш список каналов")
+    if args.dialogs:
+        parts.append("ваши подписки")
+    if not args.no_discover:
+        parts.append("поиск новых публичных каналов по словам и хэштегам (без подписки)")
+    if args.post_search:
+        parts.append("поиск по тексту постов")
+    if args.depth:
+        parts.append(f"каналы-спонсоры найденных розыгрышей (глубина {args.depth})")
+    mode = "осторожный" if args.careful else "обычный"
+    lo, hi = args.delay
+    return (f"Режим: {mode} (паузы {lo:g}–{hi:g} с, до {args.max_channels} каналов). "
+            f"Источники: " + "; ".join(parts))
+
+
 async def cmd_scan(client: TelegramClient, args: argparse.Namespace) -> None:
     finder = GiveawayFinder(client, args)
+    log.info(describe_sources(args))
     try:
         await finder.add_seeds()
         if args.dialogs:
@@ -595,7 +659,7 @@ async def cmd_scan(client: TelegramClient, args: argparse.Namespace) -> None:
 
 async def cmd_watch(client: TelegramClient, args: argparse.Namespace) -> None:
     """Слушает все ваши чаты в реальном времени и сообщает о новых розыгрышах."""
-    finder = GiveawayFinder(client, argparse.Namespace(depth=0, delay=0.5))
+    finder = GiveawayFinder(client, argparse.Namespace(depth=0, delay=(0.5, 1.0)))
 
     @client.on(events.NewMessage())
     async def on_message(event: events.NewMessage.Event) -> None:
@@ -650,19 +714,27 @@ def build_parser() -> argparse.ArgumentParser:
                      help="не искать новые каналы по ключевым словам и хэштегам")
     src.add_argument("--keywords", nargs="+", metavar="KW", help="свои ключевые слова для поиска каналов")
     src.add_argument("--hashtags", nargs="+", metavar="TAG", help="свои хэштеги для поиска постов")
-    src.add_argument("--search-pages", type=int, default=3, help="страниц (по 100) на каждый хэштег (3)")
+    src.add_argument("--search-pages", type=int, help="страниц (по 100) на каждый хэштег (3; --careful: 1)")
     src.add_argument("--post-search", action="append", metavar="QUERY",
                      help="полнотекстовый поиск публичных постов (тратит бесплатный дневной лимит)")
 
     lim = s.add_argument_group("обход")
+    lim.add_argument("--careful", action="store_true",
+                     help="осторожный режим: случайные паузы 8–20 с между каналами и 2–4 с между "
+                          "страницами, до 100 каналов, остановка при FloodWait > 30 с")
     lim.add_argument("--depth", type=int, default=2,
                      help="глубина «снежного кома» по каналам-участникам розыгрышей (2)")
-    lim.add_argument("--max-channels", type=int, default=300, help="максимум каналов за запуск (300)")
+    lim.add_argument("--max-channels", type=int, help="максимум каналов за запуск (300; --careful: 100)")
     lim.add_argument("--days", type=int, default=31, help="насколько старые посты смотреть, дней (31)")
-    lim.add_argument("--per-channel-limit", type=int, default=400, help="макс. сообщений на канал (400)")
-    lim.add_argument("--delay", type=float, default=1.0, help="пауза между запросами, сек (1.0)")
-    lim.add_argument("--max-flood-wait", type=int, default=120,
-                     help="автоматически ждать FloodWait до N секунд, дольше — остановиться (120)")
+    lim.add_argument("--per-channel-limit", type=int,
+                     help="макс. сообщений на канал (400; --careful: 200)")
+    lim.add_argument("--delay", metavar="СЕК[-СЕК]",
+                     help="случайная пауза между каналами/запросами, напр. 5 или 5-15 (1-3; --careful: 8-20)")
+    lim.add_argument("--page-delay", metavar="СЕК[-СЕК]",
+                     help="пауза между страницами истории одного канала (нет; --careful: 2-4)")
+    lim.add_argument("--max-flood-wait", type=int,
+                     help="автоматически ждать FloodWait до N секунд, дольше — остановиться "
+                          "(120; --careful: 30)")
 
     out = s.add_argument_group("результат")
     out.add_argument("--check", action="store_true",
@@ -695,7 +767,13 @@ async def amain(args: argparse.Namespace) -> None:
 
 
 def main() -> None:
-    args = build_parser().parse_args()
+    parser = build_parser()
+    args = parser.parse_args()
+    if args.command == "scan":
+        try:
+            apply_preset(args)
+        except (argparse.ArgumentTypeError, ValueError) as e:
+            parser.error(str(e))
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(message)s", datefmt="%H:%M:%S",
