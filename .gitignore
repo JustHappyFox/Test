@@ -1,0 +1,9 @@
+# Сессия Telegram = полный доступ к аккаунту. Никогда не коммитить и не передавать!
+*.session
+*.session-journal
+.env
+__pycache__/
+.venv/
+venv/
+giveaways*.json
+giveaways*.csv

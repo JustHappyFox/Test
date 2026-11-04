@@ -1,0 +1,711 @@
+#!/usr/bin/env python3
+"""
+tg_giveaway_finder — поиск ещё не завершённых ОФИЦИАЛЬНЫХ розыгрышей Telegram
+(Premium / Stars), запущенных через встроенный механизм Giveaways.
+
+Как это работает
+----------------
+Официальный розыгрыш — это сообщение с медиа `messageMediaGiveaway`
+(в нём: каналы-участники, число победителей, дата окончания, приз).
+Глобального API «дай все розыгрыши Telegram» не существует, поэтому скрипт:
+
+  1. Собирает стартовый список каналов:
+       * ваши каналы/группы (--dialogs);
+       * каналы из файла/аргументов (--channels-file / -c);
+       * публичные каналы по ключевым словам (contacts.search);
+       * публичные посты по хэштегам #розыгрыш, #giveaway ... (channels.searchPosts);
+       * (опционально) полнотекстовый поиск публичных постов (--post-search),
+         только в пределах бесплатного дневного лимита.
+  2. Читает свежую историю каждого канала и ищет messageMediaGiveaway
+     с until_date в будущем (в т.ч. пересланные розыгрыши).
+  3. «Снежный ком»: каналы-участники найденных розыгрышей и источники
+     пересылок тоже добавляются в очередь обхода (--depth).
+  4. (опционально, --check) Через payments.getGiveawayInfo проверяет,
+     можете ли участвовать именно вы (страна, «только новые подписчики» и т.п.).
+
+Нужен ПОЛЬЗОВАТЕЛЬСКИЙ аккаунт (не бот): api_id / api_hash с https://my.telegram.org.
+"""
+from __future__ import annotations
+
+import argparse
+import asyncio
+import csv
+import json
+import logging
+import os
+import sys
+from collections import deque
+from dataclasses import asdict, dataclass, field
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any, Iterable
+
+from telethon import TelegramClient, errors, events, functions, types, utils
+
+log = logging.getLogger("giveaway_finder")
+
+DEFAULT_KEYWORDS = [
+    "розыгрыш", "розыгрыши", "розыгрыш premium", "розыгрыш звезд",
+    "giveaway", "giveaways", "premium giveaway", "stars giveaway",
+    "раздача", "конкурс", "халява", "бесплатный премиум",
+]
+DEFAULT_HASHTAGS = ["розыгрыш", "giveaway", "конкурс", "раздача", "розыгрыши", "giveaways"]
+
+
+# --------------------------------------------------------------------------- #
+# Конфигурация
+# --------------------------------------------------------------------------- #
+
+def load_dotenv(path: Path) -> None:
+    """Мини-парсер .env (KEY=VALUE), чтобы не тянуть лишние зависимости."""
+    if not path.is_file():
+        return
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+
+
+def make_client() -> TelegramClient:
+    here = Path(__file__).resolve().parent
+    load_dotenv(Path.cwd() / ".env")
+    load_dotenv(here / ".env")
+    api_id = os.environ.get("TG_API_ID")
+    api_hash = os.environ.get("TG_API_HASH")
+    if not api_id or not api_hash:
+        sys.exit(
+            "Не заданы TG_API_ID / TG_API_HASH.\n"
+            "Получите их на https://my.telegram.org -> API development tools\n"
+            "и положите в файл .env рядом со скриптом (см. .env.example)."
+        )
+    session = os.environ.get("TG_SESSION", str(here / "giveaway_finder"))
+    return TelegramClient(session, int(api_id), api_hash)
+
+
+# --------------------------------------------------------------------------- #
+# Модель данных
+# --------------------------------------------------------------------------- #
+
+@dataclass
+class ChannelRef:
+    id: int
+    title: str | None = None
+    username: str | None = None
+    member: bool | None = None  # подписаны ли вы
+
+    @property
+    def link(self) -> str:
+        return f"https://t.me/{self.username}" if self.username else f"https://t.me/c/{self.id}"
+
+    def label(self) -> str:
+        name = self.title or f"id:{self.id}"
+        return f"{name} (@{self.username})" if self.username else name
+
+
+@dataclass
+class Giveaway:
+    key: str
+    channel_ids: list[int]
+    quantity: int
+    until_date: datetime
+    posted_at: datetime | None
+    months: int | None = None
+    stars: int | None = None
+    prize_description: str | None = None
+    countries: list[str] = field(default_factory=list)
+    only_new_subscribers: bool = False
+    winners_are_visible: bool = False
+    # (channel_id, msg_id): оригиналы — первыми, затем пересланные копии
+    origins: list[tuple[int, int]] = field(default_factory=list)
+    copies: list[tuple[int, int]] = field(default_factory=list)
+    channels: list[ChannelRef] = field(default_factory=list)
+    status: str | None = None
+    eligible: bool | None = None
+
+    @property
+    def kind(self) -> str:
+        if self.stars:
+            return "stars"
+        if self.months:
+            return "premium"
+        return "other"
+
+    def prize_text(self) -> str:
+        if self.stars:
+            per = self.stars // max(self.quantity, 1)
+            text = f"{self.stars} ⭐ Stars, победителей: {self.quantity} (~{per} ⭐ каждому)"
+        elif self.months:
+            text = f"Telegram Premium на {self.months} мес., победителей: {self.quantity}"
+        else:
+            text = f"Приз, победителей: {self.quantity}"
+        if self.prize_description:
+            text += f" + {self.prize_description}"
+        return text
+
+    def time_left(self, now: datetime | None = None) -> str:
+        now = now or datetime.now(timezone.utc)
+        sec = int((self.until_date - now).total_seconds())
+        if sec <= 0:
+            return "завершён"
+        d, rem = divmod(sec, 86400)
+        h, rem = divmod(rem, 3600)
+        m = rem // 60
+        if d:
+            return f"{d}д {h}ч"
+        if h:
+            return f"{h}ч {m}м"
+        return f"{m}м"
+
+
+def giveaway_key(media: types.MessageMediaGiveaway) -> str:
+    # Один и тот же розыгрыш публикуется во всех каналах-участниках и пересылается,
+    # поэтому дедуплицируем по содержимому, а не по id сообщения.
+    until = int(media.until_date.timestamp()) if media.until_date else 0
+    chans = ",".join(str(c) for c in sorted(media.channels or []))
+    return f"{chans}|{until}|{media.quantity}|{media.months or 0}|{media.stars or 0}"
+
+
+def message_link(chan: ChannelRef | None, chan_id: int, msg_id: int) -> str:
+    if chan and chan.username:
+        return f"https://t.me/{chan.username}/{msg_id}"
+    return f"https://t.me/c/{chan_id}/{msg_id}"
+
+
+def active_username(ent: Any) -> str | None:
+    if getattr(ent, "username", None):
+        return ent.username
+    for u in getattr(ent, "usernames", None) or []:
+        if getattr(u, "active", False):
+            return u.username
+    return None
+
+
+def to_ref(ent: Any) -> ChannelRef:
+    # У "min"-объектов (пришли вместе с чужими сообщениями) флаг left недостоверен.
+    known = isinstance(ent, types.Channel) and not getattr(ent, "min", False)
+    return ChannelRef(
+        id=ent.id,
+        title=getattr(ent, "title", None),
+        username=active_username(ent),
+        member=(not ent.left) if known else None,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Поиск
+# --------------------------------------------------------------------------- #
+
+class GiveawayFinder:
+    def __init__(self, client: TelegramClient, args: argparse.Namespace):
+        self.client = client
+        self.args = args
+        self.now = datetime.now(timezone.utc)
+        self.queue: deque[tuple[Any, int]] = deque()   # (entity | int id | str, depth)
+        self.queued_ids: set[int] = set()
+        self.scanned: set[int] = set()
+        self.giveaways: dict[str, Giveaway] = {}
+        self.refs: dict[int, ChannelRef] = {}           # кэш инфо о каналах
+        self.stopped_reason: str | None = None
+
+    # ---------- очередь ----------
+
+    def enqueue(self, item: Any, depth: int, front: bool = False) -> None:
+        cid: int | None = None
+        if isinstance(item, int):
+            cid = item
+        elif not isinstance(item, str):
+            if isinstance(item, types.Channel):
+                self.refs.setdefault(item.id, to_ref(item))
+            elif not isinstance(item, (types.InputPeerChannel, types.InputChannel, types.PeerChannel)):
+                return  # личные чаты, обычные группы и т.п. — пропускаем
+            cid = utils.get_peer_id(item, add_mark=False)
+        if cid is not None:
+            if cid in self.queued_ids or cid in self.scanned:
+                return
+            self.queued_ids.add(cid)
+        (self.queue.appendleft if front else self.queue.append)((item, depth))
+
+    async def resolve(self, item: Any) -> Any | None:
+        try:
+            if isinstance(item, (int, str)):
+                ent = await self.client.get_entity(types.PeerChannel(item) if isinstance(item, int) else item)
+                if not isinstance(ent, types.Channel):
+                    log.warning("%s — не канал/супергруппа, пропускаю", item)
+                    return None
+                self.refs[ent.id] = to_ref(ent)
+                return ent
+            return item
+        except (ValueError, TypeError, errors.RPCError) as e:
+            log.debug("Не удалось получить %r: %s", item, e)
+            return None
+
+    # ---------- источники ----------
+
+    async def add_seeds(self) -> None:
+        seeds: list[str] = list(self.args.channel or [])
+        for path in self.args.channels_file or []:
+            for line in Path(path).read_text(encoding="utf-8").splitlines():
+                line = line.split("#", 1)[0].strip()
+                if line:
+                    seeds.append(line)
+        for s in seeds:
+            self.enqueue(s, 0)
+        if seeds:
+            log.info("Стартовых каналов из списка: %d", len(seeds))
+
+    async def add_dialogs(self) -> None:
+        n = 0
+        async for d in self.client.iter_dialogs():
+            if isinstance(d.entity, types.Channel):
+                self.enqueue(d.entity, 0)
+                n += 1
+        log.info("Ваших каналов/супергрупп: %d", n)
+
+    async def discover_keywords(self, keywords: Iterable[str]) -> None:
+        before = len(self.queue)
+        for kw in keywords:
+            try:
+                found = await self.client(functions.contacts.SearchRequest(q=kw, limit=100))
+            except errors.RPCError as e:
+                log.warning("Поиск каналов «%s» не удался: %s", kw, e)
+                continue
+            for ch in found.chats:
+                if isinstance(ch, types.Channel):
+                    self.enqueue(ch, 1)
+            await asyncio.sleep(self.args.delay)
+        log.info("Каналов найдено поиском по названию: %d", len(self.queue) - before)
+
+    async def _search_posts(self, label: str, pages: int, **kw: Any) -> None:
+        offset_rate, offset_peer, offset_id = 0, types.InputPeerEmpty(), 0
+        hits = 0
+        for _ in range(pages):
+            res = await self.client(functions.channels.SearchPostsRequest(
+                offset_rate=offset_rate, offset_peer=offset_peer, offset_id=offset_id,
+                limit=100, **kw,
+            ))
+            chats = {c.id: c for c in getattr(res, "chats", []) if isinstance(c, types.Channel)}
+            for ch in chats.values():
+                self.refs.setdefault(ch.id, to_ref(ch))
+            msgs = [m for m in getattr(res, "messages", []) if isinstance(m, types.Message)]
+            for m in msgs:
+                cid = utils.get_peer_id(m.peer_id, add_mark=False)
+                ch = chats.get(cid)
+                if ch is None:
+                    continue
+                hits += 1
+                self.handle_message(m, cid, depth=1)  # вдруг сам пост — розыгрыш
+                self.enqueue(ch, 1)
+            next_rate = getattr(res, "next_rate", None)
+            if not msgs or not next_rate:
+                break
+            last = msgs[-1]
+            last_chat = chats.get(utils.get_peer_id(last.peer_id, add_mark=False))
+            if last_chat is None:
+                break
+            offset_rate, offset_peer, offset_id = next_rate, utils.get_input_peer(last_chat), last.id
+            await asyncio.sleep(self.args.delay)
+        log.info("%s: постов %d, каналов в очереди: %d", label, hits, len(self.queue))
+
+    async def discover_hashtags(self, hashtags: Iterable[str]) -> None:
+        for tag in hashtags:
+            tag = tag.lstrip("#")
+            try:
+                await self._search_posts(f"#{tag}", self.args.search_pages, hashtag=tag)
+            except errors.FloodWaitError:
+                raise
+            except errors.RPCError as e:
+                log.warning("Поиск по хэштегу #%s не удался: %s", tag, e)
+
+    async def discover_post_query(self, query: str) -> None:
+        """Полнотекстовый поиск публичных постов. Только бесплатные запросы — Stars не тратим."""
+        try:
+            flood = await self.client(functions.channels.CheckSearchPostsFloodRequest(query=query))
+        except errors.RPCError as e:
+            log.warning("Полнотекстовый поиск недоступен: %s", e)
+            return
+        if not flood.query_is_free and flood.remains <= 0:
+            log.warning(
+                "Бесплатный лимит поиска постов на сегодня исчерпан (%s/%s); «%s» пропущен. "
+                "Платный поиск за Stars скрипт специально не использует.",
+                flood.remains, flood.total_daily, query,
+            )
+            return
+        log.info("Поиск постов «%s» (осталось бесплатных: %s из %s)", query, flood.remains, flood.total_daily)
+        try:
+            await self._search_posts(f"«{query}»", 1, query=query)
+        except errors.RPCError as e:
+            log.warning("Поиск постов «%s» не удался: %s", query, e)
+
+    # ---------- разбор сообщений ----------
+
+    def handle_message(self, msg: types.Message, chat_id: int, depth: int) -> Giveaway | None:
+        media = getattr(msg, "media", None)
+        if not isinstance(media, types.MessageMediaGiveaway):
+            return None
+        if not media.until_date or media.until_date <= self.now:
+            return None  # уже завершён
+
+        fwd = getattr(msg, "fwd_from", None)
+        is_forward = bool(fwd and isinstance(fwd.from_id, types.PeerChannel) and fwd.channel_post)
+        origin = (fwd.from_id.channel_id, fwd.channel_post) if is_forward else (chat_id, msg.id)
+
+        key = giveaway_key(media)
+        g = self.giveaways.get(key)
+        if g is None:
+            g = Giveaway(
+                key=key,
+                channel_ids=list(media.channels or []),
+                quantity=media.quantity,
+                until_date=media.until_date,
+                posted_at=(fwd.date if is_forward else msg.date),
+                months=media.months,
+                stars=media.stars,
+                prize_description=media.prize_description,
+                countries=list(media.countries_iso2 or []),
+                only_new_subscribers=bool(media.only_new_subscribers),
+                winners_are_visible=bool(media.winners_are_visible),
+            )
+            self.giveaways[key] = g
+            log.info("  🎁 найден розыгрыш: %s, до %s", g.prize_text(),
+                     g.until_date.astimezone().strftime("%Y-%m-%d %H:%M"))
+        if origin not in g.origins:
+            g.origins.append(origin)
+        if is_forward and (chat_id, msg.id) not in g.copies:
+            g.copies.append((chat_id, msg.id))
+
+        if depth < self.args.depth:
+            for cid in [*(media.channels or []), origin[0]]:
+                self.enqueue(cid, depth + 1, front=True)  # каналы с розыгрышами — в приоритет
+        return g
+
+    async def scan_channel(self, ent: Any, depth: int) -> None:
+        cutoff = self.now - timedelta(days=self.args.days)
+        cid = utils.get_peer_id(ent, add_mark=False)
+        async for msg in self.client.iter_messages(ent, limit=self.args.per_channel_limit):
+            if msg.date and msg.date < cutoff:
+                break
+            fwd = getattr(msg, "forward", None)
+            if fwd is not None and isinstance(getattr(fwd, "chat", None), types.Channel):
+                self.refs.setdefault(fwd.chat.id, to_ref(fwd.chat))
+            self.handle_message(msg, cid, depth)
+
+    async def crawl(self) -> None:
+        try:
+            while self.queue and len(self.scanned) < self.args.max_channels:
+                item, depth = self.queue.popleft()
+                ent = await self.resolve(item)
+                if ent is None:
+                    continue
+                cid = utils.get_peer_id(ent, add_mark=False)
+                if cid in self.scanned:
+                    continue
+                self.scanned.add(cid)
+                ref = self.refs.get(cid)
+                log.info("[%d/%d, в очереди %d] %s", len(self.scanned), self.args.max_channels,
+                         len(self.queue), ref.label() if ref else f"id:{cid}")
+                try:
+                    await self.scan_channel(ent, depth)
+                except errors.FloodWaitError:
+                    raise
+                except (errors.RPCError, ValueError) as e:
+                    log.debug("  пропуск: %s", e)
+                await asyncio.sleep(self.args.delay)
+        except errors.FloodWaitError as e:
+            self.stopped_reason = f"Telegram ограничил частоту запросов на {e.seconds} с — обход остановлен"
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            self.stopped_reason = "прервано пользователем"
+        if self.stopped_reason:
+            log.warning("%s. Показываю то, что успели найти.", self.stopped_reason)
+
+    # ---------- пост-обработка ----------
+
+    async def channel_ref(self, cid: int) -> ChannelRef:
+        ref = self.refs.get(cid)
+        if ref and ref.member is not None:
+            return ref
+        try:
+            ent = await self.client.get_entity(types.PeerChannel(cid))
+            ref = to_ref(ent)
+        except (ValueError, TypeError, errors.RPCError):
+            ref = ref or ChannelRef(id=cid)
+        self.refs[cid] = ref
+        return ref
+
+    async def resolve_channels(self) -> None:
+        for g in self.giveaways.values():
+            g.channels = [await self.channel_ref(cid) for cid in g.channel_ids]
+
+    async def check_eligibility(self) -> None:
+        """payments.getGiveawayInfo: можно ли вам участвовать / не закончился ли уже."""
+        for key, g in list(self.giveaways.items()):
+            info = None
+            for cid, mid in [*g.origins, *g.copies]:
+                try:
+                    peer = await self.client.get_input_entity(types.PeerChannel(cid))
+                    info = await self.client(functions.payments.GetGiveawayInfoRequest(peer=peer, msg_id=mid))
+                    break
+                except (ValueError, TypeError, errors.RPCError) as e:
+                    log.debug("getGiveawayInfo %s/%s: %s", cid, mid, e)
+            await asyncio.sleep(self.args.delay)
+            if info is None:
+                g.status = "не удалось проверить"
+                continue
+            if isinstance(info, types.payments.GiveawayInfoResults):
+                del self.giveaways[key]  # уже подведены итоги
+                continue
+            g.status, g.eligible = describe_info(info)
+
+
+def describe_info(info: types.payments.GiveawayInfo) -> tuple[str, bool | None]:
+    if info.disallowed_country:
+        return f"❌ недоступно для вашей страны ({info.disallowed_country})", False
+    if info.admin_disallowed_chat_id:
+        return "❌ вы админ одного из каналов-организаторов", False
+    if info.joined_too_early_date:
+        when = info.joined_too_early_date.astimezone().strftime("%Y-%m-%d")
+        return f"❌ только для новых подписчиков (вы подписаны с {when})", False
+    if info.preparing_results:
+        return "⏳ подводятся итоги", None
+    if info.participating:
+        return "✅ вы уже участвуете", True
+    return "➕ можно участвовать — подпишитесь на все каналы", True
+
+
+# --------------------------------------------------------------------------- #
+# Вывод
+# --------------------------------------------------------------------------- #
+
+def filter_giveaways(gs: Iterable[Giveaway], args: argparse.Namespace) -> list[Giveaway]:
+    out = []
+    for g in gs:
+        if args.prize != "any" and g.kind != args.prize:
+            continue
+        if g.quantity < args.min_winners:
+            continue
+        if args.hide_ineligible and g.eligible is False:
+            continue
+        out.append(g)
+    return sorted(out, key=lambda g: g.until_date)
+
+
+def first_link(g: Giveaway, refs: dict[int, ChannelRef]) -> str:
+    cid, mid = (g.origins or g.copies)[0]
+    return message_link(refs.get(cid), cid, mid)
+
+
+def print_report(gs: list[Giveaway], refs: dict[int, ChannelRef], scanned: int) -> None:
+    print()
+    print(f"Просканировано каналов: {scanned}. Активных официальных розыгрышей: {len(gs)}")
+    print("=" * 78)
+    for i, g in enumerate(gs, 1):
+        until = g.until_date.astimezone().strftime("%Y-%m-%d %H:%M")
+        print(f"[{i}] {g.prize_text()}")
+        print(f"    До: {until} (осталось {g.time_left()})")
+        chans = []
+        for c in g.channels:
+            mark = "" if c.member is None else (" ✅" if c.member else " ➕")
+            chans.append(f"{c.label()}{mark}")
+        print(f"    Каналы ({len(chans)}): " + ", ".join(chans))
+        extras = []
+        if g.only_new_subscribers:
+            extras.append("только новые подписчики")
+        if g.countries:
+            extras.append("страны: " + ", ".join(g.countries))
+        if extras:
+            print("    Условия: " + "; ".join(extras))
+        if g.status:
+            print(f"    Статус: {g.status}")
+        print(f"    Ссылка: {first_link(g, refs)}")
+        print("-" * 78)
+    if gs and any(c.member is not None for g in gs for c in g.channels):
+        print("✅ — вы подписаны, ➕ — нужно подписаться (участвуют подписчики ВСЕХ каналов розыгрыша)")
+
+
+def export(gs: list[Giveaway], refs: dict[int, ChannelRef], json_path: str | None, csv_path: str | None) -> None:
+    rows = []
+    for g in gs:
+        d = asdict(g)
+        d["until_date"] = g.until_date.isoformat()
+        d["posted_at"] = g.posted_at.isoformat() if g.posted_at else None
+        d["kind"] = g.kind
+        d["prize"] = g.prize_text()
+        d["link"] = first_link(g, refs)
+        d["channels"] = [{**asdict(c), "link": c.link} for c in g.channels]
+        rows.append(d)
+    if json_path:
+        Path(json_path).write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
+        log.info("Сохранено в %s", json_path)
+    if csv_path:
+        with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
+            w = csv.writer(f, delimiter=";")
+            w.writerow(["until_date", "kind", "prize", "winners", "only_new_subscribers",
+                        "countries", "status", "link", "channels"])
+            for r in rows:
+                w.writerow([r["until_date"], r["kind"], r["prize"], r["quantity"],
+                            r["only_new_subscribers"], ",".join(r["countries"]), r["status"] or "",
+                            r["link"], " ".join(c["link"] for c in r["channels"])])
+        log.info("Сохранено в %s", csv_path)
+
+
+def save_sources(gs: list[Giveaway], path: str) -> None:
+    """Дописывает каналы с найденными розыгрышами в файл — пригодится как --channels-file."""
+    p = Path(path)
+    known = set(p.read_text(encoding="utf-8").split()) if p.exists() else set()
+    new = sorted({f"@{c.username}" for g in gs for c in g.channels if c.username} - known)
+    if new:
+        with p.open("a", encoding="utf-8") as f:
+            f.write("\n".join(new) + "\n")
+    log.info("В %s добавлено каналов: %d", path, len(new))
+
+
+# --------------------------------------------------------------------------- #
+# Команды
+# --------------------------------------------------------------------------- #
+
+async def cmd_scan(client: TelegramClient, args: argparse.Namespace) -> None:
+    finder = GiveawayFinder(client, args)
+    try:
+        await finder.add_seeds()
+        if args.dialogs:
+            await finder.add_dialogs()
+        if not args.no_discover:
+            await finder.discover_keywords(args.keywords or DEFAULT_KEYWORDS)
+            await finder.discover_hashtags(args.hashtags or DEFAULT_HASHTAGS)
+        for q in args.post_search or []:
+            await finder.discover_post_query(q)
+    except errors.FloodWaitError as e:
+        log.warning("Поиск каналов прерван: лимит запросов на %d с. Перехожу к обходу.", e.seconds)
+    if not finder.queue:
+        sys.exit("Нечего сканировать: укажите -c/--channels-file, --dialogs или не отключайте поиск.")
+
+    await finder.crawl()
+    if args.check:
+        log.info("Проверяю возможность участия (%d розыгрышей)...", len(finder.giveaways))
+        await finder.check_eligibility()
+    await finder.resolve_channels()
+
+    gs = filter_giveaways(finder.giveaways.values(), args)
+    print_report(gs, finder.refs, len(finder.scanned))
+    export(gs, finder.refs, args.json, args.csv)
+    if args.save_sources:
+        save_sources(gs, args.save_sources)
+
+
+async def cmd_watch(client: TelegramClient, args: argparse.Namespace) -> None:
+    """Слушает все ваши чаты в реальном времени и сообщает о новых розыгрышах."""
+    finder = GiveawayFinder(client, argparse.Namespace(depth=0, delay=0.5))
+
+    @client.on(events.NewMessage())
+    async def on_message(event: events.NewMessage.Event) -> None:
+        msg = event.message
+        if not isinstance(msg.media, types.MessageMediaGiveaway):
+            return
+        finder.now = datetime.now(timezone.utc)
+        before = len(finder.giveaways)
+        cid = utils.get_peer_id(msg.peer_id, add_mark=False)
+        g = finder.handle_message(msg, cid, depth=0)
+        if g is None or len(finder.giveaways) == before:
+            return  # завершён или уже видели
+        g.channels = [await finder.channel_ref(c) for c in g.channel_ids]
+        try:
+            ocid, omid = g.origins[0]
+            info = await client(functions.payments.GetGiveawayInfoRequest(
+                peer=await client.get_input_entity(types.PeerChannel(ocid)), msg_id=omid))
+            if isinstance(info, types.payments.GiveawayInfo):
+                g.status, g.eligible = describe_info(info)
+        except (ValueError, TypeError, errors.RPCError):
+            pass
+        text = (f"🎁 Новый розыгрыш: {g.prize_text()}\n"
+                f"До: {g.until_date.astimezone():%Y-%m-%d %H:%M} (осталось {g.time_left()})\n"
+                f"Каналы: " + ", ".join(c.label() for c in g.channels) +
+                (f"\nСтатус: {g.status}" if g.status else "") +
+                f"\n{first_link(g, finder.refs)}")
+        print(text, "\n" + "-" * 78, flush=True)
+        if args.notify:
+            await msg.forward_to("me")
+            await client.send_message("me", text, link_preview=False)
+
+    log.info("Слежу за новыми розыгрышами во всех ваших чатах. Ctrl+C — выход.")
+    await client.run_until_disconnected()
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        description="Поиск активных официальных розыгрышей Telegram (Premium / Stars).",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p.add_argument("-v", "--verbose", action="store_true", help="подробный лог")
+    sub = p.add_subparsers(dest="command", required=True)
+
+    s = sub.add_parser("scan", help="разовый поиск розыгрышей")
+    src = s.add_argument_group("откуда брать каналы")
+    src.add_argument("-c", "--channel", action="append", metavar="@USERNAME",
+                     help="канал для сканирования (можно несколько раз, можно t.me-ссылку)")
+    src.add_argument("--channels-file", action="append", metavar="FILE",
+                     help="файл со списком каналов, по одному в строке")
+    src.add_argument("--dialogs", action="store_true", help="сканировать все ваши каналы и супергруппы")
+    src.add_argument("--no-discover", action="store_true",
+                     help="не искать новые каналы по ключевым словам и хэштегам")
+    src.add_argument("--keywords", nargs="+", metavar="KW", help="свои ключевые слова для поиска каналов")
+    src.add_argument("--hashtags", nargs="+", metavar="TAG", help="свои хэштеги для поиска постов")
+    src.add_argument("--search-pages", type=int, default=3, help="страниц (по 100) на каждый хэштег (3)")
+    src.add_argument("--post-search", action="append", metavar="QUERY",
+                     help="полнотекстовый поиск публичных постов (тратит бесплатный дневной лимит)")
+
+    lim = s.add_argument_group("обход")
+    lim.add_argument("--depth", type=int, default=2,
+                     help="глубина «снежного кома» по каналам-участникам розыгрышей (2)")
+    lim.add_argument("--max-channels", type=int, default=300, help="максимум каналов за запуск (300)")
+    lim.add_argument("--days", type=int, default=31, help="насколько старые посты смотреть, дней (31)")
+    lim.add_argument("--per-channel-limit", type=int, default=400, help="макс. сообщений на канал (400)")
+    lim.add_argument("--delay", type=float, default=1.0, help="пауза между запросами, сек (1.0)")
+    lim.add_argument("--max-flood-wait", type=int, default=120,
+                     help="автоматически ждать FloodWait до N секунд, дольше — остановиться (120)")
+
+    out = s.add_argument_group("результат")
+    out.add_argument("--check", action="store_true",
+                     help="проверить через API, можете ли вы участвовать (страна, новые подписчики...)")
+    out.add_argument("--prize", choices=["any", "premium", "stars"], default="any", help="тип приза")
+    out.add_argument("--min-winners", type=int, default=1, help="минимум победителей")
+    out.add_argument("--hide-ineligible", action="store_true", help="скрыть те, где участвовать нельзя (с --check)")
+    out.add_argument("--json", metavar="FILE", help="сохранить результат в JSON")
+    out.add_argument("--csv", metavar="FILE", help="сохранить результат в CSV")
+    out.add_argument("--save-sources", metavar="FILE",
+                     help="дописать каналы с розыгрышами в файл (для следующего --channels-file)")
+
+    w = sub.add_parser("watch", help="следить за новыми розыгрышами в ваших чатах в реальном времени")
+    w.add_argument("--notify", action="store_true", help="пересылать найденные розыгрыши в «Избранное»")
+    return p
+
+
+async def amain(args: argparse.Namespace) -> None:
+    client = make_client()
+    if hasattr(args, "max_flood_wait"):
+        client.flood_sleep_threshold = args.max_flood_wait
+    await client.start()
+    try:
+        if args.command == "scan":
+            await cmd_scan(client, args)
+        else:
+            await cmd_watch(client, args)
+    finally:
+        await client.disconnect()
+
+
+def main() -> None:
+    args = build_parser().parse_args()
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="%(asctime)s %(message)s", datefmt="%H:%M:%S",
+    )
+    logging.getLogger("telethon").setLevel(logging.WARNING)
+    try:
+        asyncio.run(amain(args))
+    except KeyboardInterrupt:
+        pass
+
+
+if __name__ == "__main__":
+    main()
