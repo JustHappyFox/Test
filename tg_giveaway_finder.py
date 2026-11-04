@@ -589,6 +589,10 @@ def filter_giveaways(gs: Iterable[Giveaway], args: argparse.Namespace) -> list[G
             continue
         if g.quantity < args.min_winners:
             continue
+        if g.kind == "stars" and (g.stars or 0) < (getattr(args, "min_stars", 0) or 0):
+            continue
+        if g.kind == "premium" and g.quantity < (getattr(args, "min_premium", 0) or 0):
+            continue
         if args.hide_ineligible and g.eligible is False:
             continue
         if not country_ok(g, allowed):
@@ -884,6 +888,10 @@ def add_scan_args(s: argparse.ArgumentParser) -> None:
                      help="проверить через API, можете ли вы участвовать (страна, новые подписчики...)")
     out.add_argument("--prize", choices=["any", "premium", "stars"], default="any", help="тип приза")
     out.add_argument("--min-winners", type=int, default=1, help="минимум победителей")
+    out.add_argument("--min-stars", type=int, default=0, metavar="N",
+                     help="розыгрыши Stars: минимум звёзд на весь розыгрыш (напр. 10000)")
+    out.add_argument("--min-premium", type=int, default=0, metavar="N",
+                     help="розыгрыши Premium: минимум подписок (победителей), напр. 5")
     out.add_argument("--countries", metavar="RU,BY,KZ",
                      help="оставить розыгрыши без ограничений по странам и для этих стран "
                           "(«для всех стран» показываются первыми)")

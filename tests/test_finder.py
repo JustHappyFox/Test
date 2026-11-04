@@ -371,3 +371,15 @@ class PostTests(unittest.TestCase):
         f.handle_message(message(3, 1, giveaway_media([3], months=3, days_left=2, countries_iso2=["US"])), 3, 0)
         gs = gf.filter_giveaways(f.giveaways.values(), args(countries="RU,BY,KZ"))
         self.assertEqual([g.countries for g in gs], [[], ["RU"]])
+
+
+class PrizeThresholdTests(unittest.TestCase):
+    def test_min_stars_and_min_premium(self):
+        f = gf.GiveawayFinder(None, args())
+        for cid, media in [(1, giveaway_media([1], stars=25000, quantity=100)),
+                           (2, giveaway_media([2], stars=5000, quantity=50)),
+                           (3, giveaway_media([3], months=6, quantity=5)),
+                           (4, giveaway_media([4], months=3, quantity=1))]:
+            f.handle_message(message(cid, 1, media), cid, 0)
+        gs = gf.filter_giveaways(f.giveaways.values(), args(min_stars=10000, min_premium=5))
+        self.assertEqual(sorted((g.kind, g.quantity) for g in gs), [("premium", 5), ("stars", 100)])
