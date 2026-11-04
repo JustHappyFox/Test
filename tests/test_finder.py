@@ -358,8 +358,9 @@ class PostTests(unittest.TestCase):
             asyncio.run(gf.cmd_post(client, self.make(tmp, "--depth", "0")))
             # переслан пост из канала-организатора @host, а не копия агрегатора; иранский отфильтрован
             self.assertEqual(sent, [(900, 9, 100)])
-            posted = json.loads(Path(tmp, "posted.json").read_text(encoding="utf-8"))
-            self.assertEqual(len(posted), 1)
+            state = json.loads(Path(tmp, "posted.json").read_text(encoding="utf-8"))
+            self.assertEqual(len(state["posted"]), 1)
+            self.assertIsNotNone(state["last_post"])
             # повторный запуск не пересылает то же самое
             asyncio.run(gf.cmd_post(client, self.make(tmp, "--depth", "0")))
             self.assertEqual(len(sent), 1)
@@ -383,3 +384,30 @@ class PrizeThresholdTests(unittest.TestCase):
             f.handle_message(message(cid, 1, media), cid, 0)
         gs = gf.filter_giveaways(f.giveaways.values(), args(min_stars=10000, min_premium=5))
         self.assertEqual(sorted((g.kind, g.quantity) for g in gs), [("premium", 5), ("stars", 100)])
+
+
+class IntervalTests(unittest.TestCase):
+    def test_post_is_due(self):
+        last = NOW - timedelta(hours=3)
+        self.assertEqual(gf.post_is_due(last, 3.5, NOW)[0], False)
+        self.assertEqual(gf.post_is_due(last, 3.5, NOW + timedelta(minutes=21))[0], True)  # допуск 10 мин
+        self.assertEqual(gf.post_is_due(None, 3.5, NOW)[0], True)
+        self.assertEqual(gf.post_is_due(last, 0, NOW)[0], True)
+
+    def test_state_roundtrip_and_old_format(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp, "s.json")
+            p.write_text(json.dumps({"k": "2030-01-01T00:00:00+00:00"}))  # старый формат
+            self.assertEqual(gf.load_state(p), ({"k": "2030-01-01T00:00:00+00:00"}, None))
+            gf.save_state(p, {"k": "2030-01-01T00:00:00+00:00"}, NOW)
+            posted, last = gf.load_state(p)
+            self.assertEqual((posted, last), ({"k": "2030-01-01T00:00:00+00:00"}, NOW))
+
+    def test_post_skips_when_too_early(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp, "posted.json")
+            gf.save_state(state, {}, NOW - timedelta(hours=1))
+            a = gf.apply_preset(gf.build_parser().parse_args(
+                ["post", "--to", "@x", "--state", str(state), "--min-interval-hours", "3.5"]))
+            asyncio.run(gf.cmd_post(None, a))  # клиент не нужен: выходит до любых запросов
+            self.assertEqual(gf.load_state(state)[1], NOW - timedelta(hours=1))

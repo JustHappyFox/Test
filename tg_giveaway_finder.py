@@ -753,20 +753,45 @@ async def find_root_post(client: TelegramClient, g: Giveaway) -> tuple[int, int]
     return g.origins[0] if g.origins else None
 
 
-def load_posted(path: Path) -> dict[str, str]:
+def load_state(path: Path) -> tuple[dict[str, str], datetime | None]:
+    """Состояние репоста: {"last_post": ISO-время, "posted": {ключ розыгрыша: дата окончания}}."""
     if not path.is_file():
-        return {}
+        return {}, None
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except ValueError:
-        return {}
-    return data if isinstance(data, dict) else {}
+        return {}, None
+    if isinstance(data, dict) and isinstance(data.get("posted"), dict):
+        last = data.get("last_post")
+        return data["posted"], datetime.fromisoformat(last) if last else None
+    return (data, None) if isinstance(data, dict) else ({}, None)  # старый формат: только posted
+
+
+def save_state(path: Path, posted: dict[str, str], last_post: datetime | None) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = {"last_post": last_post.isoformat() if last_post else None, "posted": posted}
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+
+
+def post_is_due(last_post: datetime | None, interval_hours: float, now: datetime,
+                slack: timedelta = timedelta(minutes=10)) -> tuple[bool, datetime | None]:
+    """Пора ли постить: прошло ли interval_hours с последнего поста (с небольшим допуском,
+    т.к. запуски по расписанию GitHub приходят с опозданием)."""
+    if not interval_hours or last_post is None:
+        return True, None
+    next_at = last_post + timedelta(hours=interval_hours)
+    return now >= next_at - slack, next_at
 
 
 async def cmd_post(client: TelegramClient, args: argparse.Namespace) -> None:
     state_path = Path(args.state)
-    posted = load_posted(state_path)
+    posted, last_post = load_state(state_path)
     now = datetime.now(timezone.utc)
+    due, next_at = post_is_due(last_post, args.min_interval_hours, now)
+    if not due and not args.dry_run:
+        log.info("Ещё рано: последний пост %s, следующий не раньше %s (UTC)",
+                 last_post.strftime("%d.%m %H:%M"), next_at.strftime("%d.%m %H:%M"))
+        return
     # забываем завершившиеся розыгрыши, чтобы файл не рос бесконечно
     posted = {k: v for k, v in posted.items() if datetime.fromisoformat(v) > now}
 
@@ -800,8 +825,7 @@ async def cmd_post(client: TelegramClient, args: argparse.Namespace) -> None:
         sent += 1
         log.info("✅ Переслано: %s | %s", g.prize_text(), link)
     if not args.dry_run:
-        state_path.parent.mkdir(parents=True, exist_ok=True)
-        state_path.write_text(json.dumps(posted, ensure_ascii=False, indent=1), encoding="utf-8")
+        save_state(state_path, posted, now if sent else last_post)
     if args.save_sources:
         save_sources(filter_giveaways(finder.giveaways.values(), args), args.save_sources)
     if sent == 0:
@@ -921,6 +945,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="файл с уже пересланными розыгрышами, чтобы не повторяться (posted.json)")
     ps.add_argument("--min-hours-left", type=float, default=3.0,
                     help="не пересылать розыгрыши, до конца которых меньше N часов (3)")
+    ps.add_argument("--min-interval-hours", type=float, default=0, metavar="Ч",
+                    help="не постить чаще, чем раз в Ч часов (напр. 3.5); при раннем запуске "
+                         "выходит сразу, ничего не сканируя")
     ps.add_argument("--dry-run", action="store_true", help="только показать, что было бы переслано")
 
     w = sub.add_parser("watch", help="следить за новыми розыгрышами в ваших чатах в реальном времени")

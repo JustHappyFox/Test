@@ -1,10 +1,12 @@
 name: Репост розыгрышей в @TGaGifts
 
-# Каждые 2 часа ищет активные официальные розыгрыши и пересылает в канал один новый
+# Раз в 3,5 часа пересылает в канал один новый активный официальный розыгрыш
 # (из канала-организатора). Для публичного репозитория минуты GitHub Actions бесплатны.
+# Cron не умеет «каждые 3,5 часа», поэтому задание запускается каждые полчаса, а скрипт
+# сам выходит за секунды, если с последнего поста прошло меньше 3,5 часа (--min-interval-hours).
 on:
   schedule:
-    - cron: "17 */2 * * *"   # каждые 2 часа (время UTC); минута 17 — чтобы не ждать в очереди GitHub
+    - cron: "13,43 * * * *"   # каждые 30 минут (UTC); не в :00 — меньше очередь у GitHub
   workflow_dispatch: {}       # ручной запуск: вкладка Actions → Run workflow
 
 concurrency:
@@ -51,7 +53,7 @@ jobs:
         run: >
           python tg_giveaway_finder.py post --to TGaGifts
           --countries RU,BY,KZ --min-stars 10000 --min-premium 5
-          --count 1 --min-hours-left 3
+          --count 1 --min-hours-left 3 --min-interval-hours 3.5
           --careful --max-channels 300 --search-pages 1
           --channels-file .state/sources.txt --save-sources .state/sources.txt
           --state .state/posted.json
