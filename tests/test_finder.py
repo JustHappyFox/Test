@@ -351,7 +351,7 @@ class PostTests(unittest.TestCase):
         sent = []
 
         async def forward_messages(to, mid, from_peer=None):
-            sent.append((to.id, mid, from_peer.id))
+            sent.append((to.id, mid, from_peer.channel_id))
         client.forward_messages = forward_messages
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -361,6 +361,7 @@ class PostTests(unittest.TestCase):
             state = json.loads(Path(tmp, "posted.json").read_text(encoding="utf-8"))
             self.assertEqual(len(state["posted"]), 1)
             self.assertIsNotNone(state["last_post"])
+            self.assertEqual(state["queue"], [])  # иранский не попал, единственный подходящий уже опубликован
             # повторный запуск не пересылает то же самое
             asyncio.run(gf.cmd_post(client, self.make(tmp, "--depth", "0")))
             self.assertEqual(len(sent), 1)
@@ -398,16 +399,53 @@ class IntervalTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             p = Path(tmp, "s.json")
             p.write_text(json.dumps({"k": "2030-01-01T00:00:00+00:00"}))  # старый формат
-            self.assertEqual(gf.load_state(p), ({"k": "2030-01-01T00:00:00+00:00"}, None))
-            gf.save_state(p, {"k": "2030-01-01T00:00:00+00:00"}, NOW)
-            posted, last = gf.load_state(p)
-            self.assertEqual((posted, last), ({"k": "2030-01-01T00:00:00+00:00"}, NOW))
+            self.assertEqual(gf.load_state(p), {"last_post": None, "queue": [],
+                                                "posted": {"k": "2030-01-01T00:00:00+00:00"}})
+            st = {"last_post": NOW.isoformat(), "posted": {"k": "x"}, "queue": [{"key": "q"}]}
+            gf.save_state(p, st)
+            self.assertEqual(gf.load_state(p), st)
 
     def test_post_skips_when_too_early(self):
         with tempfile.TemporaryDirectory() as tmp:
             state = Path(tmp, "posted.json")
-            gf.save_state(state, {}, NOW - timedelta(hours=1))
+            earlier = (NOW - timedelta(hours=1)).isoformat()
+            gf.save_state(state, {"last_post": earlier, "posted": {}, "queue": []})
             a = gf.apply_preset(gf.build_parser().parse_args(
                 ["post", "--to", "@x", "--state", str(state), "--min-interval-hours", "3.5"]))
             asyncio.run(gf.cmd_post(None, a))  # клиент не нужен: выходит до любых запросов
-            self.assertEqual(gf.load_state(state)[1], NOW - timedelta(hours=1))
+            self.assertEqual(gf.load_state(state)["last_post"], earlier)
+
+
+class QueueTests(unittest.TestCase):
+    def test_uses_queue_without_scanning(self):
+        target = channel(900, "mygroup", left=False)
+
+        class NoScanClient(FakeClient):
+            async def iter_messages(self, ent, limit=None, wait_time=None):
+                raise AssertionError("сканирование не должно запускаться")
+                yield  # pragma: no cover
+
+        client = NoScanClient([target], {})
+        sent = []
+
+        async def forward_messages(to, mid, from_peer=None):
+            sent.append((mid, from_peer.channel_id, from_peer.access_hash))
+        client.forward_messages = forward_messages
+
+        def entry(key, days, countries):
+            return {"key": key, "until": (NOW + timedelta(days=days)).isoformat(), "prize": key,
+                    "countries": countries, "channel_id": 100, "access_hash": 7, "msg_id": days,
+                    "link": "https://t.me/x/1"}
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp, "s.json")
+            gf.save_state(state, {"last_post": None, "posted": {"old": (NOW - timedelta(days=1)).isoformat()},
+                                  "queue": [entry("ru", 1, ["RU"]), entry("all", 5, []),
+                                            entry("ending", 0.05, [])]})
+            a = gf.apply_preset(gf.build_parser().parse_args(
+                ["post", "--to", "@mygroup", "--state", str(state), "--countries", "RU,BY,KZ"]))
+            asyncio.run(gf.cmd_post(client, a))
+            st = gf.load_state(state)
+        self.assertEqual(sent, [(5, 100, 7)])                     # «для всех стран» первым
+        self.assertEqual([e["key"] for e in st["queue"]], ["ru"])  # истекающий выброшен
+        self.assertEqual(list(st["posted"]), ["all"])              # завершившийся «old» забыт
+        self.assertIsNotNone(st["last_post"])

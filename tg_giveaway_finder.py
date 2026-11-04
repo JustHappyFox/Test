@@ -753,24 +753,29 @@ async def find_root_post(client: TelegramClient, g: Giveaway) -> tuple[int, int]
     return g.origins[0] if g.origins else None
 
 
-def load_state(path: Path) -> tuple[dict[str, str], datetime | None]:
-    """Состояние репоста: {"last_post": ISO-время, "posted": {ключ розыгрыша: дата окончания}}."""
+def load_state(path: Path) -> dict[str, Any]:
+    """Состояние репоста:
+    {"last_post": ISO-время | null,
+     "posted": {ключ розыгрыша: дата окончания},       — что уже пересылали
+     "queue": [{...}, ...]}                            — найденные, но ещё не опубликованные
+    """
+    st: dict[str, Any] = {"last_post": None, "posted": {}, "queue": []}
     if not path.is_file():
-        return {}, None
+        return st
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except ValueError:
-        return {}, None
+        return st
     if isinstance(data, dict) and isinstance(data.get("posted"), dict):
-        last = data.get("last_post")
-        return data["posted"], datetime.fromisoformat(last) if last else None
-    return (data, None) if isinstance(data, dict) else ({}, None)  # старый формат: только posted
+        st.update(posted=data["posted"], last_post=data.get("last_post"), queue=data.get("queue") or [])
+    elif isinstance(data, dict):  # старый формат: только posted
+        st["posted"] = data
+    return st
 
 
-def save_state(path: Path, posted: dict[str, str], last_post: datetime | None) -> None:
+def save_state(path: Path, st: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    data = {"last_post": last_post.isoformat() if last_post else None, "posted": posted}
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+    path.write_text(json.dumps(st, ensure_ascii=False, indent=1), encoding="utf-8")
 
 
 def post_is_due(last_post: datetime | None, interval_hours: float, now: datetime,
@@ -783,53 +788,102 @@ def post_is_due(last_post: datetime | None, interval_hours: float, now: datetime
     return now >= next_at - slack, next_at
 
 
+def queue_order(e: dict[str, Any]) -> tuple:
+    return (bool(e.get("countries")), e["until"])  # «для всех стран» — первыми, затем кто раньше кончится
+
+
+async def queue_entry(client: TelegramClient, g: Giveaway, finder: "GiveawayFinder") -> dict[str, Any] | None:
+    """Готовая к пересылке запись: пост в канале-организаторе + access_hash, чтобы потом
+    переслать без поиска (в т.ч. из новой сессии на другом сервере)."""
+    root = await find_root_post(client, g)
+    if root is None:
+        return None
+    cid, mid = root
+    try:
+        peer = await client.get_input_entity(types.PeerChannel(cid))
+    except (ValueError, TypeError):
+        return None
+    ref = await finder.channel_ref(cid)
+    return {"key": g.key, "until": g.until_date.isoformat(), "prize": g.prize_text(),
+            "countries": g.countries, "channel_id": cid,
+            "access_hash": getattr(peer, "access_hash", None), "msg_id": mid,
+            "link": message_link(ref, cid, mid)}
+
+
 async def cmd_post(client: TelegramClient, args: argparse.Namespace) -> None:
     state_path = Path(args.state)
-    posted, last_post = load_state(state_path)
+    st = load_state(state_path)
     now = datetime.now(timezone.utc)
+    last_post = datetime.fromisoformat(st["last_post"]) if st["last_post"] else None
     due, next_at = post_is_due(last_post, args.min_interval_hours, now)
-    if not due and not args.dry_run:
+    if not due and not (args.dry_run or args.refill):
         log.info("Ещё рано: последний пост %s, следующий не раньше %s (UTC)",
                  last_post.strftime("%d.%m %H:%M"), next_at.strftime("%d.%m %H:%M"))
         return
-    # забываем завершившиеся розыгрыши, чтобы файл не рос бесконечно
-    posted = {k: v for k, v in posted.items() if datetime.fromisoformat(v) > now}
-
-    target = await client.get_entity(args.to)
-    finder = await run_finder(client, args)
+    # завершившиеся забываем, чтобы файл не рос бесконечно
+    posted = {k: v for k, v in st["posted"].items() if datetime.fromisoformat(v) > now}
     min_left = timedelta(hours=args.min_hours_left)
-    candidates = [g for g in filter_giveaways(finder.giveaways.values(), args)
-                  if g.key not in posted and g.until_date - now >= min_left]
-    log.info("Кандидатов для репоста: %d (уже пересылали: %d)", len(candidates), len(posted))
 
+    def usable(e: dict[str, Any]) -> bool:
+        return e["key"] not in posted and datetime.fromisoformat(e["until"]) - now >= min_left
+
+    queue = sorted((e for e in st["queue"] if usable(e)), key=queue_order)
     sent = 0
-    for g in candidates:
-        if sent >= args.count:
-            break
-        root = await find_root_post(client, g)
-        if root is None:
-            continue
-        cid, mid = root
-        link = message_link(finder.refs.get(cid), cid, mid)
-        if args.dry_run:
-            print(f"[dry-run] переслал бы: {g.prize_text()} | {link}")
+    target = None
+
+    async def publish(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        nonlocal sent, target
+        rest = []
+        for e in entries:
+            if args.refill or sent >= args.count:
+                rest.append(e)
+                continue
+            if args.dry_run:
+                print(f"[dry-run] переслал бы: {e['prize']} | {e['link']}")
+                sent += 1
+                rest.append(e)
+                continue
+            if target is None:
+                target = await client.get_entity(args.to)
+            try:
+                peer = types.InputPeerChannel(e["channel_id"], e["access_hash"])
+                await client.forward_messages(target, e["msg_id"], from_peer=peer)
+            except errors.RPCError as ex:  # канал запретил пересылку, пост удалён и т.п.
+                log.warning("Не удалось переслать %s: %s — убираю из очереди", e["link"], ex)
+                continue
+            posted[e["key"]] = e["until"]
             sent += 1
-            continue
-        try:
-            src = await client.get_input_entity(types.PeerChannel(cid))
-            await client.forward_messages(target, mid, from_peer=src)
-        except errors.RPCError as e:  # например, канал запретил пересылку
-            log.warning("Не удалось переслать %s: %s — беру следующий", link, e)
-            continue
-        posted[g.key] = g.until_date.isoformat()
-        sent += 1
-        log.info("✅ Переслано: %s | %s", g.prize_text(), link)
+            log.info("✅ Переслано: %s | %s", e["prize"], e["link"])
+        return rest
+
+    if queue and not args.refill:
+        log.info("Готовых розыгрышей в очереди: %d — беру оттуда, без сканирования", len(queue))
+        queue = await publish(queue)
+
+    finder = None
+    if args.refill or sent < args.count:
+        log.info("Очередь пуста — ищу новые розыгрыши")
+        finder = await run_finder(client, args)
+        known = {e["key"] for e in queue}
+        new = []
+        for g in filter_giveaways(finder.giveaways.values(), args):
+            if g.key in posted or g.key in known or g.until_date - now < min_left:
+                continue
+            e = await queue_entry(client, g, finder)
+            if e:
+                new.append(e)
+        log.info("Новых розыгрышей в очередь: %d", len(new))
+        queue = await publish(sorted(queue + new, key=queue_order))
+
     if not args.dry_run:
-        save_state(state_path, posted, now if sent else last_post)
-    if args.save_sources:
+        st.update(posted=posted, queue=queue,
+                  last_post=now.isoformat() if sent else st["last_post"])
+        save_state(state_path, st)
+    if args.save_sources and finder is not None:
         save_sources(filter_giveaways(finder.giveaways.values(), args), args.save_sources)
-    if sent == 0:
+    if sent == 0 and not args.refill:
         log.warning("Нечего пересылать: подходящих новых розыгрышей не найдено")
+    log.info("В очереди осталось: %d", len(queue))
 
 
 async def cmd_watch(client: TelegramClient, args: argparse.Namespace) -> None:
@@ -949,6 +1003,8 @@ def build_parser() -> argparse.ArgumentParser:
                     help="не постить чаще, чем раз в Ч часов (напр. 3.5); при раннем запуске "
                          "выходит сразу, ничего не сканируя")
     ps.add_argument("--dry-run", action="store_true", help="только показать, что было бы переслано")
+    ps.add_argument("--refill", action="store_true",
+                    help="только найти розыгрыши и пополнить очередь, ничего не публикуя")
 
     w = sub.add_parser("watch", help="следить за новыми розыгрышами в ваших чатах в реальном времени")
     w.add_argument("--notify", action="store_true", help="пересылать найденные розыгрыши в «Избранное»")
