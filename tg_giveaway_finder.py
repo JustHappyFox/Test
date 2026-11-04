@@ -773,7 +773,8 @@ def load_state(path: Path) -> dict[str, Any]:
     except ValueError:
         return st
     if isinstance(data, dict) and isinstance(data.get("posted"), dict):
-        st.update(posted=data["posted"], last_post=data.get("last_post"), queue=data.get("queue") or [])
+        st.update(data)  # сохраняем и служебные поля (our_ids, post_times …)
+        st["queue"] = st.get("queue") or []
     elif isinstance(data, dict):  # старый формат: только posted
         st["posted"] = data
     return st
@@ -792,6 +793,44 @@ def post_is_due(last_post: datetime | None, interval_hours: float, now: datetime
         return True, None
     next_at = last_post + timedelta(hours=interval_hours)
     return now >= next_at - slack, next_at
+
+
+MANUAL_GIVEAWAY_WORDS = ("розыгр", "разыгр", "giveaway", "конкурс", "раздач")
+
+
+def is_giveaway_post(m: Any) -> bool:
+    """Похоже ли сообщение в канале на пост о розыгрыше (официальный розыгрыш, его запуск,
+    пересланный пост или текст со словами «розыгрыш», «giveaway» и т.п.)."""
+    if isinstance(getattr(m, "media", None), types.MessageMediaGiveaway):
+        return True
+    if isinstance(getattr(m, "action", None), types.MessageActionGiveawayLaunch):
+        return True
+    if getattr(m, "fwd_from", None) is not None:
+        return True
+    text = (getattr(m, "message", None) or "").lower()
+    return any(w in text for w in MANUAL_GIVEAWAY_WORDS)
+
+
+async def inspect_target(client: TelegramClient, target: Any, st: dict[str, Any],
+                         limit: int = 100) -> tuple[datetime | None, dict[str, str]]:
+    """Смотрит последние посты канала:
+    * время последнего поста о розыгрыше, опубликованного НЕ ботом (вручную);
+    * розыгрыши, которые уже есть в канале (кем бы ни были опубликованы), — чтобы не дублировать.
+    Свои посты бот узнаёт по сохранённым id и времени публикации."""
+    our_ids = set(st.get("our_ids") or [])
+    our_times = [datetime.fromisoformat(t) for t in (st.get("post_times") or [])]
+    if st.get("last_post"):
+        our_times.append(datetime.fromisoformat(st["last_post"]))
+    manual: datetime | None = None
+    in_channel: dict[str, str] = {}
+    async for m in client.iter_messages(target, limit=limit):
+        media = getattr(m, "media", None)
+        if isinstance(media, types.MessageMediaGiveaway) and media.until_date:
+            in_channel[giveaway_key(media)] = media.until_date.isoformat()
+        if manual is None and m.id not in our_ids and is_giveaway_post(m) \
+                and not any(abs((m.date - t).total_seconds()) <= 120 for t in our_times):
+            manual = m.date
+    return manual, in_channel
 
 
 def queue_order(e: dict[str, Any]) -> tuple:
@@ -826,8 +865,20 @@ async def cmd_post(client: TelegramClient, args: argparse.Namespace) -> None:
         log.info("Ещё рано: последний пост %s, следующий не раньше %s (UTC)",
                  last_post.strftime("%d.%m %H:%M"), next_at.strftime("%d.%m %H:%M"))
         return
+    target = await client.get_entity(args.to)
+    manual, in_channel = await inspect_target(client, target, st)
+    if args.manual_gap_hours and not args.refill:
+        due_m, next_m = post_is_due(manual, args.manual_gap_hours, now)
+        if manual and not due_m and not args.dry_run:
+            log.info("В канале есть ваш пост от %s — после него ждём %g ч, следующий не раньше %s (UTC)",
+                     manual.strftime("%d.%m %H:%M"), args.manual_gap_hours, next_m.strftime("%d.%m %H:%M"))
+            return
     # завершившиеся забываем, чтобы файл не рос бесконечно
     posted = {k: v for k, v in st["posted"].items() if datetime.fromisoformat(v) > now}
+    # уже есть в канале (в т.ч. опубликованные вами вручную) — не дублируем
+    for k, v in in_channel.items():
+        if datetime.fromisoformat(v) > now:
+            posted.setdefault(k, v)
     min_left = timedelta(hours=args.min_hours_left)
 
     def usable(e: dict[str, Any]) -> bool:
@@ -835,7 +886,7 @@ async def cmd_post(client: TelegramClient, args: argparse.Namespace) -> None:
 
     queue = sorted((e for e in st["queue"] if usable(e)), key=queue_order)
     sent = 0
-    target = None
+    our_ids: list[int] = list(st.get("our_ids") or [])
 
     async def publish(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
         nonlocal sent, target
@@ -849,11 +900,11 @@ async def cmd_post(client: TelegramClient, args: argparse.Namespace) -> None:
                 sent += 1
                 rest.append(e)
                 continue
-            if target is None:
-                target = await client.get_entity(args.to)
             try:
                 peer = types.InputPeerChannel(e["channel_id"], e["access_hash"])
-                await client.forward_messages(target, e["msg_id"], from_peer=peer)
+                fwd = await client.forward_messages(target, e["msg_id"], from_peer=peer)
+                if getattr(fwd, "id", None) is not None:
+                    our_ids.append(fwd.id)  # чтобы не принять свой пост за ручной
             except errors.RPCError as ex:  # канал запретил пересылку, пост удалён и т.п.
                 log.warning("Не удалось переслать %s: %s — убираю из очереди", e["link"], ex)
                 continue
@@ -882,7 +933,10 @@ async def cmd_post(client: TelegramClient, args: argparse.Namespace) -> None:
         queue = await publish(sorted(queue + new, key=queue_order))
 
     if not args.dry_run:
-        st.update(posted=posted, queue=queue,
+        post_times = list(st.get("post_times") or [])
+        if sent:
+            post_times.append(now.isoformat())
+        st.update(posted=posted, queue=queue, our_ids=our_ids[-100:], post_times=post_times[-50:],
                   last_post=now.isoformat() if sent else st["last_post"])
         save_state(state_path, st)
     if args.save_sources and finder is not None:
@@ -1008,6 +1062,9 @@ def build_parser() -> argparse.ArgumentParser:
     ps.add_argument("--min-interval-hours", type=float, default=0, metavar="Ч",
                     help="не постить чаще, чем раз в Ч часов (напр. 3.5); при раннем запуске "
                          "выходит сразу, ничего не сканируя")
+    ps.add_argument("--manual-gap-hours", type=float, default=0, metavar="Ч",
+                    help="если в канале есть пост о розыгрыше, опубликованный не ботом (вручную), "
+                         "следующий пост бота — не раньше чем через Ч часов после него (напр. 5)")
     ps.add_argument("--dry-run", action="store_true", help="только показать, что было бы переслано")
     ps.add_argument("--refill", action="store_true",
                     help="только найти розыгрыши и пополнить очередь, ничего не публикуя")

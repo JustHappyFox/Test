@@ -1,0 +1,37 @@
+name: Поддержка активности репозитория
+
+# GitHub выключает задания по расписанию в публичном репозитории, если 60 дней не было коммитов.
+# Раз в день проверяем дату последнего коммита: если ему 55 дней или больше — делаем служебный
+# коммит (добавляем/убираем одну букву в .github/keepalive). На работу бота это не влияет.
+on:
+  schedule:
+    - cron: "37 4 * * *"   # раз в сутки (UTC)
+  workflow_dispatch: {}     # ручной запуск — сразу делает служебный коммит (для проверки)
+
+permissions:
+  contents: write
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Служебный коммит, если репозиторий давно не менялся
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          last=$(git log -1 --format=%ct)
+          days=$(( ($(date +%s) - last) / 86400 ))
+          echo "Последний коммит: $days дн. назад"
+          if [ "$days" -lt 55 ] && [ "$EVENT" != "workflow_dispatch" ]; then
+            echo "Коммит не нужен"; exit 0
+          fi
+          f=.github/keepalive
+          if [ -s "$f" ]; then : > "$f"; else printf 'a' > "$f"; fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$f"
+          git commit -m "Служебный коммит: поддержка активности (расписание не отключится)"
+          git push

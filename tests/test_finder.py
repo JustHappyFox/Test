@@ -422,8 +422,10 @@ class QueueTests(unittest.TestCase):
 
         class NoScanClient(FakeClient):
             async def iter_messages(self, ent, limit=None, wait_time=None):
-                raise AssertionError("сканирование не должно запускаться")
-                yield  # pragma: no cover
+                if ent.id != 900:  # читать можно только свой канал
+                    raise AssertionError("сканирование не должно запускаться")
+                for m in []:
+                    yield m
 
         client = NoScanClient([target], {})
         sent = []
@@ -449,3 +451,96 @@ class QueueTests(unittest.TestCase):
         self.assertEqual([e["key"] for e in st["queue"]], ["ru"])  # истекающий выброшен
         self.assertEqual(list(st["posted"]), ["all"])              # завершившийся «old» забыт
         self.assertIsNotNone(st["last_post"])
+
+
+class ManualPostTests(unittest.TestCase):
+    """Если владелец сам запостил розыгрыш, бот ждёт 5 часов после этого поста."""
+
+    def run_post(self, target_history, last_post_hours_ago, our_ids=()):
+        target = channel(900, "mygroup", left=False)
+
+        class TargetOnly(FakeClient):
+            async def iter_messages(self, ent, limit=None, wait_time=None):
+                assert ent.id == 900, "сканировать чужие каналы не нужно — есть очередь"
+                for m in target_history:
+                    yield m
+
+        client = TargetOnly([target], {})
+        sent = []
+
+        async def forward_messages(to, mid, from_peer=None):
+            sent.append(mid)
+            return types.Message(id=777, peer_id=types.PeerChannel(900), date=NOW, message="")
+        client.forward_messages = forward_messages
+        last = (NOW - timedelta(hours=last_post_hours_ago)).isoformat()
+        entry = {"key": "k", "until": (NOW + timedelta(days=3)).isoformat(), "prize": "p", "countries": [],
+                 "channel_id": 100, "access_hash": 7, "msg_id": 5, "link": "https://t.me/x/5"}
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp, "s.json")
+            gf.save_state(state, {"last_post": last, "posted": {}, "queue": [entry], "our_ids": list(our_ids)})
+            a = gf.apply_preset(gf.build_parser().parse_args(
+                ["post", "--to", "@mygroup", "--state", str(state),
+                 "--min-interval-hours", "3.5", "--manual-gap-hours", "5"]))
+            asyncio.run(gf.cmd_post(client, a))
+            return sent, gf.load_state(state)
+
+    def msg(self, mid, hours_ago, text="", media=None, fwd=None):
+        return types.Message(id=mid, peer_id=types.PeerChannel(900), date=NOW - timedelta(hours=hours_ago),
+                             message=text, media=media, fwd_from=fwd)
+
+    def test_recent_manual_giveaway_blocks(self):
+        history = [self.msg(50, 2, "🎁 Розыгрыш Telegram Premium! Условия…")]
+        sent, _ = self.run_post(history, last_post_hours_ago=4)
+        self.assertEqual(sent, [])
+
+    def test_old_manual_giveaway_allows(self):
+        history = [self.msg(50, 6, "Розыгрыш звёзд")]
+        sent, st = self.run_post(history, last_post_hours_ago=4)
+        self.assertEqual(sent, [5])
+        self.assertIn(777, st["our_ids"])  # свой новый пост запомнен
+        self.assertEqual(len(st["post_times"]), 1)
+
+    def test_own_posts_and_chatter_are_not_manual_giveaways(self):
+        fwd = types.MessageFwdHeader(date=NOW, from_id=types.PeerChannel(100), channel_post=1)
+        history = [self.msg(60, 1, "всем привет, канал работает"),          # не про розыгрыш
+                   self.msg(41, 1.5, media=giveaway_media([100], months=6, quantity=5), fwd=fwd),  # наш по id
+                   self.msg(40, 4, media=giveaway_media([100], months=6, quantity=5), fwd=fwd)]    # наш по времени
+        sent, _ = self.run_post(history, last_post_hours_ago=4, our_ids=[41])
+        self.assertEqual(sent, [5])
+
+    def test_manual_official_giveaway_detected(self):
+        history = [self.msg(70, 1, media=giveaway_media([900], stars=10000, quantity=10))]
+        sent, _ = self.run_post(history, last_post_hours_ago=4)
+        self.assertEqual(sent, [])
+
+
+    def test_skips_giveaway_already_in_channel(self):
+        media = giveaway_media([100], months=6, quantity=5, days_left=3)
+        fwd = types.MessageFwdHeader(date=NOW, from_id=types.PeerChannel(100), channel_post=5)
+        history = [self.msg(80, 8, media=media, fwd=fwd)]  # вы уже переслали его 8 ч назад
+        target = channel(900, "mygroup", left=False)
+
+        class TargetOnly(FakeClient):
+            async def iter_messages(self, ent, limit=None, wait_time=None):
+                if ent.id == 900:
+                    for m in history:
+                        yield m
+
+        client = TargetOnly([target], {})
+        sent = []
+
+        async def forward_messages(to, mid, from_peer=None):
+            sent.append(mid)
+        client.forward_messages = forward_messages
+        dup = {"key": gf.giveaway_key(media), "until": media.until_date.isoformat(), "prize": "dup",
+               "countries": [], "channel_id": 100, "access_hash": 7, "msg_id": 5, "link": "l"}
+        other = dict(dup, key="other", msg_id=6, prize="other")
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp, "s.json")
+            gf.save_state(state, {"last_post": (NOW - timedelta(hours=9)).isoformat(), "posted": {},
+                                  "queue": [dup, other]})
+            a = gf.apply_preset(gf.build_parser().parse_args(
+                ["post", "--to", "@mygroup", "--state", str(state), "--no-discover", "--no-aggregators",
+                 "--min-interval-hours", "3.5", "--manual-gap-hours", "5"]))
+            asyncio.run(gf.cmd_post(client, a))
+        self.assertEqual(sent, [6])  # дубликат пропущен, опубликован следующий
