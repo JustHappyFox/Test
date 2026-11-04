@@ -500,13 +500,19 @@ class ManualPostTests(unittest.TestCase):
         self.assertIn(777, st["our_ids"])  # свой новый пост запомнен
         self.assertEqual(len(st["post_times"]), 1)
 
-    def test_own_posts_and_chatter_are_not_manual_giveaways(self):
+    def test_own_posts_are_not_manual(self):
         fwd = types.MessageFwdHeader(date=NOW, from_id=types.PeerChannel(100), channel_post=1)
-        history = [self.msg(60, 1, "всем привет, канал работает"),          # не про розыгрыш
+        history = [types.MessageService(id=61, peer_id=types.PeerChannel(900), date=NOW - timedelta(minutes=30),
+                                        action=types.MessageActionPinMessage()),          # служебное — не пост
                    self.msg(41, 1.5, media=giveaway_media([100], months=6, quantity=5), fwd=fwd),  # наш по id
                    self.msg(40, 4, media=giveaway_media([100], months=6, quantity=5), fwd=fwd)]    # наш по времени
         sent, _ = self.run_post(history, last_post_hours_ago=4, our_ids=[41])
         self.assertEqual(sent, [5])
+
+    def test_any_manual_post_blocks(self):
+        history = [self.msg(60, 1, "всем привет, канал работает")]  # любой ваш пост, не только про розыгрыш
+        sent, _ = self.run_post(history, last_post_hours_ago=4)
+        self.assertEqual(sent, [])
 
     def test_manual_official_giveaway_detected(self):
         history = [self.msg(70, 1, media=giveaway_media([900], stars=10000, quantity=10))]

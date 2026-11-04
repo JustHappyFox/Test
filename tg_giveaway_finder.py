@@ -795,26 +795,17 @@ def post_is_due(last_post: datetime | None, interval_hours: float, now: datetime
     return now >= next_at - slack, next_at
 
 
-MANUAL_GIVEAWAY_WORDS = ("розыгр", "разыгр", "giveaway", "конкурс", "раздач")
-
-
-def is_giveaway_post(m: Any) -> bool:
-    """Похоже ли сообщение в канале на пост о розыгрыше (официальный розыгрыш, его запуск,
-    пересланный пост или текст со словами «розыгрыш», «giveaway» и т.п.)."""
-    if isinstance(getattr(m, "media", None), types.MessageMediaGiveaway):
-        return True
-    if isinstance(getattr(m, "action", None), types.MessageActionGiveawayLaunch):
-        return True
-    if getattr(m, "fwd_from", None) is not None:
-        return True
-    text = (getattr(m, "message", None) or "").lower()
-    return any(w in text for w in MANUAL_GIVEAWAY_WORDS)
+def is_manual_post(m: Any) -> bool:
+    """Обычный пост в канале (не служебное сообщение вроде «закреплено» или «канал создан»).
+    Запуск официального розыгрыша — тоже пост."""
+    action = getattr(m, "action", None)
+    return action is None or isinstance(action, types.MessageActionGiveawayLaunch)
 
 
 async def inspect_target(client: TelegramClient, target: Any, st: dict[str, Any],
                          limit: int = 100) -> tuple[datetime | None, dict[str, str]]:
     """Смотрит последние посты канала:
-    * время последнего поста о розыгрыше, опубликованного НЕ ботом (вручную);
+    * время последнего поста, опубликованного НЕ ботом (вручную, любого);
     * розыгрыши, которые уже есть в канале (кем бы ни были опубликованы), — чтобы не дублировать.
     Свои посты бот узнаёт по сохранённым id и времени публикации."""
     our_ids = set(st.get("our_ids") or [])
@@ -827,7 +818,7 @@ async def inspect_target(client: TelegramClient, target: Any, st: dict[str, Any]
         media = getattr(m, "media", None)
         if isinstance(media, types.MessageMediaGiveaway) and media.until_date:
             in_channel[giveaway_key(media)] = media.until_date.isoformat()
-        if manual is None and m.id not in our_ids and is_giveaway_post(m) \
+        if manual is None and m.id not in our_ids and is_manual_post(m) \
                 and not any(abs((m.date - t).total_seconds()) <= 120 for t in our_times):
             manual = m.date
     return manual, in_channel
@@ -1063,7 +1054,7 @@ def build_parser() -> argparse.ArgumentParser:
                     help="не постить чаще, чем раз в Ч часов (напр. 3.5); при раннем запуске "
                          "выходит сразу, ничего не сканируя")
     ps.add_argument("--manual-gap-hours", type=float, default=0, metavar="Ч",
-                    help="если в канале есть пост о розыгрыше, опубликованный не ботом (вручную), "
+                    help="если в канале есть пост, опубликованный не ботом (вручную), "
                          "следующий пост бота — не раньше чем через Ч часов после него (напр. 5)")
     ps.add_argument("--dry-run", action="store_true", help="только показать, что было бы переслано")
     ps.add_argument("--refill", action="store_true",
