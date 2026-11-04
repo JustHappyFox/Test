@@ -1,0 +1,64 @@
+name: Репост розыгрышей в @TGaGifts
+
+# Каждые 2 часа ищет активные официальные розыгрыши и пересылает в канал один новый
+# (из канала-организатора). Для публичного репозитория минуты GitHub Actions бесплатны.
+on:
+  schedule:
+    - cron: "17 */2 * * *"   # каждые 2 часа (время UTC); минута 17 — чтобы не ждать в очереди GitHub
+  workflow_dispatch: {}       # ручной запуск: вкладка Actions → Run workflow
+
+concurrency:
+  group: repost
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  repost:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      TG_API_ID: ${{ secrets.TG_API_ID }}
+      TG_API_HASH: ${{ secrets.TG_API_HASH }}
+      TG_STRING_SESSION: ${{ secrets.TG_STRING_SESSION }}
+      TG_TRANSPORT: tcp
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Установить зависимости
+        run: pip install -r requirements.txt
+
+      - name: Восстановить состояние (что уже пересылали, найденные каналы)
+        uses: actions/cache/restore@v4
+        with:
+          path: .state
+          key: repost-state-${{ github.run_id }}
+          restore-keys: repost-state-
+
+      - name: Начальное состояние из репозитория (первый запуск)
+        run: |
+          mkdir -p .state
+          [ -f .state/posted.json ] || cp state/posted.json .state/posted.json 2>/dev/null || true
+          [ -f .state/sources.txt ] || cp state/sources.txt .state/sources.txt 2>/dev/null || true
+
+      - name: Найти и переслать розыгрыш
+        run: >
+          python tg_giveaway_finder.py post --to TGaGifts
+          --countries RU,BY,KZ --min-stars 10000 --min-premium 5
+          --count 1 --min-hours-left 3
+          --careful --max-channels 300 --search-pages 1
+          --channels-file .state/sources.txt --save-sources .state/sources.txt
+          --state .state/posted.json
+
+      - name: Сохранить состояние
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: .state
+          key: repost-state-${{ github.run_id }}
