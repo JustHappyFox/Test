@@ -52,6 +52,14 @@ DEFAULT_KEYWORDS = [
 ]
 DEFAULT_HASHTAGS = ["розыгрыш", "giveaway", "конкурс", "раздача", "розыгрыши", "giveaways"]
 
+# Публичные каналы-агрегаторы, которые пересылают официальные розыгрыши (найдены через веб-поиск
+# и TGStat). Их надёжность не важна: в результат попадают только настоящие messageMediaGiveaway,
+# а не текстовые «конкурсы». Отключить: --no-aggregators.
+DEFAULT_AGGREGATORS = [
+    "@giveaways", "@Giveaways_Premium_Tel", "@TgPremiumGiveaway",
+    "@tgpremium_giveaways", "@ChannelGiveaways",
+]
+
 # Значения по умолчанию для обычного и осторожного (--careful) режимов.
 # Явно указанные в командной строке опции всегда важнее пресета.
 # Паузы между отдельными каналами по умолчанию нет: частоту запросов регулирует сам Telegram
@@ -302,6 +310,8 @@ class GiveawayFinder:
 
     async def add_seeds(self) -> None:
         seeds: list[str] = list(self.args.channel or [])
+        if not getattr(self.args, "no_aggregators", True):
+            seeds += DEFAULT_AGGREGATORS
         for path in self.args.channels_file or []:
             for line in Path(path).read_text(encoding="utf-8").splitlines():
                 line = line.split("#", 1)[0].strip()
@@ -630,6 +640,8 @@ def save_sources(gs: list[Giveaway], path: str) -> None:
 
 def describe_sources(args: argparse.Namespace) -> str:
     parts = []
+    if not args.no_aggregators:
+        parts.append(f"каналы-агрегаторы ({len(DEFAULT_AGGREGATORS)})")
     if args.channel or args.channels_file:
         parts.append("ваш список каналов")
     if args.dialogs:
@@ -736,6 +748,8 @@ def build_parser() -> argparse.ArgumentParser:
     src.add_argument("--dialogs", action="store_true", help="сканировать все ваши каналы и супергруппы")
     src.add_argument("--no-discover", action="store_true",
                      help="не искать новые каналы по ключевым словам и хэштегам")
+    src.add_argument("--no-aggregators", action="store_true",
+                     help="не сканировать встроенный список каналов-агрегаторов розыгрышей")
     src.add_argument("--keywords", nargs="+", metavar="KW", help="свои ключевые слова для поиска каналов")
     src.add_argument("--hashtags", nargs="+", metavar="TAG", help="свои хэштеги для поиска постов")
     src.add_argument("--search-pages", type=int, help="страниц (по 100) на каждый хэштег (3; --careful: 1)")

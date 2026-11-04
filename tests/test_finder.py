@@ -244,6 +244,15 @@ class CliTests(unittest.TestCase):
             self.assertTrue(2 <= gf.rand_pause((2, 4)) <= 4)
         self.assertEqual(gf.rand_pause(None), 0)
 
+    def test_aggregators_seeded_by_default(self):
+        f = gf.GiveawayFinder(None, self.parse())
+        asyncio.run(f.add_seeds())
+        self.assertEqual([item for item, _ in f.queue], gf.DEFAULT_AGGREGATORS)
+        self.assertIn("каналы-агрегаторы", gf.describe_sources(self.parse()))
+        f2 = gf.GiveawayFinder(None, self.parse("--no-aggregators"))
+        asyncio.run(f2.add_seeds())
+        self.assertEqual(len(f2.queue), 0)
+
     def test_page_delay_passed_to_history(self):
         client = FakeClient([channel(1, "a")], {})
         f = gf.GiveawayFinder(client, args(page_delay=(2, 4)))
