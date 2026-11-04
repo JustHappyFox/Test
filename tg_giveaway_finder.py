@@ -329,6 +329,9 @@ class GiveawayFinder:
         if not getattr(self.args, "no_aggregators", True):
             seeds += DEFAULT_AGGREGATORS
         for path in self.args.channels_file or []:
+            if not Path(path).is_file():
+                log.warning("Файл каналов %s не найден — пропускаю", path)
+                continue
             for line in Path(path).read_text(encoding="utf-8").splitlines():
                 line = line.split("#", 1)[0].strip()
                 if line:
@@ -451,8 +454,10 @@ class GiveawayFinder:
                 winners_are_visible=bool(media.winners_are_visible),
             )
             self.giveaways[key] = g
-            log.info("  🎁 найден розыгрыш: %s, до %s", g.prize_text(),
-                     g.until_date.astimezone().strftime("%Y-%m-%d %H:%M"))
+            log.info("  🎁 найден розыгрыш: %s | до %s | страны: %s | %s", g.prize_text(),
+                     g.until_date.astimezone().strftime("%Y-%m-%d %H:%M"),
+                     ",".join(g.countries) or "все",
+                     message_link(self.refs.get(origin[0]), *origin))
         if origin not in g.origins:
             g.origins.append(origin)
         if is_forward and (chat_id, msg.id) not in g.copies:
@@ -567,7 +572,17 @@ def describe_info(info: types.payments.GiveawayInfo) -> tuple[str, bool | None]:
 # Вывод
 # --------------------------------------------------------------------------- #
 
+def parse_countries(value: str | None) -> set[str]:
+    return {c.strip().upper() for c in (value or "").split(",") if c.strip()}
+
+
+def country_ok(g: Giveaway, allowed: set[str]) -> bool:
+    """Без ограничений по странам — подходит всегда; иначе нужна хотя бы одна страна из списка."""
+    return not g.countries or not allowed or bool(set(g.countries) & allowed)
+
+
 def filter_giveaways(gs: Iterable[Giveaway], args: argparse.Namespace) -> list[Giveaway]:
+    allowed = parse_countries(getattr(args, "countries", None))
     out = []
     for g in gs:
         if args.prize != "any" and g.kind != args.prize:
@@ -576,7 +591,11 @@ def filter_giveaways(gs: Iterable[Giveaway], args: argparse.Namespace) -> list[G
             continue
         if args.hide_ineligible and g.eligible is False:
             continue
+        if not country_ok(g, allowed):
+            continue
         out.append(g)
+    if allowed:  # розыгрыши «для всех стран» — первыми
+        return sorted(out, key=lambda g: (bool(g.countries), g.until_date))
     return sorted(out, key=lambda g: g.until_date)
 
 
@@ -679,7 +698,7 @@ def describe_sources(args: argparse.Namespace) -> str:
             f"Источники: " + "; ".join(parts))
 
 
-async def cmd_scan(client: TelegramClient, args: argparse.Namespace) -> None:
+async def run_finder(client: TelegramClient, args: argparse.Namespace) -> "GiveawayFinder":
     finder = GiveawayFinder(client, args)
     log.info(describe_sources(args))
     try:
@@ -701,12 +720,88 @@ async def cmd_scan(client: TelegramClient, args: argparse.Namespace) -> None:
         log.info("Проверяю возможность участия (%d розыгрышей)...", len(finder.giveaways))
         await finder.check_eligibility()
     await finder.resolve_channels()
+    return finder
 
+
+async def cmd_scan(client: TelegramClient, args: argparse.Namespace) -> None:
+    finder = await run_finder(client, args)
     gs = filter_giveaways(finder.giveaways.values(), args)
     print_report(gs, finder.refs, len(finder.scanned))
     export(gs, finder.refs, args.json, args.csv)
     if args.save_sources:
         save_sources(gs, args.save_sources)
+
+
+async def find_root_post(client: TelegramClient, g: Giveaway) -> tuple[int, int] | None:
+    """Пост розыгрыша в канале-организаторе (первый в списке каналов розыгрыша)."""
+    root = g.channel_ids[0] if g.channel_ids else None
+    for cid, mid in g.origins:
+        if cid == root:
+            return cid, mid
+    if root is not None:
+        try:
+            ent = await client.get_entity(types.PeerChannel(root))
+            async for m in client.iter_messages(ent, limit=300):
+                if isinstance(m.media, types.MessageMediaGiveaway) and giveaway_key(m.media) == g.key:
+                    return root, m.id
+        except (ValueError, TypeError, errors.RPCError) as e:
+            log.debug("Не удалось найти пост в канале-организаторе %s: %s", root, e)
+    return g.origins[0] if g.origins else None
+
+
+def load_posted(path: Path) -> dict[str, str]:
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except ValueError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+async def cmd_post(client: TelegramClient, args: argparse.Namespace) -> None:
+    state_path = Path(args.state)
+    posted = load_posted(state_path)
+    now = datetime.now(timezone.utc)
+    # забываем завершившиеся розыгрыши, чтобы файл не рос бесконечно
+    posted = {k: v for k, v in posted.items() if datetime.fromisoformat(v) > now}
+
+    target = await client.get_entity(args.to)
+    finder = await run_finder(client, args)
+    min_left = timedelta(hours=args.min_hours_left)
+    candidates = [g for g in filter_giveaways(finder.giveaways.values(), args)
+                  if g.key not in posted and g.until_date - now >= min_left]
+    log.info("Кандидатов для репоста: %d (уже пересылали: %d)", len(candidates), len(posted))
+
+    sent = 0
+    for g in candidates:
+        if sent >= args.count:
+            break
+        root = await find_root_post(client, g)
+        if root is None:
+            continue
+        cid, mid = root
+        link = message_link(finder.refs.get(cid), cid, mid)
+        if args.dry_run:
+            print(f"[dry-run] переслал бы: {g.prize_text()} | {link}")
+            sent += 1
+            continue
+        try:
+            src = await client.get_input_entity(types.PeerChannel(cid))
+            await client.forward_messages(target, mid, from_peer=src)
+        except errors.RPCError as e:  # например, канал запретил пересылку
+            log.warning("Не удалось переслать %s: %s — беру следующий", link, e)
+            continue
+        posted[g.key] = g.until_date.isoformat()
+        sent += 1
+        log.info("✅ Переслано: %s | %s", g.prize_text(), link)
+    if not args.dry_run:
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state_path.write_text(json.dumps(posted, ensure_ascii=False, indent=1), encoding="utf-8")
+    if args.save_sources:
+        save_sources(filter_giveaways(finder.giveaways.values(), args), args.save_sources)
+    if sent == 0:
+        log.warning("Нечего пересылать: подходящих новых розыгрышей не найдено")
 
 
 async def cmd_watch(client: TelegramClient, args: argparse.Namespace) -> None:
@@ -747,15 +842,7 @@ async def cmd_watch(client: TelegramClient, args: argparse.Namespace) -> None:
     await client.run_until_disconnected()
 
 
-def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(
-        description="Поиск активных официальных розыгрышей Telegram (Premium / Stars).",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    p.add_argument("-v", "--verbose", action="store_true", help="подробный лог")
-    sub = p.add_subparsers(dest="command", required=True)
-
-    s = sub.add_parser("scan", help="разовый поиск розыгрышей")
+def add_scan_args(s: argparse.ArgumentParser) -> None:
     src = s.add_argument_group("откуда брать каналы")
     src.add_argument("-c", "--channel", action="append", metavar="@USERNAME",
                      help="канал для сканирования (можно несколько раз, можно t.me-ссылку)")
@@ -797,11 +884,36 @@ def build_parser() -> argparse.ArgumentParser:
                      help="проверить через API, можете ли вы участвовать (страна, новые подписчики...)")
     out.add_argument("--prize", choices=["any", "premium", "stars"], default="any", help="тип приза")
     out.add_argument("--min-winners", type=int, default=1, help="минимум победителей")
+    out.add_argument("--countries", metavar="RU,BY,KZ",
+                     help="оставить розыгрыши без ограничений по странам и для этих стран "
+                          "(«для всех стран» показываются первыми)")
     out.add_argument("--hide-ineligible", action="store_true", help="скрыть те, где участвовать нельзя (с --check)")
     out.add_argument("--json", metavar="FILE", help="сохранить результат в JSON")
     out.add_argument("--csv", metavar="FILE", help="сохранить результат в CSV")
     out.add_argument("--save-sources", metavar="FILE",
                      help="дописать каналы с розыгрышами в файл (для следующего --channels-file)")
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        description="Поиск активных официальных розыгрышей Telegram (Premium / Stars).",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p.add_argument("-v", "--verbose", action="store_true", help="подробный лог")
+    sub = p.add_subparsers(dest="command", required=True)
+
+    s = sub.add_parser("scan", help="разовый поиск розыгрышей")
+    add_scan_args(s)
+
+    ps = sub.add_parser("post", help="найти розыгрыши и переслать лучшие (из канала-организатора) в ваш чат")
+    add_scan_args(ps)
+    ps.add_argument("--to", required=True, metavar="@ЧАТ",
+                    help="куда пересылать: @username, ссылка t.me/... или числовой id группы/канала")
+    ps.add_argument("--count", type=int, default=1, help="сколько розыгрышей переслать за запуск (1)")
+    ps.add_argument("--state", default="posted.json", metavar="FILE",
+                    help="файл с уже пересланными розыгрышами, чтобы не повторяться (posted.json)")
+    ps.add_argument("--min-hours-left", type=float, default=3.0,
+                    help="не пересылать розыгрыши, до конца которых меньше N часов (3)")
+    ps.add_argument("--dry-run", action="store_true", help="только показать, что было бы переслано")
 
     w = sub.add_parser("watch", help="следить за новыми розыгрышами в ваших чатах в реальном времени")
     w.add_argument("--notify", action="store_true", help="пересылать найденные розыгрыши в «Избранное»")
@@ -874,6 +986,8 @@ async def amain(args: argparse.Namespace) -> None:
     try:
         if args.command == "scan":
             await cmd_scan(client, args)
+        elif args.command == "post":
+            await cmd_post(client, args)
         else:
             await cmd_watch(client, args)
     finally:
@@ -883,7 +997,7 @@ async def amain(args: argparse.Namespace) -> None:
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
-    if args.command == "scan":
+    if args.command in ("scan", "post"):
         try:
             apply_preset(args)
         except (argparse.ArgumentTypeError, ValueError) as e:

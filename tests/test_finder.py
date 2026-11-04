@@ -331,3 +331,43 @@ class LoginTests(unittest.TestCase):
     def test_code_without_phone_exits(self):
         with self.assertRaises(SystemExit):
             self.run_login(FakeAuthClient(), "--code", "1")
+
+
+class PostTests(unittest.TestCase):
+    def make(self, tmp, *extra):
+        argv = ["post", "--to", "@mygroup", "--no-discover", "--no-aggregators", "-c", "@aggregator",
+                "--countries", "RU,BY,KZ", "--state", str(Path(tmp, "posted.json")), "--delay", "0", *extra]
+        return gf.apply_preset(gf.build_parser().parse_args(argv))
+
+    def test_forwards_from_organizer_and_remembers(self):
+        agg, host, iran, target = (channel(1, "aggregator"), channel(100, "host"),
+                                   channel(300, "iran"), channel(900, "mygroup", left=False))
+        g_all = giveaway_media([100], months=6, quantity=5)
+        g_ir = giveaway_media([300], months=3, quantity=10, countries_iso2=["IR"])
+        fwd = types.MessageFwdHeader(date=NOW, from_id=types.PeerChannel(100), channel_post=9)
+        history = {1: [message(1, 50, g_all, fwd_from=fwd), message(1, 51, g_ir)],
+                   100: [message(100, 9, g_all)], 300: [message(300, 7, g_ir)]}
+        client = FakeClient([agg, host, iran, target], history)
+        sent = []
+
+        async def forward_messages(to, mid, from_peer=None):
+            sent.append((to.id, mid, from_peer.id))
+        client.forward_messages = forward_messages
+
+        with tempfile.TemporaryDirectory() as tmp:
+            asyncio.run(gf.cmd_post(client, self.make(tmp, "--depth", "0")))
+            # переслан пост из канала-организатора @host, а не копия агрегатора; иранский отфильтрован
+            self.assertEqual(sent, [(900, 9, 100)])
+            posted = json.loads(Path(tmp, "posted.json").read_text(encoding="utf-8"))
+            self.assertEqual(len(posted), 1)
+            # повторный запуск не пересылает то же самое
+            asyncio.run(gf.cmd_post(client, self.make(tmp, "--depth", "0")))
+            self.assertEqual(len(sent), 1)
+
+    def test_country_filter_prefers_all_countries(self):
+        f = gf.GiveawayFinder(None, args())
+        f.handle_message(message(1, 1, giveaway_media([1], months=3, days_left=1, countries_iso2=["RU"])), 1, 0)
+        f.handle_message(message(2, 1, giveaway_media([2], months=3, days_left=5)), 2, 0)
+        f.handle_message(message(3, 1, giveaway_media([3], months=3, days_left=2, countries_iso2=["US"])), 3, 0)
+        gs = gf.filter_giveaways(f.giveaways.values(), args(countries="RU,BY,KZ"))
+        self.assertEqual([g.countries for g in gs], [[], ["RU"]])
