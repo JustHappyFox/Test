@@ -122,19 +122,25 @@ def make_client() -> TelegramClient:
     here = Path(__file__).resolve().parent
     load_dotenv(Path.cwd() / ".env")
     load_dotenv(here / ".env")
-    api_id = os.environ.get("TG_API_ID")
-    api_hash = os.environ.get("TG_API_HASH")
+    # .strip(): при копировании с телефона в секреты часто прилипают пробелы и переносы строк
+    api_id = (os.environ.get("TG_API_ID") or "").strip()
+    api_hash = (os.environ.get("TG_API_HASH") or "").strip()
     if not api_id or not api_hash:
         sys.exit(
             "Не заданы TG_API_ID / TG_API_HASH.\n"
             "Получите их на https://my.telegram.org -> API development tools\n"
             "и положите в файл .env рядом со скриптом (см. .env.example)."
         )
-    string_session = os.environ.get("TG_STRING_SESSION")
+    string_session = "".join((os.environ.get("TG_STRING_SESSION") or "").split())
     session_file = os.environ.get("TG_SESSION", str(here / "giveaway_finder"))
     if string_session:  # удобно для облака (Colab / GitHub Actions): сессия хранится в секрете
         from telethon.sessions import StringSession
-        session: Any = StringSession(string_session)
+        try:
+            session: Any = StringSession(string_session)
+        except Exception as e:  # битая/обрезанная строка — понятная ошибка без вывода самой строки
+            sys.exit(f"TG_STRING_SESSION повреждена ({type(e).__name__}): длина {len(string_session)} "
+                     f"символов, начинается с {string_session[:1]!r}. Обычно это 353 символа и начинается "
+                     f"с '1'. Скопируйте строку заново целиком.")
     else:
         session = session_file
     kwargs: dict[str, Any] = {}
