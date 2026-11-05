@@ -649,9 +649,10 @@ class GiveawayFinder:
     def web_since(self) -> datetime:
         return self.now - timedelta(days=self.args.days)
 
-    def web_check(self, username: str) -> asyncio.Future:
+    def web_check(self, username: str, strict: bool = False) -> asyncio.Future:
+        """strict — для каналов большого списка: только заглушки с «Канал запустил розыгрыш» перед ними."""
         return asyncio.ensure_future(
-            self.web.candidates(username, self.web_since, getattr(self.args, "web_pages", None) or 20))
+            self.web.candidates(username, self.web_since, getattr(self.args, "web_pages", None) or 20, strict=strict))
 
     async def batch_refs(self, first: int) -> None:
         """@username для веб-проверки: один запрос сразу на 100 каналов из очереди (их id — из розыгрышей)."""
@@ -701,7 +702,7 @@ class GiveawayFinder:
                 continue  # каналы списка, оставленные на следующий поиск, не скачиваем
             if not u or u.lower() in self.web_seen or u.lower() in self.web_tasks:
                 continue
-            self.web_tasks[u.lower()] = self.web_check(u)
+            self.web_tasks[u.lower()] = self.web_check(u, strict=isinstance(item, WebOnly))
             room -= 1
 
     async def try_web(self, item: Any, depth: int) -> bool:
@@ -731,7 +732,7 @@ class GiveawayFinder:
             self.discover_consumed += count
             return True
         self.web_seen.add(key)  # второй раз этот канал не проверяем никаким способом
-        task = self.web_tasks.pop(key, None) or self.web_check(uname)
+        task = self.web_tasks.pop(key, None) or self.web_check(uname, strict=web_only)
         self.prefetch()
         cands = await task
         if cands is None:

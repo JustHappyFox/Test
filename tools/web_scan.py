@@ -27,27 +27,29 @@ async def scan(names: list[str], days: int, pages: int, parallel: int, chunk: in
     w = wp.WebPreview(parallel=parallel, max_limited=10 ** 9)
     since = datetime.now(timezone.utc) - timedelta(days=days)
     with_page = 0
-    found: list[tuple[str, int, datetime | None]] = []
+    found: list[tuple[str, int, datetime | None, int]] = []
     t0 = time.time()
     try:
         for i in range(0, len(names), chunk):
             part = names[i:i + chunk]
-            res = await asyncio.gather(*(w.candidates(u, since, max_pages=pages) for u in part))
+            res = await asyncio.gather(*(w.candidates(u, since, max_pages=pages, strict=True) for u in part))
             for u, r in zip(part, res):
                 if r is not None:
                     with_page += 1
                 if r and u.lower() not in w.blind:  # «слепые» каналы (сайт прячет все посты) не берём
-                    found.append((u, len(r), w.newest.get(u.lower())))
+                    found.append((u, len(r), w.newest.get(u.lower()), w.launches.get(u.lower(), 0)))
             done = min(i + chunk, len(names))
-            print(f"  {done}/{len(names)}: веб-страница у {with_page}, «слепых» {len(w.blind)}, с кандидатами {len(found)}; "
+            print(f"  {done}/{len(names)}: веб-страница у {with_page}, «слепых» {len(w.blind)}, с кандидатами {len(found)} "
+                  f"(с «запуском розыгрыша» {sum(1 for x in found if x[3])}); "
                   f"страниц {w.pages}, 429: {w.limited}, {time.time() - t0:.0f} с", flush=True)
     finally:
         await w.close()
     return with_page, found, w
 
 
-def read_candidates(path: Path) -> list[tuple[str, int, datetime | None]]:
-    """Строки вида «@канал  # число дата» → (канал, число кандидатов, дата самого свежего)."""
+def read_candidates(path: Path) -> list[tuple[str, int, datetime | None, int]]:
+    """Строки вида «@канал  # число дата [запусков]» → (канал, число кандидатов, дата самого свежего,
+    сколько из них со служебным «Канал запустил розыгрыш» перед ними)."""
     rows = []
     for ln in path.read_text(encoding="utf-8").splitlines():
         u, _, rest = ln.partition("#")
@@ -62,23 +64,25 @@ def read_candidates(path: Path) -> list[tuple[str, int, datetime | None]]:
                 d = datetime.fromisoformat(parts[1]).replace(tzinfo=timezone.utc)
             except ValueError:
                 d = None
-        rows.append((u, n, d))
+        launches = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+        rows.append((u, n, d, launches))
     return rows
 
 
-def write_candidates(path: Path, rows: list[tuple[str, int, datetime | None]]) -> None:
+def write_candidates(path: Path, rows: list[tuple[str, int, datetime | None, int]]) -> None:
     # Порядок для поиска через API (поиск по имени у Telegram ограничен ~150–200 в сутки):
+    # 0) каналы, где перед заглушкой стоит «Канал запустил розыгрыш» — почти наверняка организатор;
     # 1) свежие кандидаты (последний не старше 10 дней) — розыгрыш, скорее всего, ещё идёт;
     # 2) каналы с 1–3 кандидатами — обычный организатор проводит 1–2 розыгрыша в месяц,
     #    а десятки «заглушек» — чаще скрытые посты другого рода (репосты историй и т.п.).
     now = datetime.now(timezone.utc)
 
     def order(x):
-        _, n, newest = x
+        _, n, newest, launches = x
         fresh = newest is not None and now - newest <= timedelta(days=10)
-        return (not fresh, n > 3, n, -(newest.timestamp() if newest else 0))
+        return (not launches, not fresh, n > 3, n, -(newest.timestamp() if newest else 0))
     rows = sorted(rows, key=order)
-    path.write_text("".join(f"@{u}  # {n} {d.strftime('%Y-%m-%d') if d else '?'}\n" for u, n, d in rows),
+    path.write_text("".join(f"@{u}  # {n} {d.strftime('%Y-%m-%d') if d else '?'} {k}\n" for u, n, d, k in rows),
                     encoding="utf-8")
 
 
@@ -124,7 +128,8 @@ def main() -> None:
     write_candidates(Path(args.out), found)
     print(f"Итог: имён {len(names)}, веб-страница есть у {with_page}, «слепых» (сайт прячет все посты) {len(w.blind)}, "
           f"с постами-кандидатами за {args.days} дн. — "
-          f"{len(found)} (постов-кандидатов {sum(x[1] for x in found)}); страниц {w.pages}, 429: {w.limited}, "
+          f"{len(found)} (постов-кандидатов {sum(x[1] for x in found)}), из них с «Канал запустил розыгрыш» "
+          f"{sum(1 for x in found if x[3])} каналов ({sum(x[3] for x in found)} постов); страниц {w.pages}, 429: {w.limited}, "
           f"ошибок {w.failed}, {(time.time() - t0) / 60:.0f} мин → {args.out}")
 
 

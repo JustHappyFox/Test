@@ -101,6 +101,70 @@ class CandidatesTests(unittest.TestCase):
         self.assertIsNone(asyncio.run(w.candidates("chan", NOW - timedelta(days=31))))
 
 
+# Разметка с t.me/s/rzavayuui (05.11): 42 — «Канал запустил розыгрыш», 43 — сам розыгрыш, 44 — «закрепил».
+def real_post(pid, inner, cls="text_not_supported_wrap", time="2026-10-30T09:12:16+00:00"):
+    return (f'<div class="tgme_widget_message_wrap js-widget_message_wrap"><div class="tgme_widget_message {cls} '
+            f'js-widget_message" data-post="rzavayuui/{pid}" data-view="x"> <div class="tgme_widget_message_user">'
+            '<a href="https://t.me/rzavayuui"><i class="tgme_widget_message_user_photo bgcolor6" data-content="р">'
+            '<img src="https://cdn4.telesco.pe/file/a.jpg"></i></a></div> <div class="tgme_widget_message_bubble"> '
+            '<i class="tgme_widget_message_bubble_tail"> </i> <div class="tgme_widget_message_author accent_color">'
+            '<a class="tgme_widget_message_owner_name" href="https://t.me/rzavayuui"><span dir="auto">рижая</span>'
+            f'</a></div> {inner}<div class="tgme_widget_message_footer compact js-message_footer"> '
+            '<div class="tgme_widget_message_info short js-message_info"> <span class="tgme_widget_message_meta">'
+            f'<a class="tgme_widget_message_date" href="https://t.me/rzavayuui/{pid}"><time datetime="{time}" '
+            'class="time">09:12</time></a></span> </div> </div> </div> </div></div>')
+
+
+LAUNCH = real_post(42, "", cls="text_not_supported_wrap service_message")
+GIVEAWAY = real_post(43, '<div class="message_media_not_supported_wrap"><div class="message_media_not_supported">'
+                         '<div class="message_media_not_supported_label">Please open Telegram to view this post</div>'
+                         '</div></div>')
+PINNED = real_post(44, '<div class="tgme_widget_message_text js-message_text" dir="auto"><a class="tgme_widget_message_author_name" '
+                       'href="https://t.me/rzavayuui"><span dir="auto">рижая</span></a> pinned «<span '
+                       'class="tgme_widget_service_strong_text" dir="auto"></span>»</div> ',
+                   cls="text_not_supported_wrap service_message", time="2026-10-30T09:14:42+00:00")
+
+
+class LaunchMessageTests(unittest.TestCase):
+    def test_real_markup(self):
+        posts = wp.parse_page("<section>" + LAUNCH + GIVEAWAY + PINNED + "</section>")
+        self.assertEqual([(p.id, p.stub, p.empty_service) for p in posts],
+                         [(42, False, True), (43, True, False), (44, False, False)])
+
+    def _run(self, html, strict):
+        w = wp.WebPreview()
+
+        async def fetch(url):
+            return html if "?" not in url else None
+        w.fetch = fetch
+        from datetime import datetime, timezone
+        return w, asyncio.run(w.candidates("rzavayuui", datetime(2026, 10, 1, tzinfo=timezone.utc), strict=strict))
+
+    def test_strict_needs_launch_message(self):
+        text = real_post(41, '<div class="tgme_widget_message_text js-message_text">Новость</div>')
+        story = real_post(40, GIVEAWAY.split("</a></div> ", 1)[1].split('<div class="tgme_widget_message_footer')[0])
+        story = story.replace("rzavayuui/43", "rzavayuui/40")
+        html = "<section>" + text.replace("/41", "/39") + story + text + LAUNCH + GIVEAWAY + PINNED + "</section>"
+        w, got = self._run(html, strict=False)
+        self.assertEqual(got, [43, 40])
+        self.assertEqual(w.launches, {"rzavayuui": 1})
+        w, got = self._run(html, strict=True)
+        self.assertEqual(got, [43])     # 40 — заглушка без «запуска» перед ней (репост истории и т.п.)
+
+    def test_launch_must_be_at_the_same_time(self):
+        late = LAUNCH.replace("2026-10-30T09:12:16", "2026-10-29T09:12:16")
+        html = "<section>" + real_post(41, '<div class="tgme_widget_message_text">x</div>') + late + GIVEAWAY + "</section>"
+        w, got = self._run(html, strict=True)
+        self.assertEqual(got, [])
+
+    def test_forwarded_stubs_kept_in_strict_mode(self):
+        fwd = GIVEAWAY.replace('<div class="message_media_not_supported_wrap">',
+                               '<div class="tgme_widget_message_forwarded_from">x</div><div class="message_media_not_supported_wrap">')
+        html = "<section>" + real_post(42, '<div class="tgme_widget_message_text">x</div>') + fwd + "</section>"
+        w, got = self._run(html, strict=True)
+        self.assertEqual(got, [43])
+
+
 class FetchTests(unittest.TestCase):
     def test_retry_after_429_and_fallback(self):
         from aiohttp import web
@@ -150,7 +214,7 @@ class FakeWeb:
         self.stubs = stubs  # username -> [id] или None (нет веб-страницы)
         self.asked = []
 
-    async def candidates(self, username, since, max_pages=20):
+    async def candidates(self, username, since, max_pages=20, strict=False):
         self.asked.append(username)
         return self.stubs.get(username, [])
 

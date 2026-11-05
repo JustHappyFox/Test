@@ -38,12 +38,30 @@ class WebPost:
     date: datetime | None
     stub: bool  # заглушка без текста и без фото/видео — так выглядит модуль-розыгрыш
     forwarded: bool = False
+    empty_service: bool = False  # служебное сообщение без текста — так сайт показывает «Канал запустил розыгрыш»
 
 
 # Бывают каналы, у которых сайт прячет вообще все посты (одни пустые заглушки). По ним веб-проверка
 # ничего не говорит: если среди собственных постов канала таких больше этой доли — канал «слепой».
 BLIND_SHARE = 0.8
 BLIND_MIN_POSTS = 8
+
+
+_CLASS_RE = re.compile(r'class="tgme_widget_message ([^"]*)"')
+# Служебное сообщение «Канал запустил розыгрыш» сайт выводит пустым: только имя канала и время.
+# Прочие служебные («закрепил «…»», «канал создан», «фото изменено») — с текстом или картинкой.
+LAUNCH_GAP_SECONDS = 600
+
+
+def _empty_service(block: str) -> bool:
+    """Пустое служебное сообщение. Проверено 05.11 на 6 розыгрышах (otdel34/382, DuckyBBL/2151,
+    rzavayuui/43, energyplusmedia/2235, eternalilalll/13855, zwezdy_ot_dmitry/2393): прямо перед
+    модулем-розыгрышем (номер на 1 меньше, та же минута) стоит именно такое сообщение."""
+    m = _CLASS_RE.search(block)
+    if not m or "service_message" not in m.group(1).split():
+        return False
+    return (TEXT_CLASS not in block and STUB_CLASS not in block and "service_photo" not in block
+            and not _MEDIA_RE.search(block))
 
 
 def parse_page(html: str) -> list[WebPost] | None:
@@ -62,8 +80,18 @@ def parse_page(html: str) -> list[WebPost] | None:
             date = None
         stub = STUB_CLASS in block and TEXT_CLASS not in block and not _MEDIA_RE.search(block)
         posts.append(WebPost(id=int(m.group(2)), date=date, stub=stub,
-                             forwarded="tgme_widget_message_forwarded_from" in block))
+                             forwarded="tgme_widget_message_forwarded_from" in block,
+                             empty_service=_empty_service(block)))
     return posts
+
+
+def _launched(post: WebPost, prev: WebPost | None) -> bool:
+    """Перед заглушкой — пустое служебное сообщение того же времени: так выглядит запуск розыгрыша."""
+    if prev is None or not prev.empty_service:
+        return False
+    if post.date and prev.date:
+        return abs((post.date - prev.date).total_seconds()) <= LAUNCH_GAP_SECONDS
+    return True
 
 
 class WebPreview:
@@ -82,6 +110,7 @@ class WebPreview:
         self.failed = 0
         self.blind: set[str] = set()  # каналы, где сайт прячет все посты (имена в нижнем регистре)
         self.newest: dict[str, datetime] = {}  # дата самого свежего поста-кандидата по каналу
+        self.launches: dict[str, int] = {}  # заглушек с «Канал запустил розыгрыш» перед ними, по каналу
         self.broken = False  # t.me упорно ограничивает — дальше только через API
 
     async def _session(self) -> Any:
@@ -123,8 +152,13 @@ class WebPreview:
             await asyncio.sleep(wait)
         return None
 
-    async def candidates(self, username: str, since: datetime, max_pages: int = 20) -> list[int] | None:
-        """id постов-заглушек не старше since. None — веб-страницы нет, проверять через API."""
+    async def candidates(self, username: str, since: datetime, max_pages: int = 20,
+                         strict: bool = False) -> list[int] | None:
+        """id постов-заглушек не старше since. None — веб-страницы нет, проверять через API.
+        strict — для каналов большого списка: свои заглушки берём, только если прямо перед ними стоит
+        пустое служебное «Канал запустил розыгрыш» (так выглядит розыгрыш у организатора; без него это
+        обычно репост истории или скрытое видео). Пересланные заглушки берём как раньше: у копии
+        розыгрыша служебного сообщения нет. Сколько заглушек с «запуском» — в self.launches."""
         username = username.lstrip("@")
         url = self.BASE + username
         seen: list[WebPost] = []
@@ -150,6 +184,15 @@ class WebPreview:
         if len(own) >= BLIND_MIN_POSTS and sum(p.stub for p in own) >= BLIND_SHARE * len(own):
             self.blind.add(username.lower())  # сайт прячет все посты — по заглушкам розыгрыш не отличить
         hits = [p for p in seen if p.stub and (p.date is None or p.date >= since)]
+        by_id = {p.id: p for p in seen}
+        launched = [p for p in hits if not p.forwarded and _launched(p, by_id.get(p.id - 1))]
+        if launched:
+            self.launches[username.lower()] = len(launched)
+        if strict:
+            oldest_id = min(by_id) if by_id else 0
+            # предыдущее сообщение не попало на загруженные страницы — не отбрасываем, проверим через API
+            ok = {p.id for p in launched}
+            hits = [p for p in hits if p.forwarded or p.id in ok or p.id - 1 < oldest_id]
         dates = [p.date for p in hits if p.date]
         if dates:
             self.newest[username.lower()] = max(dates)
