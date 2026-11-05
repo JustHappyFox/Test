@@ -601,6 +601,10 @@ class GiveawayFinder:
                 inputs.append(utils.get_input_channel(await self.client.get_input_entity(types.PeerChannel(cid))))
             except (ValueError, TypeError):
                 pass
+        await self._get_channels(inputs)
+
+    async def _get_channels(self, inputs: list[Any]) -> None:
+        """Один битый канал отклоняет всю пачку — тогда делим её пополам, пока не отсеем его."""
         if not inputs:
             return
         try:
@@ -608,7 +612,12 @@ class GiveawayFinder:
         except errors.FloodWaitError:
             raise
         except errors.RPCError as e:
-            log.debug("Не удалось узнать каналы пачкой: %s", e)
+            if len(inputs) == 1:
+                return  # этот канал проверим обычным способом через API
+            log.debug("Пачка из %d каналов отклонена (%s) — делю пополам", len(inputs), e)
+            half = len(inputs) // 2
+            await self._get_channels(inputs[:half])
+            await self._get_channels(inputs[half:])
             return
         for ch in getattr(res, "chats", []):
             if isinstance(ch, types.Channel):

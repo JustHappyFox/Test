@@ -3,8 +3,10 @@
 
 Официальный розыгрыш (messageMediaGiveaway) на сайте t.me показывается заглушкой
 «Please open Telegram to view this post» (класс message_media_not_supported): ни текста,
-ни приза там нет. Зато такие заглушки редки, а сами страницы читаются без аккаунта
-Telegram и без его лимитов. Поэтому обход сначала смотрит веб-страницу канала и через
+ни приза там нет. Заглушку получают и обычные фото/видео (защита контента, большие видео),
+но у них есть подпись или блок медиа; у розыгрыша — пусто. Такие пустые заглушки редки
+(замер 05.11: BetBoom 7 из 200 постов, Okko 1 из 78, агрегатор розыгрышей — все), а сами
+страницы читаются без аккаунта Telegram и без его лимитов. Поэтому обход сначала смотрит веб-страницу канала и через
 API открывает только посты-заглушки за нужный период; каналы без заглушек API не трогает.
 
 Если страница недоступна (закрыт предпросмотр, это группа, t.me ограничил частоту) —
@@ -22,15 +24,19 @@ from typing import Any
 log = logging.getLogger("giveaway_finder")
 
 STUB_CLASS = "message_media_not_supported"
+TEXT_CLASS = "tgme_widget_message_text"
 _POST_RE = re.compile(r'data-post="([^"/]+)/(\d+)"')
 _DATE_RE = re.compile(r'<time datetime="([^"]+)"')
+# Заглушка бывает и у обычных фото/видео (у каналов с защитой контента, у больших видео) —
+# там рядом есть подпись или блок медиа. У модуля-розыгрыша нет ни текста, ни медиа.
+_MEDIA_RE = re.compile(r"tgme_widget_message_(?:photo|video|document|voice|roundvideo|sticker|poll|location)")
 
 
 @dataclass
 class WebPost:
     id: int
     date: datetime | None
-    stub: bool  # медиа, которое сайт не показывает (так выглядит модуль-розыгрыш)
+    stub: bool  # заглушка без текста и без фото/видео — так выглядит модуль-розыгрыш
 
 
 def parse_page(html: str) -> list[WebPost] | None:
@@ -47,7 +53,8 @@ def parse_page(html: str) -> list[WebPost] | None:
             date = datetime.fromisoformat(d.group(1)) if d else None
         except ValueError:
             date = None
-        posts.append(WebPost(id=int(m.group(2)), date=date, stub=STUB_CLASS in block))
+        stub = STUB_CLASS in block and TEXT_CLASS not in block and not _MEDIA_RE.search(block)
+        posts.append(WebPost(id=int(m.group(2)), date=date, stub=stub))
     return posts
 
 

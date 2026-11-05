@@ -41,6 +41,17 @@ class ParsePageTests(unittest.TestCase):
         self.assertEqual([p.stub for p in posts], [False, True, False])
         self.assertTrue(all(p.date is not None for p in posts))
 
+    def test_protected_photos_and_big_videos_are_not_candidates(self):
+        # у каналов с защитой контента заглушкой показаны и фото с подписью, и большие видео
+        photo = post_html("okko", 10, stub=True, text="Новый фильм").replace(
+            '<div class="message_media_not_supported_wrap">',
+            '<a class="tgme_widget_message_photo_wrap"></a><div class="message_media_not_supported_wrap">')
+        video = post_html("okko", 11, stub=True).replace(
+            '<div class="message_media_not_supported_wrap">',
+            '<div class="tgme_widget_message_video_player"></div><div class="message_media_not_supported_wrap">')
+        html = "<section>" + photo + video + post_html("okko", 12, stub=True) + "</section>"
+        self.assertEqual([p.stub for p in wp.parse_page(html)], [False, False, True])
+
     def test_no_web_feed(self):
         # канал без веб-ленты: t.me/s/… перенаправляет на обычную страницу канала
         self.assertIsNone(wp.parse_page('<html><div class="tgme_page_title">Chan</div></html>'))
@@ -182,6 +193,25 @@ class WebCrawlTests(unittest.TestCase):
         self.assertEqual(f.api_read, 2)
         self.assertEqual(len(f.giveaways), 1)
         self.assertNotIn("aggregator", f.web.asked)               # стартовые каналы — не по веб-странице
+
+    def test_bad_channel_does_not_spoil_the_batch(self):
+        from telethon import errors
+
+        class BadBatchClient(WebClient):
+            async def __call__(self, req):
+                if any(c.channel_id == 24 for c in req.id):
+                    raise errors.ChannelInvalidError(request=req)
+                return await super().__call__(req)
+
+        good = [channel(i, f"good{i}") for i in (21, 22, 23)]
+        client = BadBatchClient([*good, channel(24, "bad24")], {})
+        f = gf.GiveawayFinder(client, args())
+        f.web = FakeWeb({})
+        for cid in (21, 22, 23, 24):
+            f.enqueue(cid, 1)
+        asyncio.run(f.crawl())
+        self.assertEqual(sorted(f.web.asked), ["good21", "good22", "good23"])  # хорошие — по веб-странице
+        self.assertEqual(client.scanned, [24])                                  # битый — через API
 
     def test_seen_channel_not_checked_twice(self):
         host = channel(20, "host")
