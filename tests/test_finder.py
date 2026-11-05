@@ -805,3 +805,39 @@ class OrganizerHistoryTests(unittest.TestCase):
             await f.crawl()
         asyncio.run(run())
         self.assertEqual(client.scanned, [1])                     # старше 31 дня — не смотрим
+
+
+class PublicOrganizerOnlyTests(unittest.TestCase):
+    def test_private_organizer_skipped_even_if_aggregator_has_copy(self):
+        target = channel(900, "mygroup", left=False)
+        agg = channel(1, "agg")
+        private_org = channel(60, None)                       # закрытый: без @username
+        public_org = channel(70, "public_org")
+        m_priv = giveaway_media([60], stars=10000, quantity=100, days_left=3)
+        m_pub = giveaway_media([70], months=3, quantity=3, days_left=5)
+        fwd_priv = types.MessageFwdHeader(date=NOW, from_id=types.PeerChannel(60), channel_post=8)
+        fwd_pub = types.MessageFwdHeader(date=NOW, from_id=types.PeerChannel(70), channel_post=9)
+        history = {1: [message(1, 101, m_priv, fwd_from=fwd_priv), message(1, 102, m_pub, fwd_from=fwd_pub)],
+                   60: [message(60, 8, m_priv)], 70: [message(70, 9, m_pub)]}
+
+        class C(FakeClient):
+            async def get_messages(self, ent, scheduled=False, limit=None):
+                return []
+
+            async def forward_messages(self, to, mid, from_peer=None, schedule=None):
+                sent.append((from_peer.channel_id, mid))
+                return types.Message(id=700, peer_id=types.PeerChannel(900), date=NOW, message="")
+
+        sent = []
+        client = C([target, agg, private_org, public_org], history)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp, "s.json")
+            gf.save_state(path, {"posted": {}, "queue": [], "last_post": (NOW - timedelta(hours=4)).isoformat()})
+            a = gf.apply_preset(gf.build_parser().parse_args(
+                ["post", "--to", "@mygroup", "--state", str(path), "--no-discover", "--no-aggregators",
+                 "-c", "@agg", "--min-stars", "5000", "--min-premium", "3",
+                 "--min-interval-hours", "3.5", "--schedule-ahead", "0"]))
+            asyncio.run(gf.cmd_post(client, a))
+            st = gf.load_state(path)
+        self.assertEqual(sent, [(70, 9)])                          # только из публичного организатора
+        self.assertIn(gf.giveaway_key(m_priv), st["bad"])          # закрытый — пропущен и запомнен

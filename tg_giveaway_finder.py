@@ -793,7 +793,7 @@ async def find_root_post(client: TelegramClient, g: Giveaway) -> tuple[int, int]
                     return root, m.id
         except (ValueError, TypeError, errors.RPCError) as e:
             log.debug("Не удалось найти пост в канале-организаторе %s: %s", root, e)
-    return g.origins[0] if g.origins else None
+    return None  # только напрямую из канала-организатора; копии и агрегаторы не берём
 
 
 def load_state(path: Path) -> dict[str, Any]:
@@ -877,6 +877,9 @@ async def queue_entry(client: TelegramClient, g: Giveaway, finder: "GiveawayFind
     except (ValueError, TypeError):
         return None
     ref = await finder.channel_ref(cid)
+    if not ref.username:  # закрытый канал (без @username) — пропускаем
+        log.info("Пропускаю: канал-организатор закрытый (%s)", ref.title or cid)
+        return None
     return {"key": g.key, "until": g.until_date.isoformat(), "prize": g.prize_text(),
             "countries": g.countries, "channel_id": cid,
             "access_hash": getattr(peer, "access_hash", None), "msg_id": mid,
@@ -979,6 +982,8 @@ async def cmd_post_scheduled(client: TelegramClient, args: argparse.Namespace) -
                 e = await queue_entry(client, g, finder)
                 if e:
                     queue.append(e)
+                else:  # нет публичного поста организатора — больше не берём
+                    bad[g.key] = g.until_date.isoformat()
             continue
         queue.remove(entry)
         when = next_at
