@@ -661,3 +661,36 @@ class EarlyStopTests(unittest.TestCase):
         f = asyncio.run(gf.run_finder(client, a, want=want, want_count=1))
         self.assertEqual(client.scanned, [1, 2])  # третий канал уже не читали
         self.assertTrue(f.found_enough)
+
+
+class UnforwardableTests(unittest.TestCase):
+    def test_skips_unforwardable_and_finds_next(self):
+        target, c1, c2 = channel(900, "mygroup", left=False), channel(1, "c1"), channel(2, "c2")
+        a_media = giveaway_media([1], stars=20000, quantity=10)   # из закрытого канала — переслать нельзя
+        b_media = giveaway_media([2], stars=30000, quantity=10)
+        history = {1: [message(1, 11, a_media)], 2: [message(2, 22, b_media)]}
+
+        class C(FakeClient):
+            async def get_messages(self, ent, scheduled=False, limit=None):
+                return []
+
+            async def forward_messages(self, to, mid, from_peer=None, schedule=None):
+                if from_peer.channel_id == 1:
+                    raise gf.errors.ChannelPrivateError(request=None)
+                sent.append((mid, schedule))
+                return types.Message(id=500, peer_id=types.PeerChannel(900), date=NOW, message="")
+
+        sent = []
+        client = C([target, c1, c2], history)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp, "s.json")
+            gf.save_state(path, {"posted": {}, "queue": [], "last_post": (NOW - timedelta(hours=4)).isoformat()})
+            a = gf.apply_preset(gf.build_parser().parse_args(
+                ["post", "--to", "@mygroup", "--state", str(path), "--no-discover", "--no-aggregators",
+                 "--depth", "0", "-c", "@c1", "-c", "@c2", "--min-stars", "10000",
+                 "--min-interval-hours", "3.5", "--manual-gap-hours", "5", "--schedule-ahead", "1"]))
+            asyncio.run(gf.cmd_post(client, a))
+            st = gf.load_state(path)
+        self.assertEqual(sent, [(22, None)])                      # опубликован второй, сразу
+        self.assertIn(gf.giveaway_key(a_media), st["bad"])        # первый запомнен как непригодный
+        self.assertIn(gf.giveaway_key(b_media), st["posted"])

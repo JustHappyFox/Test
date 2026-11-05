@@ -887,6 +887,8 @@ async def cmd_post_scheduled(client: TelegramClient, args: argparse.Namespace) -
         if datetime.fromisoformat(v) > now:
             posted.setdefault(k, v)
     scheduled: dict[str, dict[str, Any]] = {e["key"]: e for e in (st.get("scheduled") or [])}
+    # розыгрыши, которые переслать нельзя (закрытый канал, запрет пересылки…) — больше не берём
+    bad = {k: v for k, v in (st.get("bad") or {}).items() if datetime.fromisoformat(v) > now}
     post_times = [datetime.fromisoformat(t) for t in (st.get("post_times") or [])]
     our_ids: list[int] = list(st.get("our_ids") or [])
     queue: list[dict[str, Any]] = list(st["queue"])
@@ -906,16 +908,16 @@ async def cmd_post_scheduled(client: TelegramClient, args: argparse.Namespace) -
 
     # наш отложенный пост попал в паузу после вашего поста — переносим
     if manual and gap:
-        bad = [k for k, m in live.items() if manual <= m.date < manual + gap]
-        if bad and not args.dry_run:
+        moved = [k for k, m in live.items() if manual <= m.date < manual + gap]
+        if moved and not args.dry_run:
             await client(functions.messages.DeleteScheduledMessagesRequest(
-                peer=target, id=[live[k].id for k in bad]))
-            for k in bad:
+                peer=target, id=[live[k].id for k in moved]))
+            for k in moved:
                 e = scheduled.pop(k)
                 at = datetime.fromisoformat(e["at"])
                 post_times = [t for t in post_times if abs((t - at).total_seconds()) > 120]
                 queue.insert(0, {kk: vv for kk, vv in e.items() if kk != "at"})
-            log.info("Перенёс отложенных постов: %d (ваш пост от %s UTC)", len(bad), manual.strftime("%d.%m %H:%M"))
+            log.info("Перенёс отложенных постов: %d (ваш пост от %s UTC)", len(moved), manual.strftime("%d.%m %H:%M"))
 
     times = [datetime.fromisoformat(e["at"]) for e in scheduled.values()] + [t for t in post_times if t <= now]
     if st.get("last_post"):
@@ -924,25 +926,26 @@ async def cmd_post_scheduled(client: TelegramClient, args: argparse.Namespace) -
     next_at = max([now] + ([last_bot + interval] if last_bot else []) + ([manual + gap] if manual and gap else []))
 
     def fits(e: dict[str, Any], when: datetime) -> bool:
-        return (e["key"] not in posted and e["key"] not in scheduled
+        return (e["key"] not in posted and e["key"] not in scheduled and e["key"] not in bad
                 and datetime.fromisoformat(e["until"]) - when >= min_left)
 
-    scanned, finder, last_published = False, None, None
+    scans, finder, last_published = 0, None, None
     while len(scheduled) < args.schedule_ahead:
         queue = sorted((e for e in queue if e["key"] not in posted and e["key"] not in scheduled
-                        and datetime.fromisoformat(e["until"]) > now), key=queue_order)
+                        and e["key"] not in bad and datetime.fromisoformat(e["until"]) > now),
+                       key=queue_order)
         entry = next((e for e in queue if fits(e, next_at)), None)
         if entry is None:
-            if scanned:
+            if scans >= 3:  # не больше трёх поисков за запуск
                 break
-            scanned = True
+            scans += 1
             log.info("Подходящих в очереди нет — ищу один новый розыгрыш")
             known = {e["key"] for e in queue}
             want_at = next_at
 
             def want(g: Giveaway, known=known, want_at=want_at) -> bool:
                 return (bool(filter_giveaways([g], args)) and g.key not in posted
-                        and g.key not in scheduled and g.key not in known
+                        and g.key not in scheduled and g.key not in known and g.key not in bad
                         and g.until_date - want_at >= min_left)
             finder = await run_finder(client, args, want=want, want_count=1)
             for g in filter_giveaways(finder.giveaways.values(), args):
@@ -966,8 +969,9 @@ async def cmd_post_scheduled(client: TelegramClient, args: argparse.Namespace) -
                 target, entry["msg_id"],
                 from_peer=types.InputPeerChannel(entry["channel_id"], entry["access_hash"]),
                 schedule=None if immediate else when)
-        except errors.RPCError as ex:  # канал запретил пересылку, пост удалён и т.п.
-            log.warning("Не удалось переслать %s: %s — убираю из очереди", entry["link"], ex)
+        except errors.RPCError as ex:  # закрытый канал, запрет пересылки, пост удалён и т.п.
+            log.warning("Не удалось переслать %s: %s — больше его не беру, ищу другой", entry["link"], ex)
+            bad[entry["key"]] = entry["until"]
             continue
         if immediate:
             posted[entry["key"]] = entry["until"]
@@ -983,7 +987,7 @@ async def cmd_post_scheduled(client: TelegramClient, args: argparse.Namespace) -
         next_at = when + interval
 
     if not args.dry_run:
-        st.update(posted=posted, queue=queue, scheduled=list(scheduled.values()),
+        st.update(posted=posted, queue=queue, scheduled=list(scheduled.values()), bad=bad,
                   post_times=[t.isoformat() for t in post_times][-50:], our_ids=our_ids[-100:],
                   last_post=(last_published.isoformat() if last_published else st.get("last_post")))
         save_state(state_path, st)
