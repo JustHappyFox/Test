@@ -38,7 +38,8 @@ class WebPost:
     date: datetime | None
     stub: bool  # заглушка без текста и без фото/видео — так выглядит модуль-розыгрыш
     forwarded: bool = False
-    empty_service: bool = False  # служебное сообщение без текста — так сайт показывает «Канал запустил розыгрыш»
+    empty_service: bool = False
+    source: str | None = None  # пересланный пост: «канал/номер» оригинала из ссылки «Forwarded from»  # служебное сообщение без текста — так сайт показывает «Канал запустил розыгрыш»
 
 
 # Бывают каналы, у которых сайт прячет вообще все посты (одни пустые заглушки). По ним веб-проверка
@@ -48,6 +49,8 @@ BLIND_MIN_POSTS = 8
 
 
 _CLASS_RE = re.compile(r'class="tgme_widget_message ([^"]*)"')
+_SOURCE_RE = re.compile(r'tgme_widget_message_forwarded_from_name" href="https?://t\.me/([A-Za-z][A-Za-z0-9_]{3,})/(\d+)"')
+FORWARD_CHECKS = 5  # сколько пересланных заглушек канала сверять с оригиналом (до первой подтверждённой)
 # Служебное сообщение «Канал запустил розыгрыш» сайт выводит пустым: только имя канала и время.
 # Прочие служебные («закрепил «…»», «канал создан», «фото изменено») — с текстом или картинкой.
 LAUNCH_GAP_SECONDS = 600
@@ -79,9 +82,11 @@ def parse_page(html: str) -> list[WebPost] | None:
         except ValueError:
             date = None
         stub = STUB_CLASS in block and TEXT_CLASS not in block and not _MEDIA_RE.search(block)
+        src = _SOURCE_RE.search(block)
         posts.append(WebPost(id=int(m.group(2)), date=date, stub=stub,
                              forwarded="tgme_widget_message_forwarded_from" in block,
-                             empty_service=_empty_service(block)))
+                             empty_service=_empty_service(block),
+                             source=f"{src.group(1)}/{src.group(2)}" if src else None))
     return posts
 
 
@@ -110,7 +115,8 @@ class WebPreview:
         self.failed = 0
         self.blind: set[str] = set()  # каналы, где сайт прячет все посты (имена в нижнем регистре)
         self.newest: dict[str, datetime] = {}  # дата самого свежего поста-кандидата по каналу
-        self.launches: dict[str, int] = {}  # заглушек с «Канал запустил розыгрыш» перед ними, по каналу
+        self.launches: dict[str, int] = {}  # подтверждённых розыгрышей («Канал запустил розыгрыш»), по каналу
+        self._origin: dict[str, bool] = {}  # «канал/номер» → у оригинала есть «Канал запустил розыгрыш»
         self.broken = False  # t.me упорно ограничивает — дальше только через API
 
     async def _session(self) -> Any:
@@ -155,10 +161,11 @@ class WebPreview:
     async def candidates(self, username: str, since: datetime, max_pages: int = 20,
                          strict: bool = False) -> list[int] | None:
         """id постов-заглушек не старше since. None — веб-страницы нет, проверять через API.
-        strict — для каналов большого списка: свои заглушки берём, только если прямо перед ними стоит
-        пустое служебное «Канал запустил розыгрыш» (так выглядит розыгрыш у организатора; без него это
-        обычно репост истории или скрытое видео). Пересланные заглушки берём как раньше: у копии
-        розыгрыша служебного сообщения нет. Сколько заглушек с «запуском» — в self.launches."""
+        strict — для каналов большого списка: только подтверждённые розыгрыши. Своя заглушка
+        подтверждена, если прямо перед ней стоит пустое служебное «Канал запустил розыгрыш» (без него
+        это обычно репост истории или скрытое видео); если это сообщение не попало на загруженные
+        страницы — дочитываем страницу. Пересланная заглушка подтверждена, если такое сообщение есть
+        у оригинала (ссылка «Forwarded from»). Число подтверждённых — в self.launches."""
         username = username.lstrip("@")
         url = self.BASE + username
         seen: list[WebPost] = []
@@ -185,18 +192,44 @@ class WebPreview:
             self.blind.add(username.lower())  # сайт прячет все посты — по заглушкам розыгрыш не отличить
         hits = [p for p in seen if p.stub and (p.date is None or p.date >= since)]
         by_id = {p.id: p for p in seen}
-        launched = [p for p in hits if not p.forwarded and _launched(p, by_id.get(p.id - 1))]
-        if launched:
-            self.launches[username.lower()] = len(launched)
+        confirmed = [p for p in hits if not p.forwarded and _launched(p, by_id.get(p.id - 1))]
         if strict:
             oldest_id = min(by_id) if by_id else 0
-            # предыдущее сообщение не попало на загруженные страницы — не отбрасываем, проверим через API
-            ok = {p.id for p in launched}
-            hits = [p for p in hits if p.forwarded or p.id in ok or p.id - 1 < oldest_id]
+            for p in hits:
+                if not p.forwarded and p.id - 1 < oldest_id and p.id > 1:
+                    if await self._has_launch(username, p.id):  # предыдущее сообщение — на следующей странице
+                        confirmed.append(p)
+            checks = 0
+            for p in sorted((p for p in hits if p.forwarded and p.source), key=lambda p: -p.id):
+                if checks >= FORWARD_CHECKS:
+                    break
+                checks += 1
+                if await self._origin_launched(p.source):
+                    confirmed.append(p)
+            hits = confirmed
+        if confirmed:
+            self.launches[username.lower()] = len(confirmed)
         dates = [p.date for p in hits if p.date]
         if dates:
             self.newest[username.lower()] = max(dates)
         return sorted({p.id for p in hits}, reverse=True)
+
+    async def _has_launch(self, username: str, post_id: int) -> bool:
+        """Есть ли «Канал запустил розыгрыш» прямо перед постом post_id (его заглушка — розыгрыш)."""
+        html = await self.fetch(f"{self.BASE}{username}?before={post_id + 1}")
+        posts = parse_page(html) if html else None
+        if not posts:
+            return False
+        by_id = {p.id: p for p in posts}
+        post = by_id.get(post_id)
+        return bool(post and post.stub and _launched(post, by_id.get(post_id - 1)))
+
+    async def _origin_launched(self, source: str) -> bool:
+        key = source.lower()
+        if key not in self._origin:
+            chan, _, pid = source.partition("/")
+            self._origin[key] = await self._has_launch(chan, int(pid))
+        return self._origin[key]
 
     async def close(self) -> None:
         if self.session is not None:

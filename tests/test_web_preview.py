@@ -131,14 +131,20 @@ class LaunchMessageTests(unittest.TestCase):
         self.assertEqual([(p.id, p.stub, p.empty_service) for p in posts],
                          [(42, False, True), (43, True, False), (44, False, False)])
 
-    def _run(self, html, strict):
+    def _run(self, html, strict, pages=None, max_pages=20):
         w = wp.WebPreview()
+        asked = []
 
         async def fetch(url):
+            asked.append(url)
+            if pages is not None:
+                return pages.get(url)
             return html if "?" not in url else None
         w.fetch = fetch
+        w.asked = asked
         from datetime import datetime, timezone
-        return w, asyncio.run(w.candidates("rzavayuui", datetime(2026, 10, 1, tzinfo=timezone.utc), strict=strict))
+        return w, asyncio.run(w.candidates("rzavayuui", datetime(2026, 10, 1, tzinfo=timezone.utc),
+                                           max_pages=max_pages, strict=strict))
 
     def test_strict_needs_launch_message(self):
         text = real_post(41, '<div class="tgme_widget_message_text js-message_text">Новость</div>')
@@ -157,12 +163,37 @@ class LaunchMessageTests(unittest.TestCase):
         w, got = self._run(html, strict=True)
         self.assertEqual(got, [])
 
-    def test_forwarded_stubs_kept_in_strict_mode(self):
-        fwd = GIVEAWAY.replace('<div class="message_media_not_supported_wrap">',
-                               '<div class="tgme_widget_message_forwarded_from">x</div><div class="message_media_not_supported_wrap">')
-        html = "<section>" + real_post(42, '<div class="tgme_widget_message_text">x</div>') + fwd + "</section>"
-        w, got = self._run(html, strict=True)
+    def test_forwarded_stub_checked_at_the_original(self):
+        # копия розыгрыша без «запуска» перед ней; оригинал (otdel34/382) — с ним
+        def fwd(pid, source):
+            return real_post(pid, GIVEAWAY.split("</a></div> ", 1)[1].split('<div class="tgme_widget_message_footer')[0]).replace(
+                '<div class="message_media_not_supported_wrap">',
+                '<div class="tgme_widget_message_forwarded_from accent_color">Forwarded from&nbsp;<a class="tgme_widget_message_forwarded_from_name" '
+                f'href="https://t.me/{source}"><span dir="auto">OTDEL</span></a></div><div class="message_media_not_supported_wrap">')
+        text = '<div class="tgme_widget_message_text js-message_text">x</div>'
+        feed = "<section>" + real_post(40, text) + fwd(41, "otdel34/382") + fwd(42, "newsfeed/77") + real_post(43, text) + "</section>"
+        origin = "<section>" + LAUNCH.replace("rzavayuui/42", "otdel34/381") + GIVEAWAY.replace("rzavayuui/43", "otdel34/382") + "</section>"
+        story = "<section>" + real_post(76, text).replace("rzavayuui", "newsfeed") + GIVEAWAY.replace("rzavayuui/43", "newsfeed/77") + "</section>"
+        pages = {"https://t.me/s/rzavayuui": feed, "https://t.me/s/otdel34?before=383": origin,
+                 "https://t.me/s/newsfeed?before=78": story}
+        w, got = self._run(None, strict=True, pages=pages)
+        self.assertEqual(got, [41])      # 42 — переслан пост без «запуска» (не розыгрыш)
+        self.assertEqual(w.launches, {"rzavayuui": 1})
+        w, got = self._run(None, strict=False, pages=pages)
+        self.assertEqual(got, [42, 41])  # без strict пересланные берутся все, оригиналы не открываются
+        self.assertEqual(len(w.asked), 2)
+
+    def test_launch_on_the_next_page(self):
+        # заглушка — самый старый пост на загруженных страницах: «запуск» ищем на следующей странице
+        text = '<div class="tgme_widget_message_text js-message_text">x</div>'
+        first = "<section>" + GIVEAWAY + PINNED + "</section>"
+        pages = {"https://t.me/s/rzavayuui": first,
+                 "https://t.me/s/rzavayuui?before=44": "<section>" + real_post(41, text) + LAUNCH + GIVEAWAY + "</section>"}
+        w, got = self._run(None, strict=True, pages=pages, max_pages=1)
         self.assertEqual(got, [43])
+        pages["https://t.me/s/rzavayuui?before=44"] = "<section>" + real_post(42, text) + GIVEAWAY + "</section>"
+        w, got = self._run(None, strict=True, pages=pages, max_pages=1)
+        self.assertEqual(got, [])
 
 
 class FetchTests(unittest.TestCase):
