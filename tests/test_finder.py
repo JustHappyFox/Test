@@ -841,3 +841,31 @@ class PublicOrganizerOnlyTests(unittest.TestCase):
             st = gf.load_state(path)
         self.assertEqual(sent, [(70, 9)])                          # только из публичного организатора
         self.assertIn(gf.giveaway_key(m_priv), st["bad"])          # закрытый — пропущен и запомнен
+
+
+class RefillTests(unittest.TestCase):
+    def test_refill_fills_reserve_without_posting(self):
+        target = channel(900, "mygroup", left=False)
+        chans = [target] + [channel(i, f"c{i}") for i in (1, 2)]
+        medias = {1: giveaway_media([1], stars=8000, quantity=10, days_left=6),
+                  2: giveaway_media([2], months=3, quantity=5, days_left=2)}
+        history = {i: [message(i, 10 + i, m)] for i, m in medias.items()}
+
+        class C(FakeClient):
+            async def get_messages(self, ent, scheduled=False, limit=None):
+                return []
+
+            async def forward_messages(self, *a, **kw):
+                raise AssertionError("при --refill ничего не публикуем")
+
+        client = C(chans, history)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp, "s.json")
+            gf.save_state(path, {"posted": {}, "queue": [], "last_post": (NOW - timedelta(hours=9)).isoformat()})
+            a = gf.apply_preset(gf.build_parser().parse_args(
+                ["post", "--to", "@mygroup", "--state", str(path), "--no-discover", "--no-aggregators",
+                 "--depth", "0", "-c", "@c1", "-c", "@c2", "--min-stars", "5000", "--min-premium", "3",
+                 "--min-interval-hours", "3.5", "--schedule-ahead", "0", "--refill"]))
+            asyncio.run(gf.cmd_post(client, a))
+            st = gf.load_state(path)
+        self.assertEqual([e["msg_id"] for e in st["queue"]], [12, 11])  # запас по сроку окончания

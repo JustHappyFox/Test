@@ -8,7 +8,12 @@ name: Репост розыгрышей в @TGaGifts
 on:
   schedule:
     - cron: "13,43 * * * *"   # каждые 30 минут (UTC); не в :00 — меньше очередь у GitHub
-  workflow_dispatch: {}       # ручной запуск: вкладка Actions → Run workflow
+  workflow_dispatch:          # ручной запуск: вкладка Actions → Run workflow
+    inputs:
+      refill:
+        description: "Только пополнить запас розыгрышей, ничего не публикуя"
+        type: boolean
+        default: false
 
 concurrency:
   group: repost
@@ -73,7 +78,7 @@ jobs:
           --count 1 --min-hours-left 3 --min-interval-hours 3.5 --manual-gap-hours 5 --schedule-ahead 0 --reserve 10
           --careful --max-channels 300 --search-pages 1 --source-limit 500
           --channels-file .state/sources.txt --save-sources .state/sources.txt
-          --state .state/posted.json
+          --state .state/posted.json ${{ inputs.refill && '--refill' || '' }}
 
       - name: Сохранить состояние
         if: always() && steps.check.outputs.ready == 'true'

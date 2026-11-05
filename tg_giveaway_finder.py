@@ -951,12 +951,39 @@ async def cmd_post_scheduled(client: TelegramClient, args: argparse.Namespace) -
     scans, finder, last_published = 0, None, None
 
     def need_more() -> bool:
+        if args.refill:
+            return False
         if args.schedule_ahead > 0:  # держать N отложенных постов
             return len(scheduled) < args.schedule_ahead
         # 0 — публиковать один пост, только когда подошло время (раз в 3,5 ч / 5 ч после ваших постов)
         return last_published is None and next_at <= now + timedelta(minutes=2)
 
-    if args.schedule_ahead == 0 and not need_more():
+    async def search() -> None:
+        """Перебор каналов: набираем в запас до --reserve подходящих розыгрышей."""
+        nonlocal finder
+        log.info("Ищу новые розыгрыши перебором каналов (запас до %d)", args.reserve)
+        known = {e["key"] for e in queue}
+        want_at = next_at
+
+        def want(g: Giveaway) -> bool:
+            return (bool(filter_giveaways([g], args)) and g.key not in posted
+                    and g.key not in scheduled and g.key not in known and g.key not in bad
+                    and g.until_date - want_at >= min_left)
+        finder = await run_finder(client, args, want=want, want_count=args.reserve)
+        for g in filter_giveaways(finder.giveaways.values(), args):
+            if g.key in posted or g.key in scheduled or g.key in known or g.key in bad \
+                    or g.until_date - now < min_left:
+                continue
+            e = await queue_entry(client, g, finder)
+            if e:
+                queue.append(e)
+            else:  # нет публичного поста организатора — больше не берём
+                bad[g.key] = g.until_date.isoformat()
+        queue.sort(key=queue_order)
+
+    if args.refill:  # только пополнить запас, ничего не публикуя
+        await search()
+    elif args.schedule_ahead == 0 and not need_more():
         log.info("Ещё рано: следующий пост не раньше %s UTC — просто обновился", next_at.strftime("%d.%m %H:%M"))
     while need_more():
         queue = sorted((e for e in queue if e["key"] not in posted and e["key"] not in scheduled
@@ -967,23 +994,7 @@ async def cmd_post_scheduled(client: TelegramClient, args: argparse.Namespace) -
             if scans >= 3:  # не больше трёх поисков за запуск
                 break
             scans += 1
-            log.info("Запас кончился — ищу новые розыгрыши перебором каналов (запас до %d)", args.reserve)
-            known = {e["key"] for e in queue}
-            want_at = next_at
-
-            def want(g: Giveaway, known=known, want_at=want_at) -> bool:
-                return (bool(filter_giveaways([g], args)) and g.key not in posted
-                        and g.key not in scheduled and g.key not in known and g.key not in bad
-                        and g.until_date - want_at >= min_left)
-            finder = await run_finder(client, args, want=want, want_count=args.reserve)
-            for g in filter_giveaways(finder.giveaways.values(), args):
-                if g.key in posted or g.key in scheduled or g.key in known or g.until_date - now < min_left:
-                    continue
-                e = await queue_entry(client, g, finder)
-                if e:
-                    queue.append(e)
-                else:  # нет публичного поста организатора — больше не берём
-                    bad[g.key] = g.until_date.isoformat()
+            await search()
             continue
         queue.remove(entry)
         when = next_at
@@ -1027,7 +1038,7 @@ async def cmd_post_scheduled(client: TelegramClient, args: argparse.Namespace) -
 
 
 async def cmd_post(client: TelegramClient, args: argparse.Namespace) -> None:
-    if getattr(args, "schedule_ahead", None) is not None and not args.refill:
+    if getattr(args, "schedule_ahead", None) is not None:
         return await cmd_post_scheduled(client, args)
     state_path = Path(args.state)
     st = load_state(state_path)
