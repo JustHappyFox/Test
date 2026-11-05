@@ -286,6 +286,11 @@ def active_username(ent: Any) -> str | None:
     return None
 
 
+class WebOnly(str):
+    """@username из большого списка (Common Crawl). Проверяем только по веб-странице t.me/s/…:
+    нет страницы — пропускаем, через API открываем лишь каналы с постами-заглушками."""
+
+
 def to_ref(ent: Any) -> ChannelRef:
     # У "min"-объектов (пришли вместе с чужими сообщениями) флаг left недостоверен.
     known = isinstance(ent, types.Channel) and not getattr(ent, "min", False)
@@ -326,6 +331,12 @@ class GiveawayFinder:
         self.ref_tried: set[int] = set()
         self.entities: dict[int, Any] = {}
         self.deadline: float | None = None  # loop.time(), после которого обход останавливается
+        # Большой список каналов (--discover-file): сколько всего, с какой позиции и сколько разобрали
+        self.discover_total = 0
+        self.discover_start = 0
+        self.discover_consumed = 0
+        self.discover_opened = 0   # открыто через API (поиск по @username у Telegram строго ограничен)
+        self.discover_paused = False
 
     @property
     def found_enough(self) -> bool:
@@ -369,7 +380,7 @@ class GiveawayFinder:
             return self.entities[item]
         try:
             if isinstance(item, (int, str)):
-                ent = await self.client.get_entity(types.PeerChannel(item) if isinstance(item, int) else item)
+                ent = await self.client.get_entity(types.PeerChannel(item) if isinstance(item, int) else str(item))
                 if not isinstance(ent, types.Channel):
                     log.warning("%s — не канал/супергруппа, пропускаю", item)
                     return None
@@ -398,6 +409,25 @@ class GiveawayFinder:
             self.enqueue(s, 0)
         if seeds:
             log.info("Стартовых каналов из списка: %d", len(seeds))
+        self.add_discover_file()
+
+    def add_discover_file(self) -> None:
+        """Большой список каналов (Common Crawl): только веб-проверка, с позиции --discover-offset по кругу."""
+        path = getattr(self.args, "discover_file", None)
+        if not path:
+            return
+        if not Path(path).is_file():
+            log.warning("Список каналов %s не найден — пропускаю", path)
+            return
+        names = [ln.split("#", 1)[0].strip() for ln in Path(path).read_text(encoding="utf-8").splitlines()]
+        names = [n for n in names if n]
+        self.discover_total = len(names)
+        if not names:
+            return
+        self.discover_start = (getattr(self.args, "discover_offset", 0) or 0) % len(names)
+        for n in names[self.discover_start:] + names[:self.discover_start]:
+            self.enqueue(WebOnly(n), 1)
+        log.info("Каналов из большого списка: %d, начинаю с №%d", len(names), self.discover_start + 1)
 
     async def add_dialogs(self) -> None:
         n = 0
@@ -637,13 +667,19 @@ class GiveawayFinder:
             if room <= 0:
                 break
             u = self.username_of(item) if depth else None
+            if isinstance(item, WebOnly) and self.discover_paused:
+                continue  # каналы списка, оставленные на следующий поиск, не скачиваем
             if not u or u.lower() in self.web_seen or u.lower() in self.web_tasks:
                 continue
             self.web_tasks[u.lower()] = self.web_check(u)
             room -= 1
 
     async def try_web(self, item: Any, depth: int) -> bool:
-        """Проверить канал по веб-странице. True — проверен, целиком через API читать не нужно."""
+        """Проверить канал по веб-странице. True — проверен, целиком через API читать не нужно.
+        Каналы большого списка (WebOnly) через API целиком не читаются никогда."""
+        web_only = isinstance(item, WebOnly)
+        if web_only and (self.discover_paused or self.web is None or self.web.broken):
+            return True  # оставляем на следующий поиск
         if self.web is None or self.web.broken or depth == 0:
             return False  # стартовые каналы читаем глубоко через API
         cid = self.cid_of(item)
@@ -653,16 +689,19 @@ class GiveawayFinder:
             await self.batch_refs(item)
         uname = self.username_of(item)
         if not uname:
-            return False
+            self.discover_consumed += web_only
+            return web_only
         key = uname.lower()
         if key in self.web_seen:
+            self.discover_consumed += web_only
             return True
         self.web_seen.add(key)  # второй раз этот канал не проверяем никаким способом
         task = self.web_tasks.pop(key, None) or self.web_check(uname)
         self.prefetch()
         cands = await task
         if cands is None:
-            return False  # веб-страницы нет — проверим через API
+            self.discover_consumed += web_only
+            return web_only  # веб-страницы нет: обычный канал проверим через API, из списка — пропустим
         self.web_checked += 1
         if cid is not None:
             self.scanned.add(cid)
@@ -670,7 +709,18 @@ class GiveawayFinder:
             log.info("Веб-проверка: каналов %d, открыто через API %d, в очереди %d",
                      self.web_checked, self.web_opened, len(self.queue))
         if not cands:
+            self.discover_consumed += web_only
             return True
+        if web_only:
+            limit = getattr(self.args, "web_open_max", None) or 80
+            if self.discover_opened >= limit:
+                self.discover_paused = True
+                self.web_seen.discard(key)  # этот и следующие каналы списка — в следующий поиск
+                log.info("Большой список: через API открыто %d каналов — это предел на один поиск "
+                         "(поиск по @username у Telegram строго ограничен), остальные в следующий раз", limit)
+                return True
+            self.discover_opened += 1
+            self.discover_consumed += 1
         ent = await self.resolve(item)
         if ent is None:
             return True
@@ -1205,7 +1255,13 @@ async def cmd_post_scheduled(client: TelegramClient, args: argparse.Namespace) -
             return (bool(filter_giveaways([g], args)) and g.key not in posted
                     and g.key not in scheduled and g.key not in known and g.key not in bad
                     and g.until_date - want_at >= min_left)
+        args.discover_offset = int(st.get("discover_offset", 0) or 0)
         finder = await run_finder(client, args, want=want, want_count=args.reserve)
+        if finder.discover_total:
+            st["discover_offset"] = (finder.discover_start + finder.discover_consumed) % finder.discover_total
+            log.info("Большой список: разобрано %d каналов (с №%d из %d), открыто через API %d; следующий поиск — с №%d",
+                     finder.discover_consumed, finder.discover_start + 1, finder.discover_total,
+                     finder.discover_opened, st["discover_offset"] + 1)
         allowed = parse_countries(getattr(args, "countries", None))
         why: dict[str, int] = {}
         added = []
@@ -1478,6 +1534,12 @@ def add_scan_args(s: argparse.ArgumentParser) -> None:
     lim.add_argument("--web-max", type=int, default=5000, help="максимум каналов веб-проверкой за запуск (5000)")
     lim.add_argument("--web-pages", type=int, default=20, help="страниц (по ~20 постов) на канал при веб-проверке (20)")
     lim.add_argument("--web-parallel", type=int, default=8, help="одновременных запросов к t.me (8)")
+    lim.add_argument("--discover-file", metavar="FILE",
+                     help="большой список @username (напр. из Common Crawl): только веб-проверка, "
+                          "без веб-страницы — пропуск; разбирается по кругу с --discover-offset")
+    lim.add_argument("--discover-offset", type=int, default=0, help="с какой строки списка начать (0)")
+    lim.add_argument("--web-open-max", type=int, default=80,
+                     help="сколько каналов большого списка можно открыть через API за запуск (80)")
     lim.add_argument("--time-limit", type=float, default=0, metavar="МИН",
                      help="остановить обход через столько минут и взять найденное (0 — без ограничения)")
     lim.add_argument("--max-flood-wait", type=int,

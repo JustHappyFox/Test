@@ -213,6 +213,41 @@ class WebCrawlTests(unittest.TestCase):
         self.assertEqual(sorted(f.web.asked), ["good21", "good22", "good23"])  # хорошие — по веб-странице
         self.assertEqual(client.scanned, [24])                                  # битый — через API
 
+    def test_big_list_is_web_only_with_open_limit(self):
+        import tempfile
+        chans = {f"chan{i}": channel(50 + i, f"chan{i}") for i in range(6)}
+        g = giveaway_media([51], stars=1000, quantity=5)
+        history = {51: [message(51, 7, g)], 53: [message(53, 2)]}
+        client = WebClient(list(chans.values()), history)
+        with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False, encoding="utf-8") as f:
+            f.write("\n".join(f"@chan{i}" for i in range(6)))
+        # cc0: нет веб-страницы, cc1 и cc3: заглушки, cc2: без заглушек; открыть через API можно только 1
+        f_ = gf.GiveawayFinder(client, args(discover_file=f.name, discover_offset=0, web_open_max=1))
+        f_.web = FakeWeb({"chan0": None, "chan1": [7], "chan2": [], "chan3": [2], "chan4": [], "chan5": []})
+        asyncio.run(self._seed_and_crawl(f_))
+        self.assertEqual(client.scanned, [])                 # целиком через API — ни одного канала списка
+        self.assertEqual(client.opened, [(51, [7])])         # открыт только первый канал с заглушками
+        self.assertEqual(len(f_.giveaways), 1)
+        self.assertEqual(f_.discover_consumed, 3)            # cc0, cc1, cc2; cc3 упёрся в лимит
+        self.assertTrue(f_.discover_paused)
+
+        # следующий поиск начинает с cc3
+        client2 = WebClient(list(chans.values()), history)
+        f2 = gf.GiveawayFinder(client2, args(discover_file=f.name, discover_offset=3, web_open_max=5))
+        f2.web = FakeWeb({"chan3": [2], "chan4": [], "chan5": []})
+        asyncio.run(self._seed_and_crawl(f2))
+        self.assertEqual(f2.web.asked[0], "chan3")
+        self.assertEqual(client2.opened, [(53, [2])])
+        Path(f.name).unlink()
+
+    @staticmethod
+    async def _seed_and_crawl(f):
+        f.args.no_aggregators = True
+        f.args.channel = None
+        f.args.channels_file = None
+        await f.add_seeds()
+        await f.crawl()
+
     def test_seen_channel_not_checked_twice(self):
         host = channel(20, "host")
         client = WebClient([host], {})

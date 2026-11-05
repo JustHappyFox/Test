@@ -37,7 +37,7 @@ RESERVED = {
 NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{3,31}$")
 
 
-def get(url: str, rng: tuple[int, int] | None = None, tries: int = 4) -> bytes:
+def get(url: str, rng: tuple[int, int] | None = None, tries: int = 6) -> bytes:
     headers = {"User-Agent": "giveaway-finder (Common Crawl index reader)"}
     if rng:
         headers["Range"] = f"bytes={rng[0]}-{rng[1]}"
@@ -49,7 +49,7 @@ def get(url: str, rng: tuple[int, int] | None = None, tries: int = 4) -> bytes:
             if attempt == tries - 1:
                 raise
             print(f"  повтор {url} ({e})", file=sys.stderr)
-            time.sleep(3 * (attempt + 1))
+            time.sleep(5 * (attempt + 1))  # 503 Slow Down — сервер просит сбавить темп
     return b""
 
 
@@ -102,25 +102,34 @@ def usernames_from_block(crawl: str, block: tuple[str, int, int]) -> set[str]:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--crawl", default="CC-MAIN-2026-43", help="снимок Common Crawl (index.commoncrawl.org/collinfo.json)")
+    ap.add_argument("--crawl", nargs="+", default=["CC-MAIN-2026-43", "CC-MAIN-2026-39", "CC-MAIN-2026-34"],
+                    help="снимки Common Crawl (список — index.commoncrawl.org/collinfo.json)")
     ap.add_argument("--out", required=True, help="куда записать @username, по одному в строке")
     ap.add_argument("--max-blocks", type=int, default=0, help="взять не больше N блоков (равномерно по всему t.me); 0 — все")
     args = ap.parse_args()
 
     t0 = time.time()
-    blocks = tme_blocks(args.crawl)
-    print(f"Блоков индекса с t.me: {len(blocks)} (оглавление прочитано за {time.time() - t0:.0f} с)")
-    if args.max_blocks and len(blocks) > args.max_blocks:
-        step = len(blocks) / args.max_blocks
-        blocks = [blocks[int(i * step)] for i in range(args.max_blocks)]
     names: set[str] = set()
-    for i, b in enumerate(blocks, 1):
+    total = 0
+    for crawl in args.crawl:
         try:
-            names |= usernames_from_block(args.crawl, b)
+            blocks = tme_blocks(crawl)
         except Exception as e:
-            print(f"  блок {b[0]}@{b[1]} пропущен: {e}", file=sys.stderr)
-        if i % 50 == 0:
-            print(f"  блоков {i}/{len(blocks)}, имён {len(names)}")
+            print(f"{crawl}: оглавление не прочитано ({e}) — пропускаю", file=sys.stderr)
+            continue
+        if args.max_blocks and len(blocks) > args.max_blocks:
+            step = len(blocks) / args.max_blocks
+            blocks = [blocks[int(i * step)] for i in range(args.max_blocks)]
+        before = len(names)
+        for b in blocks:
+            try:
+                names |= usernames_from_block(crawl, b)
+            except Exception as e:
+                print(f"  {crawl}: блок {b[0]}@{b[1]} пропущен: {e}", file=sys.stderr)
+            time.sleep(0.5)  # бережём сервер Common Crawl
+        total += len(blocks)
+        print(f"{crawl}: блоков с t.me {len(blocks)}, новых имён {len(names) - before}, всего {len(names)}")
+    blocks = range(total)
     out = sorted(names, key=str.lower)
     random.Random(1).shuffle(out)  # вперемешку: при частичной проверке — равномерная выборка
     with open(args.out, "w", encoding="utf-8") as f:
