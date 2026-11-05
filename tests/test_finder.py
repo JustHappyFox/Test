@@ -16,6 +16,17 @@ from telethon.tl import types  # noqa: E402
 
 import tg_giveaway_finder as gf  # noqa: E402
 
+# Тесты публикации ниже проверяют расписание и очередь; доступность каналов-участников розыгрыша
+# проверяется отдельно (test_web_preview.ClosedGiveawayTests), здесь считаем все каналы открытыми.
+_real_closed_reason = gf.giveaway_closed_reason
+
+
+async def _all_channels_open(*a, **kw):
+    return None
+
+
+gf.giveaway_closed_reason = _all_channels_open
+
 NOW = datetime.now(timezone.utc)
 
 

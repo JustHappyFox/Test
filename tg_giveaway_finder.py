@@ -1182,6 +1182,36 @@ def queue_order(e: dict[str, Any]) -> tuple:
     return (e["until"], bool(e.get("countries")))  # раньше кончится — раньше публикуем; при равенстве «для всех стран»
 
 
+async def giveaway_closed_reason(client: TelegramClient, channel_id: int, access_hash: int | None,
+                                 msg_id: int) -> str | None:
+    """Почему в розыгрыш нельзя вступить, или None, если можно. Участник должен подписаться на ВСЕ каналы
+    розыгрыша, поэтому каждый из них должен быть публичным и доступным (05.11 вышел пост, где 3-й канал
+    оказался закрытым — владелец: «в нём невозможно выиграть»)."""
+    try:
+        msgs = await client.get_messages(types.InputPeerChannel(channel_id, access_hash or 0), ids=[msg_id])
+    except errors.FloodWaitError:
+        raise
+    except (errors.RPCError, ValueError, TypeError) as e:
+        return f"пост недоступен ({e.__class__.__name__})"
+    media = getattr(msgs[0] if msgs else None, "media", None)
+    if not isinstance(media, types.MessageMediaGiveaway):
+        return "пост больше не розыгрыш"
+    for cid in media.channels or []:
+        try:
+            ch = await client.get_entity(types.PeerChannel(cid))  # каналы приходят вместе с постом — без поиска по имени
+        except errors.FloodWaitError:
+            raise
+        except (ValueError, TypeError, errors.RPCError) as e:
+            return f"канал-участник {cid} недоступен ({e.__class__.__name__})"
+        if not isinstance(ch, types.Channel):
+            return f"канал-участник {cid} недоступен"
+        if not active_username(ch):
+            return f"канал-участник «{ch.title}» закрытый (без @username)"
+        if getattr(ch, "restricted", False):
+            return f"канал-участник @{active_username(ch)} заблокирован"
+    return None
+
+
 async def queue_entry(client: TelegramClient, g: Giveaway, finder: "GiveawayFinder") -> dict[str, Any] | None:
     """Готовая к пересылке запись: пост в канале-организаторе + access_hash, чтобы потом
     переслать без поиска (в т.ч. из новой сессии на другом сервере)."""
@@ -1196,6 +1226,10 @@ async def queue_entry(client: TelegramClient, g: Giveaway, finder: "GiveawayFind
     ref = await finder.channel_ref(cid)
     if not ref.username:  # закрытый канал (без @username) — пропускаем
         log.info("Пропускаю: канал-организатор закрытый (%s)", ref.title or cid)
+        return None
+    why = await giveaway_closed_reason(client, cid, getattr(peer, "access_hash", None), mid)
+    if why:
+        log.info("Пропускаю %s: %s — в такой розыгрыш нельзя вступить", message_link(ref, cid, mid), why)
         return None
     return {"key": g.key, "until": g.until_date.isoformat(), "prize": g.prize_text(),
             "countries": g.countries, "channel_id": cid,
@@ -1258,6 +1292,13 @@ async def cmd_post_scheduled(client: TelegramClient, args: argparse.Namespace) -
         entry = next((e for e in queue if e["link"].rstrip("/") == args.post_now.rstrip("/")), None)
         if entry is None:
             log.warning("Розыгрыша %s нет в запасе — нечего публиковать вне очереди", args.post_now)
+            return
+        why = await giveaway_closed_reason(client, entry["channel_id"], entry["access_hash"], entry["msg_id"])
+        if why:
+            log.warning("Не публикую %s: %s — в такой розыгрыш нельзя вступить", entry["link"], why)
+            st.setdefault("bad", {})[entry["key"]] = entry["until"]
+            st["queue"] = [e for e in queue if e is not entry]
+            save_state(state_path, st)
             return
         fwd = await client.forward_messages(
             target, entry["msg_id"], from_peer=types.InputPeerChannel(entry["channel_id"], entry["access_hash"]))
@@ -1415,6 +1456,11 @@ async def cmd_post_scheduled(client: TelegramClient, args: argparse.Namespace) -
                   f"{entry['prize']} | {entry['link']}")
             scheduled[entry["key"]] = {**entry, "at": when.isoformat()}
             next_at = when + interval
+            continue
+        why = await giveaway_closed_reason(client, entry["channel_id"], entry["access_hash"], entry["msg_id"])
+        if why:  # перед публикацией ещё раз: каналы-участники могли закрыться, пока розыгрыш лежал в запасе
+            log.warning("Не публикую %s: %s — в такой розыгрыш нельзя вступить, беру другой", entry["link"], why)
+            bad[entry["key"]] = entry["until"]
             continue
         try:
             fwd = await client.forward_messages(

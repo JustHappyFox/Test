@@ -390,5 +390,78 @@ class NameLookupLimitTests(unittest.TestCase):
         self.assertEqual(client.opened, [(80, [3])])    # знакомый канал проверили без поиска по имени
 
 
+class ClosedGiveawayTests(unittest.TestCase):
+    """05.11 вышел розыгрыш, где 3-й канал-участник закрытый — вступить в такой розыгрыш нельзя."""
+
+    def _client(self, private_ids):
+        from telethon import errors
+        open_chans = {10: channel(10, "orgchan"), 11: channel(11, "sponsor1"),
+                      12: channel(12, None, title="NoName")}
+
+        class C:
+            async def get_messages(self, peer, ids=None):
+                media = giveaway_media(self.channels, months=3, quantity=1)
+                return [message(peer.channel_id, ids[0], media)]
+
+            async def get_entity(self, peer):
+                if peer.channel_id in private_ids:
+                    raise errors.ChannelPrivateError(request=None)
+                return open_chans[peer.channel_id]
+        return C()
+
+    def test_reasons(self):
+        from test_finder import _real_closed_reason as check
+        c = self._client(private_ids={13})
+        c.channels = [10, 11]
+        self.assertIsNone(asyncio.run(check(c, 10, 70, 5)))
+        c.channels = [10, 11, 13]
+        self.assertIn("недоступен", asyncio.run(check(c, 10, 70, 5)))
+        c.channels = [10, 12]
+        self.assertIn("закрытый", asyncio.run(check(c, 10, 70, 5)))
+
+    def test_closed_giveaway_is_not_published(self):
+        import json
+        import tempfile
+        import test_finder as tf
+        calls = []
+
+        async def closed_for_channel_7(client, channel_id, access_hash, msg_id):
+            return "канал-участник «Shum Gifts» недоступен" if channel_id == 7 else None
+        gf.giveaway_closed_reason = closed_for_channel_7
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                state = Path(d, "st.json")
+                until = (NOW + timedelta(days=5)).isoformat()
+                q = [{"key": "a", "until": until, "prize": "A", "countries": [], "channel_id": 7, "access_hash": 1,
+                      "msg_id": 3, "link": "https://t.me/frishniu/16"},
+                     {"key": "b", "until": (NOW + timedelta(days=6)).isoformat(), "prize": "B", "countries": [],
+                      "channel_id": 8, "access_hash": 1, "msg_id": 4, "link": "https://t.me/ok/4"}]
+                state.write_text(json.dumps({"posted": {}, "queue": q, "last_post": None}), encoding="utf-8")
+
+                class Client:
+                    async def get_entity(self, x):
+                        return channel(99, "TGaGifts", left=False)
+
+                    async def iter_messages(self, *a, **kw):
+                        if False:
+                            yield None
+
+                    async def get_messages(self, *a, **kw):
+                        return []
+
+                    async def forward_messages(self, to, mid, from_peer=None, schedule=None):
+                        calls.append(from_peer.channel_id)
+                        return types.Message(id=500, peer_id=types.PeerChannel(99), date=NOW, message="")
+
+                a = gf.build_parser().parse_args(["post", "--to", "TGaGifts", "--state", str(state),
+                                                  "--schedule-ahead", "0", "--min-interval-hours", "3.5"])
+                asyncio.run(gf.cmd_post(Client(), gf.apply_preset(a)))
+                st = json.loads(state.read_text(encoding="utf-8"))
+        finally:
+            gf.giveaway_closed_reason = tf._all_channels_open
+        self.assertEqual(calls, [8])              # закрытый розыгрыш не переслан, взят следующий
+        self.assertIn("a", st["bad"])             # и больше его не берём
+
+
 if __name__ == "__main__":
     unittest.main()
