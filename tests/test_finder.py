@@ -905,3 +905,16 @@ class SearchCooldownTests(unittest.TestCase):
         calls, st = self.run_post({"last_search": (NOW - timedelta(hours=3)).isoformat(), "last_search_added": 0})
         self.assertEqual(calls, [1])                      # один поиск; пусто — без повторов
         self.assertEqual(st["last_search_added"], 0)
+
+
+class DueSlackTests(PostWhenDueTests):
+    """Запуск чуть раньше срока (в пределах 10 минут) должен публиковать, а не пропускать."""
+    test_not_due_just_refreshes = None
+    test_due_posts_exactly_one = None
+    test_manual_post_blocks_when_due = None
+
+    def test_run_4_minutes_early_still_posts(self):
+        c = self.client()
+        last = NOW - timedelta(hours=3.5) + timedelta(minutes=4)   # до срока ещё 4 минуты
+        st = self.run_post(c, {"last_post": last.isoformat(), "queue": [self.entry(1)]})
+        self.assertEqual(c.forwards, [(1, None)])                  # опубликовано сразу, не отложено

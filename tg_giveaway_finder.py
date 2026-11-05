@@ -960,7 +960,8 @@ async def cmd_post_scheduled(client: TelegramClient, args: argparse.Namespace) -
         if args.schedule_ahead > 0:  # держать N отложенных постов
             return len(scheduled) < args.schedule_ahead
         # 0 — публиковать один пост, только когда подошло время (раз в 3,5 ч / 5 ч после ваших постов)
-        return last_published is None and next_at <= now + timedelta(minutes=2)
+        # допуск 10 минут: запуски по расписанию приходят неточно, пропускать из-за пары минут нельзя
+        return last_published is None and next_at <= now + timedelta(minutes=10)
 
     async def search() -> None:
         """Перебор каналов: набираем в запас до --reserve подходящих розыгрышей."""
@@ -1032,7 +1033,7 @@ async def cmd_post_scheduled(client: TelegramClient, args: argparse.Namespace) -
             continue
         queue.remove(entry)
         when = next_at
-        immediate = when <= now + timedelta(minutes=2)
+        immediate = when <= now + timedelta(minutes=2) or args.schedule_ahead == 0
         if args.dry_run:
             print(f"[dry-run] {'сейчас' if immediate else when.strftime('%d.%m %H:%M UTC')}: "
                   f"{entry['prize']} | {entry['link']}")
