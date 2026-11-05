@@ -74,6 +74,11 @@ DEFAULT_AGGREGATORS = [
     # найдены веб-поиском 05.11 по заглушке «Please open Telegram to view this post» + «розыгрыш/giveaway»
     "@loot_premium", "@yprmk", "@PremiumGiveAwayTg", "@giveawaystarstelegram", "@rf_free",
     "@PremiumGiveaway_Prizes", "@giveawayprizeshub",
+    # веб-поиск на 15 языках 05.11 (~50 каналов), оставлены только те, где за 31 день есть модули-розыгрыши:
+    "@giveawayscryptobot",   # 14 модулей
+    "@Permio_ir",            # 6, персидский
+    "@premium_accounfree",   # 5, персидский
+    "@rozygryshi_zvyozd",    # 2
 ]
 
 # Значения по умолчанию для обычного и осторожного (--careful) режимов.
