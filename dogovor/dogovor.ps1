@@ -474,6 +474,109 @@ public static class DocxTemplate {
         return t;
     }
 
+    // Таблица с переменным числом строк (приборы учёта в справке): строка шаблона, где есть поле «anchor», повторяется
+    // rows.Count раз, поля строки i становятся «ИМЯ_i» (значения - в Fill под этими именами). Ячейки полей из always сливаются
+    // по вертикали на всю таблицу (значение - в первой строке), из equal - со строкой выше, если значение то же.
+    // Строки с полем «¶drop» (старый шаблон: второй счётчик отдельной строкой) убираются. Результат - новый файл шаблона.
+    public static void ExpandRows(string template, string output, string anchor, string drop, List<Dictionary<string, string>> rows,
+            string[] always, string[] equal) {
+        List<ZipEntry> entries = Zip.Read(template);
+        foreach (ZipEntry e in entries) {
+            if (e.Name != "word/document.xml") continue;
+            XmlDocument doc = new XmlDocument();
+            doc.PreserveWhitespace = true;
+            using (MemoryStream ms = new MemoryStream(e.GetData())) doc.Load(ms);
+            XmlNamespaceManager ns = new XmlNamespaceManager(doc.NameTable);
+            ns.AddNamespace("w", W);
+            XmlNode row = null;
+            List<XmlNode> trs = new List<XmlNode>();
+            foreach (XmlNode tr in doc.SelectNodes("//w:tr", ns)) trs.Add(tr);
+            foreach (XmlNode tr in trs) {
+                string t = AllText(tr);
+                if (drop != null && t.Contains("«¶" + drop + "»")) { tr.ParentNode.RemoveChild(tr); continue; }
+                if (row == null && t.Contains("«" + anchor + "»")) row = tr;
+            }
+            if (row == null || rows.Count == 0) break;
+            List<XmlNode> cells = Cells(row);
+            string[] field = new string[cells.Count];
+            for (int c = 0; c < cells.Count; c++) {
+                Match m = Field.Match(AllText(cells[c]));
+                field[c] = m.Success ? m.Groups[2].Value : null;
+            }
+            int n = rows.Count;
+            bool[,] cont = new bool[n + 1, cells.Count];      // ячейка продолжает ячейку строки выше
+            for (int i = 1; i < n; i++)
+                for (int c = 0; c < cells.Count; c++) {
+                    string f = field[c];
+                    if (f == null) continue;
+                    string a, b;
+                    if (Array.IndexOf(always, f) >= 0) cont[i, c] = true;
+                    else if (Array.IndexOf(equal, f) >= 0 && rows[i - 1].TryGetValue(f, out a) && rows[i].TryGetValue(f, out b) && a == b) cont[i, c] = true;
+                }
+            XmlNode after = row;
+            for (int i = 0; i < n; i++) {
+                XmlNode clone = row.CloneNode(true);
+                List<XmlNode> cc = Cells(clone);
+                string suffix = "_" + (i + 1);
+                for (int c = 0; c < cc.Count; c++) {
+                    foreach (XmlNode t in ((XmlElement)cc[c]).GetElementsByTagName("t", W))
+                        t.InnerText = Field.Replace(t.InnerText, delegate(Match m) { return "«" + m.Groups[1].Value + m.Groups[2].Value + suffix + "»"; });
+                    if (cont[i, c]) { EmptyCell(cc[c]); SetVMerge(doc, cc[c], null); }
+                    else if (cont[i + 1, c]) SetVMerge(doc, cc[c], "restart");
+                    else SetVMerge(doc, cc[c], "");
+                }
+                row.ParentNode.InsertAfter(clone, after);
+                after = clone;
+            }
+            row.ParentNode.RemoveChild(row);
+            using (MemoryStream ms = new MemoryStream()) {
+                XmlWriterSettings ws = new XmlWriterSettings();
+                ws.Encoding = new UTF8Encoding(false);
+                using (XmlWriter xw = XmlWriter.Create(ms, ws)) doc.Save(xw);
+                e.SetData(ms.ToArray());
+            }
+        }
+        Zip.Write(output, entries);
+    }
+
+    static string AllText(XmlNode n) {
+        StringBuilder sb = new StringBuilder();
+        foreach (XmlNode t in ((XmlElement)n).GetElementsByTagName("t", W)) sb.Append(t.InnerText);
+        return sb.ToString();
+    }
+
+    static List<XmlNode> Cells(XmlNode tr) {
+        List<XmlNode> r = new List<XmlNode>();
+        foreach (XmlNode c in tr.ChildNodes) if (c.LocalName == "tc" && c.NamespaceURI == W) r.Add(c);
+        return r;
+    }
+
+    // ячейка-продолжение: текста нет, абзац с оформлением остаётся
+    static void EmptyCell(XmlNode tc) {
+        foreach (XmlNode p in Children(tc)) {
+            if (p.LocalName != "p") continue;
+            foreach (XmlNode x in Children(p)) if (x.LocalName != "pPr") p.RemoveChild(x);
+        }
+    }
+
+    // слияние по вертикали: "restart" - начало, null - продолжение, "" - без слияния. В tcPr - после tcW и gridSpan
+    static void SetVMerge(XmlDocument doc, XmlNode tc, string val) {
+        XmlNode pr = null;
+        foreach (XmlNode x in tc.ChildNodes) if (x.LocalName == "tcPr") pr = x;
+        if (pr == null) {
+            if (val == "") return;
+            pr = doc.CreateElement("w", "tcPr", W);
+            tc.PrependChild(pr);
+        }
+        foreach (XmlNode x in Children(pr)) if (x.LocalName == "vMerge") pr.RemoveChild(x);
+        if (val == "") return;
+        XmlElement vm = doc.CreateElement("w", "vMerge", W);
+        if (val != null) vm.SetAttribute("val", W, val);
+        XmlNode before = null;
+        foreach (XmlNode x in pr.ChildNodes) if (before == null && x.LocalName != "cnfStyle" && x.LocalName != "tcW" && x.LocalName != "gridSpan" && x.LocalName != "hMerge") before = x;
+        pr.InsertBefore(vm, before);
+    }
+
     // все поля шаблона - для проверки
     public static List<string> Fields(string template) {
         List<string> names = new List<string>();
@@ -1451,6 +1554,17 @@ public class Grid {
 
     public IEnumerable<Cell> Cells() {
         foreach (Cell[] r in rows) foreach (Cell c in r) yield return c;
+    }
+
+    // убрать все строки: подписи - совсем, поля и вложенные сетки - только из окна (их можно поставить заново)
+    public void Clear() {
+        foreach (Cell[] r in rows)
+            foreach (Cell c in r) {
+                if (c.Cap != null) { Host.Controls.Remove(c.Cap); c.Cap.Dispose(); c.Cap = null; }
+                if (c.Ctl != null) Host.Controls.Remove(c.Ctl);
+                if (c.Sub != null) Host.Controls.Remove(c.Sub.Host);
+            }
+        rows.Clear();
     }
 
     static double charW;
@@ -15428,8 +15542,21 @@ public class SpravkaForm : Form {
     readonly Panel content = new Panel();
     readonly Label head = new Label(), headSub = new Label(), status = new Label();
     readonly ToolTip tip = new ToolTip();
-    BoxPanel box2;
-    readonly MeterPick[] picks = new MeterPick[3];   // тип счётчика 1 и 2 по частям, как в договоре
+    // приборы учёта: сколько угодно (кнопка «+»), у каждого свой лицевой и адрес - бывает по 5 ПУ на разных адресах одного объекта
+    class MeterBlock {
+        public readonly BoxPanel Box = new BoxPanel();
+        public Grid Grid;
+        public readonly Dictionary<string, Control> Ctl = new Dictionary<string, Control>();
+        public readonly Dictionary<string, string> Caps = new Dictionary<string, string>();
+        public MeterPick Pick;
+        public Button Remove;
+        public string AutoAdres = "";
+    }
+    readonly List<MeterBlock> meters = new List<MeterBlock>();
+    Card meterCard;
+    Button addMeter;
+    static readonly string[] AddrKeys = { "np_tip", "np", "ulica_tip", "ulica", "dom", "korp", "kv" };
+    static readonly string[] MeterKeys = { "ls", "np_tip", "np", "ulica_tip", "ulica", "dom", "korp", "kv", "adres", "model", "korpus", "modif", "tip", "zav", "pokaz", "pov" };
     public StartMenu Home;
     public Form Back;                     // куда «Назад»: меню или окно договора
     bool loading, dirty;
@@ -15439,8 +15566,6 @@ public class SpravkaForm : Form {
     static readonly string[][] LineKeys = {
         new string[] { "on_egrni", "svid", "vlad" }, new string[] { "on_mesto", "mesto", "prinadl" }, new string[] { "on_zakl", "zakl" },
         new string[] { "on_gruppa", "gruppa" }, new string[] { "on_reg", "reg" } };
-    // части адреса из договора - для имени файла («Копище Авиационная 15-83»)
-    string fNp = "", fUlica = "", fDom = "", fKv = "", fromAdres = "";
 
     public bool Unsaved { get { return dirty; } }
 
@@ -15534,16 +15659,12 @@ public class SpravkaForm : Form {
         EventHandler h = delegate {
             if (loading) return;
             dirty = true;
-            // тип счётчика по частям: модель -> корпус -> модификация
-            for (int i = 1; i <= 2; i++) {
-                string p = "pu" + i + "_";
-                if (picks[i] == null) continue;
-                if (key == p + "model") picks[i].Changed(0);
-                else if (key == p + "korpus") picks[i].Changed(1);
-                else if (key == p + "modif") picks[i].Changed(2);
-            }
             RefreshState();
         };
+        Hook(c, h);
+    }
+
+    void Hook(Control c, EventHandler h) {
         if (c is Seg) ((Seg)c).Changed += delegate { Enable(); h(c, EventArgs.Empty); };
         else if (c is ComboBox) { ((ComboBox)c).TextChanged += h; ((ComboBox)c).SelectedIndexChanged += h; }
         else if (c is DateBox) ((DateBox)c).ValueChanged += h;
@@ -15556,8 +15677,20 @@ public class SpravkaForm : Form {
         }
     }
 
+    // поле по ключу: общие - «fio», у приборов учёта - «pu2_zav» (номер прибора с 1)
+    Control Find(string key) {
+        Control c;
+        if (inp.TryGetValue(key, out c)) return c;
+        if (key.StartsWith("pu")) {
+            int u = key.IndexOf('_'), i;
+            if (u > 2 && int.TryParse(key.Substring(2, u - 2), out i) && i >= 1 && i <= meters.Count && meters[i - 1].Ctl.TryGetValue(key.Substring(u + 1), out c)) return c;
+        }
+        return null;
+    }
+
     public string V(string key) {
-        Control c = inp[key];
+        Control c = Find(key);
+        if (c == null) return "";
         if (c is Combo && c.Text.Trim() == MeterPick.Own) return "";
         if (c is Seg) return ((Seg)c).Value;
         if (c is DateBox) return ((DateBox)c).Text2;
@@ -15567,8 +15700,8 @@ public class SpravkaForm : Form {
     }
 
     public void SetV(string key, string v) {
-        Control c;
-        if (!inp.TryGetValue(key, out c)) return;
+        Control c = Find(key);
+        if (c == null) return;
         v = v ?? "";
         if (c is Seg) ((Seg)c).Value = v;
         else if (c is CheckBox) ((CheckBox)c).Checked = v == "1";
@@ -15598,32 +15731,21 @@ public class SpravkaForm : Form {
         c.Grid.Row(F("Данные прибора учёта на (дата справки)", date, 14), F("Инженер по работе с потребителями", C("inzh", false, "Фамилия И.О."), 22),
             F("Начальник ГРП", C("nach", false, "Фамилия И.О."), 22));
 
-        c = new Card("Абонент", "лицевой счёт, Ф.И.О., адрес", 4);
-        cards.Add(c);
-        c.Grid.Row(F("Лицевой счёт (номер в базе)", T("ls", "9 цифр"), 16), F("Фамилия, имя, отчество", T("fio", "Иванов Иван Иванович"), 0),
-            F("Телефон", T("tel", "+375..."), 18));
-        c.Grid.Row(F("Адрес (как в справке)", T("adres", "д. Боровляны, ул. Лесная, д. 7, кв. 2"), 0));
+        c.Grid.Row(F(null, X("qr", "QR-код на справке (для журнала ответов)"), 34));
 
-        c = new Card("Прибор учёта", "тип, номер, показания, поверка", 4);
+        c = new Card("Абонент", "Ф.И.О. и телефон", 4);
         cards.Add(c);
-        Seg n = new Seg("1 счётчик", "2 счётчика");
-        n.Size = new Size(260, 30);
-        Reg("n", n);
-        c.AddExtra(n);
-        BoxPanel b1 = new BoxPanel();
-        b1.Title = "Счётчик 1";
-        b1.Mark = St.TintOf("Прибор учёта").Mark;
-        Grid g1 = new Grid(b1, 4);
-        g1.PadTop = 32;
-        Meter(g1, 1);
-        box2 = new BoxPanel();
-        box2.Title = "Счётчик 2";
-        box2.Mark = b1.Mark;
-        Grid g2 = new Grid(box2, 4);
-        g2.PadTop = 32;
-        Meter(g2, 2);
-        c.Grid.Row(Cell.G(g1, 4));
-        c.Grid.Row(Cell.G(g2, 4));
+        c.Grid.Row(F("Фамилия, имя, отчество", T("fio", "Иванов Иван Иванович"), 0), F("Телефон", T("tel", "+375..."), 18));
+
+        // приборы учёта: у каждого свой лицевой и адрес; «+» - ещё прибор
+        meterCard = c = new Card("Прибор учёта", "лицевой, адрес, тип, номер, показания, поверка - у каждого свои", 4);
+        cards.Add(c);
+        addMeter = Ui.Button("+ ещё прибор учёта", false);
+        addMeter.Name = "addMeter";
+        addMeter.Click += delegate { AddMeter(); };
+        tip.SetToolTip(addMeter, "Ещё один прибор учёта (свой лицевой и адрес), сколько нужно");
+        meters.Add(NewMeter());
+        RebuildMeters();
 
         // пломбы - не в текст справки, а в «Мои отчёты пломб» (как пломбы договора)
         c = new Card("Пломбы", "для «Мои отчёты пломб» - в справку не печатаются", 4);
@@ -15639,9 +15761,9 @@ public class SpravkaForm : Form {
         const int box = 25;
         c.Grid.Row(F(null, X("on_egrni", "«Согласно данным ЕГРНИ…»"), box), F("Свидетельство (ЕГРНИ) №", T("svid", "например 600/D-123456"), 20),
             F("Владельцев", C("vlad", false, null), 14));
+        c.Grid.Row(F(null, X("on_zakl", "Заключение (жирным)"), box), F("Заключение", C("zakl", true, null), 0));
         c.Grid.Row(F(null, X("on_mesto", "«Прибор учета установлен…»"), box), F("где установлен", C("mesto", false, "в тамбуре"), 26),
             F("чьей собственности", C("prinadl", false, "собственности абонента"), 0));
-        c.Grid.Row(F(null, X("on_zakl", "Заключение (жирным)"), box), F("Заключение", C("zakl", true, null), 0));
         c.Grid.Row(F(null, X("on_gruppa", "Тарифная группа"), box), F("Тарифная группа", C("gruppa", true, null), 0));
         c.Grid.Row(F(null, X("on_reg", "«Регистрация …»"), box), F("Регистрация", T("reg", "пусто - линия, вписать от руки"), 0));
         TextBox own = Ui.Text(3);
@@ -15650,15 +15772,169 @@ public class SpravkaForm : Form {
         c.Grid.Row(F(null, X("svoy_b", "свой текст - жирным"), box));
     }
 
-    // тип счётчика - по частям из справочника [Счётчики] (модель -> корпус -> модификация, в конце «свое»), как в договоре;
-    // полный тип собирается сам, его можно поправить
-    void Meter(Grid g, int i) {
-        string p = "pu" + i + "_";
-        g.Row(F("Модель", C(p + "model", false, null), 12), F("Тип корпуса", C(p + "korpus", false, null), 10), F("Модификация", C(p + "modif", false, null), 22));
-        g.Row(F("Тип в справке (собирается сам, можно поправить)", T(p + "tip", "CE 208 BY S51.145.1.JRQ"), 0));
-        g.Row(F("Номер", T(p + "zav", null), 14), F("Показания", T(p + "pokaz", null), 12), F("Поверка (год-квартал)", T(p + "pov", "2025-2"), 10));
-        picks[i] = new MeterPick(lists, (Combo)inp[p + "model"], (Combo)inp[p + "korpus"], (Combo)inp[p + "modif"], (TextBox)inp[p + "tip"]);
+    // Прибор учёта: лицевой; адрес по частям, как в договоре (вводится как удобно, строка собирается сама: «д. Боровляны,
+    // ул. Лесная, д. 7, кв. 2», её можно поправить); тип по частям из справочника [Счётчики] (модель -> корпус -> модификация,
+    // «свое»), полный тип собирается сам; номер, показания, поверка
+    MeterBlock NewMeter() {
+        MeterBlock m = new MeterBlock();
+        m.Box.Mark = St.TintOf("Прибор учёта").Mark;
+        m.Grid = new Grid(m.Box, 4);
+        m.Grid.PadTop = 34;
+        m.Grid.Row(MF(m, "ls", "Лицевой счёт (номер в базе)", MT(m, "ls", "9 цифр"), 16), MF(m, "np_tip", "Тип н.п.", MC(m, "np_tip"), 7),
+            MF(m, "np", "Населённый пункт / СТ", MC(m, "np"), 0));
+        m.Grid.Row(MF(m, "ulica_tip", "Тип улицы", MC(m, "ulica_tip"), 7), MF(m, "ulica", "Улица", MC(m, "ulica"), 0),
+            MF(m, "dom", "Дом / участок", MT(m, "dom", null), 8), MF(m, "korp", "Корпус", MT(m, "korp", null), 6), MF(m, "kv", "Квартира", MT(m, "kv", null), 6));
+        m.Grid.Row(MF(m, "adres", "Адрес в справке (собирается сам из полей выше, можно поправить)", MT(m, "adres", null), 0));
+        m.Grid.Row(MF(m, "model", "Модель", MC(m, "model"), 12), MF(m, "korpus", "Тип корпуса", MC(m, "korpus"), 10), MF(m, "modif", "Модификация", MC(m, "modif"), 22));
+        m.Grid.Row(MF(m, "tip", "Тип в справке (собирается сам, можно поправить)", MT(m, "tip", "CE 208 BY S51.145.1.JRQ"), 0));
+        m.Grid.Row(MF(m, "zav", "Номер", MT(m, "zav", null), 14), MF(m, "pokaz", "Показания", MT(m, "pokaz", null), 12),
+            MF(m, "pov", "Поверка (год-квартал)", MT(m, "pov", "2025-2"), 10));
+        m.Pick = new MeterPick(lists, (Combo)m.Ctl["model"], (Combo)m.Ctl["korpus"], (Combo)m.Ctl["modif"], (TextBox)m.Ctl["tip"]);
+        m.Remove = Ui.Button("× убрать", false);
+        m.Remove.Size = new Size(100, 28);
+        m.Remove.TabStop = false;
+        MeterBlock mm = m;
+        m.Remove.Click += delegate { RemoveMeter(mm); };
+        m.Box.Controls.Add(m.Remove);
+        m.Box.Resize += delegate { mm.Remove.Location = new Point(mm.Box.Width - mm.Remove.Width - 10, 5); };
+        MeterLists(m);
+        return m;
     }
+
+    Cell MF(MeterBlock m, string k, string caption, Control c, int chars) {
+        Cell x = Cell.F(caption, c, chars == 0 ? 4 : 1);
+        x.W = chars;
+        m.Caps[k] = caption;
+        return x;
+    }
+
+    TextBox MT(MeterBlock m, string k, string cue) {
+        TextBox t = Ui.Text(1);
+        RegM(m, k, t);
+        if (cue != null) t.HandleCreated += delegate { Ui.Cue(t, cue); };
+        return t;
+    }
+
+    Combo MC(MeterBlock m, string k) {
+        Combo c = new Combo(true, false);
+        RegM(m, k, c);
+        return c;
+    }
+
+    void RegM(MeterBlock m, string k, Control c) {
+        m.Ctl[k] = c;
+        EventHandler h = delegate {
+            if (loading) return;
+            dirty = true;
+            // тип по частям: модель -> корпус -> модификация; адрес - из частей
+            if (k == "model") m.Pick.Changed(0);
+            else if (k == "korpus") m.Pick.Changed(1);
+            else if (k == "modif") m.Pick.Changed(2);
+            if (Array.IndexOf(AddrKeys, k) >= 0) ComposeAddress(m);
+            RefreshState();
+        };
+        Hook(c, h);
+        // с заглавной, когда уходим из поля: «боровляны» -> «Боровляны»
+        if (k == "np" || k == "ulica") c.Leave += delegate { string v = c.Text.Trim(); if (v.Length > 0 && Up(v) != v) c.Text = Up(v); };
+    }
+
+    // строка адреса: «д. Боровляны, ул. Лесная, д. 7, корп. 2, кв. 3»; СТ - «СТ «Ромашка», уч. 15»
+    static string AddressFrom(string npTip, string np, string ulTip, string ul, string dom, string korp, string kv) {
+        List<string> p = new List<string>();
+        bool st = npTip.ToUpper() == "СТ" || npTip.ToLower() == "с/т";
+        np = Up(np);
+        if (np.Length > 0) p.Add(st ? npTip + " «" + np.Trim('«', '»', '"') + "»" : (npTip + " " + np).Trim());
+        if (ul.Length > 0) p.Add((ulTip + " " + Up(ul)).Trim());
+        if (dom.Length > 0) p.Add((st ? "уч. " : "д. ") + dom);
+        if (korp.Length > 0) p.Add("корп. " + korp);
+        if (kv.Length > 0) p.Add("кв. " + kv);
+        return string.Join(", ", p.ToArray());
+    }
+
+    string AddressOf(MeterBlock m) {
+        return AddressFrom(MV(m, "np_tip"), MV(m, "np"), MV(m, "ulica_tip"), MV(m, "ulica"), MV(m, "dom"), MV(m, "korp"), MV(m, "kv"));
+    }
+
+    string MV(MeterBlock m, string k) { return V("pu" + (meters.IndexOf(m) + 1) + "_" + k); }
+
+    // части адреса поменялись - строка адреса собирается заново (если её не правили руками)
+    void ComposeAddress(MeterBlock m) {
+        string a = AddressOf(m);
+        string cur = MV(m, "adres");
+        if (cur == m.AutoAdres || cur.Length == 0) {
+            bool was = loading;
+            loading = true;
+            try { m.Ctl["adres"].Text = a; } finally { loading = was; }
+        }
+        m.AutoAdres = a;
+    }
+
+    void MeterLists(MeterBlock m) {
+        bool was = loading;
+        loading = true;
+        try {
+            ((Combo)m.Ctl["np_tip"]).SetItems(lists.Get("Тип населённого пункта"));
+            ((Combo)m.Ctl["ulica_tip"]).SetItems(lists.Get("Тип улицы"));
+            ((Combo)m.Ctl["np"]).SetItems(memory.Hist("нп"));
+            ((Combo)m.Ctl["ulica"]).SetItems(memory.Hist("улица"));
+            m.Pick.Refresh(false);
+        } finally { loading = was; }
+    }
+
+    // приборы учёта - в раздел заново: заголовки «Прибор учёта 1, 2...», «× убрать» - когда их больше одного, внизу «+»
+    void RebuildMeters() {
+        meterCard.Grid.Clear();
+        for (int i = 0; i < meters.Count; i++) {
+            MeterBlock m = meters[i];
+            m.Box.Title = meters.Count == 1 ? "Прибор учёта" : "Прибор учёта " + (i + 1);
+            m.Remove.Visible = meters.Count > 1;
+            m.Box.Invalidate();
+            meterCard.Grid.Row(Cell.G(m.Grid, 4));
+        }
+        Cell add = Cell.F(null, addMeter, 1);
+        add.W = 22;
+        meterCard.Grid.Row(add);
+        if (IsHandleCreated) LayoutCards();
+    }
+
+    // ещё прибор учёта; лицевой и адрес - как у предыдущего (обычно тот же объект), их можно поменять
+    public void AddMeter() {
+        MeterBlock prev = meters[meters.Count - 1];
+        MeterBlock m = NewMeter();
+        meters.Add(m);
+        loading = true;
+        try {
+            foreach (string k in new string[] { "ls", "np_tip", "np", "ulica_tip", "ulica", "dom", "korp", "kv", "adres" }) m.Ctl[k].Text = prev.Ctl[k].Text;
+            m.AutoAdres = prev.AutoAdres;
+        } finally { loading = false; }
+        RebuildMeters();
+        dirty = true;
+        RefreshState();
+        if (IsHandleCreated) {
+            content.ScrollControlIntoView(m.Box);
+            m.Ctl["model"].Focus();
+        }
+    }
+
+    void RemoveMeter(MeterBlock m) {
+        if (meters.Count <= 1) return;
+        meters.Remove(m);
+        meterCard.Panel.Controls.Remove(m.Box);
+        m.Box.Dispose();
+        RebuildMeters();
+        dirty = true;
+        RefreshState();
+    }
+
+    // ровно n приборов учёта (лишние убираются, новые - пустые)
+    void SetMeterCount(int n) {
+        n = Math.Max(1, n);
+        while (meters.Count > n) { MeterBlock m = meters[meters.Count - 1]; meters.Remove(m); meterCard.Panel.Controls.Remove(m.Box); m.Box.Dispose(); }
+        while (meters.Count < n) meters.Add(NewMeter());
+        RebuildMeters();
+    }
+
+    public int MeterCount { get { return meters.Count; } }
 
     void FillLists() {
         bool was = loading;
@@ -15673,7 +15949,7 @@ public class SpravkaForm : Form {
             Items("vlad", new List<string>(new string[] { "1 владелец", "2 владельца", "3 владельца", "4 владельца", "5 владельцев" }));
             Items("zakl", lists.Get("Справка: заключение"));
             Items("gruppa", lists.Get("Тарифная группа"));
-            for (int i = 1; i <= 2; i++) if (picks[i] != null) picks[i].Refresh(false);
+            foreach (MeterBlock m in meters) MeterLists(m);
         } finally { loading = was; }
     }
 
@@ -15690,13 +15966,6 @@ public class SpravkaForm : Form {
     }
 
     void Enable() {
-        bool two = V("n") == "2 счётчика";
-        box2.Enabled = two;
-        foreach (string k in new string[] { "model", "korpus", "modif", "tip", "zav", "pokaz", "pov" }) {
-            Control c = inp["pu2_" + k];
-            c.BackColor = two ? Color.White : St.Disabled;
-        }
-        box2.Invalidate();
         // отключённая строка - её поля серые
         foreach (string[] l in LineKeys) {
             bool on = V(l[0]) == "1";
@@ -15888,17 +16157,21 @@ public class SpravkaForm : Form {
         try {
             foreach (KeyValuePair<string, Control> kv in inp) if (!(kv.Value is DateBox) && !(kv.Value is Seg)) SetV(kv.Key, "");
             ((DateBox)inp["data"]).Value = DateTime.Today;
-            SetV("n", "1 счётчик");
+            // один прибор учёта, пустой
+            SetMeterCount(1);
+            foreach (string k in MeterKeys) SetV("pu1_" + k, "");
+            meters[0].AutoAdres = "";
+            // QR-код - по умолчанию выключен (включили - запоминается)
+            SetV("qr", memory.Get("СправкаQR", ""));
             SetV("inzh", memory.Get("СправкаИнженер", ""));
             SetV("nach", memory.Get("СправкаНачальник", First(Names())));
             SetV("vlad", "1 владелец");
             SetV("prinadl", First(lists.Get("Справка: чья собственность")));
             SetV("zakl", First(lists.Get("Справка: заключение")));
             SetOffLines(memory.Get("СправкаБезСтрок", ""));
-            fNp = fUlica = fDom = fKv = fromAdres = "";
             savedFile = null;
             savedId = null;
-            for (int i = 1; i <= 2; i++) picks[i].Loaded();
+            foreach (MeterBlock m in meters) m.Pick.Loaded();
         } finally { loading = false; }
         dirty = false;
         Enable();
@@ -15927,35 +16200,40 @@ public class SpravkaForm : Form {
         loading = true;
         try {
             string ls = Get(d, "ls");
-            SetV("ls", ls.Length > 0 ? BaseLink.Nab(ls) : "");
             SetV("fio", Get(d, "fio"));
             SetV("tel", Get(d, "telefon"));
-            fNp = Up(Get(d, "np"));
-            fUlica = Up(Get(d, "ulica"));
-            fDom = Get(d, "dom");
-            fKv = Get(d, "kv");
-            fromAdres = AddressOf(d);
-            SetV("adres", fromAdres);
+            // приборы учёта договора (1 или 2) - у каждого лицевой и адрес договора
             bool two = Get(d, "schetchikov") == "2 счётчика";
-            SetV("n", two ? "2 счётчика" : "1 счётчик");
-            for (int i = 1; i <= 2; i++) {
+            SetMeterCount(two ? 2 : 1);
+            string adres = AddressOf(d);
+            for (int i = 1; i <= meters.Count; i++) {
                 string p = "pu" + i + "_";
-                bool use = i == 1 || two;
-                string tipD = use ? Get(d, p + "tip") : "";
+                MeterBlock mb = meters[i - 1];
+                SetV(p + "ls", ls.Length > 0 ? BaseLink.Nab(ls) : "");
+                SetV(p + "np_tip", Get(d, "np_tip"));
+                SetV(p + "np", Up(Get(d, "np")));
+                SetV(p + "ulica_tip", Get(d, "ulica_tip"));
+                SetV(p + "ulica", Up(Get(d, "ulica")));
+                SetV(p + "dom", Get(d, "dom"));
+                SetV(p + "korp", Get(d, "korp"));
+                SetV(p + "kv", Get(d, "kv"));
+                SetV(p + "adres", adres);
+                mb.AutoAdres = AddressOf(mb);
+                string tipD = Get(d, p + "tip");
                 // модель, корпус, модификация - как выбраны в договоре; в старых договорах их нет - по справочнику из полного типа
-                string[] parts = use ? new string[] { Get(d, p + "model"), Get(d, p + "korpus"), Get(d, p + "modif") } : new string[] { "", "", "" };
+                string[] parts = new string[] { Get(d, p + "model"), Get(d, p + "korpus"), Get(d, p + "modif") };
                 if (parts[0].Length == 0 && tipD.Length > 0) {
-                    MeterType known = picks[i].Known(tipD);
+                    MeterType known = mb.Pick.Known(tipD);
                     if (known != null) parts = new string[] { known.Model, known.Case, known.Mod };
                 }
                 SetV(p + "model", parts[0]);
                 SetV(p + "korpus", parts[1]);
                 SetV(p + "modif", parts[2]);
                 SetV(p + "tip", tipD);
-                SetV(p + "zav", use ? Get(d, p + "zav") : "");
-                SetV(p + "pokaz", use ? Get(d, p + "pokaz") : "");
-                SetV(p + "pov", use ? Get(d, p + "poverka") : "");
-                picks[i].Loaded();
+                SetV(p + "zav", Get(d, p + "zav"));
+                SetV(p + "pokaz", Get(d, p + "pokaz"));
+                SetV(p + "pov", Get(d, p + "poverka"));
+                mb.Pick.Loaded();
             }
             // пломбы договора - в отчёт пломб (повтором с договором не считаются: тот же лицевой)
             SetV("plomba_vvod", Get(d, "plomba_vvod"));
@@ -15973,7 +16251,7 @@ public class SpravkaForm : Form {
         } finally { loading = false; }
         dirty = true;
         Enable();
-        head.Text = ("Справка " + V("ls") + " " + Short(V("fio"))).Trim();
+        head.Text = ("Справка " + V("pu1_ls") + " " + Short(V("fio"))).Trim();
         headSub.Text = "Заполнено из договора - проверьте и допишите свидетельство (ЕГРНИ), владельцев, регистрацию";
         RefreshState();
     }
@@ -16046,14 +16324,23 @@ public class SpravkaForm : Form {
                 string v;
                 if (d.TryGetValue(k, out v)) SetV(k, v);
             }
-            fNp = Get(d, "_np");
-            fUlica = Get(d, "_ulica");
-            fDom = Get(d, "_dom");
-            fKv = Get(d, "_kv");
-            fromAdres = Get(d, "_adres");
+            // приборы учёта: «pu_n» - сколько; справки прежней версии - «1 счётчик» / «2 счётчика», лицевой и адрес общие
+            int n;
+            bool old = !int.TryParse(Get(d, "pu_n"), out n);
+            if (old) n = Get(d, "n") == "2 счётчика" ? 2 : 1;
+            SetMeterCount(n);
+            for (int i = 1; i <= meters.Count; i++) {
+                foreach (string k in MeterKeys) {
+                    string v;
+                    if (d.TryGetValue("pu" + i + "_" + k, out v)) SetV("pu" + i + "_" + k, v);
+                }
+                if (old) { SetV("pu" + i + "_ls", Get(d, "ls")); SetV("pu" + i + "_adres", Get(d, "adres")); }
+                MeterBlock mb = meters[i - 1];
+                mb.AutoAdres = AddressOf(mb);
+                mb.Pick.Loaded();
+            }
             savedFile = Path.Combine(Folder(here), name + ".docx");
             savedId = Get(d, "номер").Length > 0 ? Get(d, "номер") : null;
-            for (int i = 1; i <= 2; i++) picks[i].Loaded();
         } finally { loading = false; }
         dirty = false;
         Enable();
@@ -16069,12 +16356,13 @@ public class SpravkaForm : Form {
         sb.Append("# Данные справки для программы «Оформление договора» (открыть заново, пломбы - в отчёт пломб)\r\n");
         sb.Append("сохранена=").Append(DateTime.Now.ToString("dd.MM.yyyy HH:mm")).Append("\r\n");
         sb.Append("номер=").Append(id ?? "").Append("\r\n");
-        sb.Append("_np=").Append(Memory.Escape(fNp)).Append("\r\n");
-        sb.Append("_ulica=").Append(Memory.Escape(fUlica)).Append("\r\n");
-        sb.Append("_dom=").Append(Memory.Escape(fDom)).Append("\r\n");
-        sb.Append("_kv=").Append(Memory.Escape(fKv)).Append("\r\n");
-        sb.Append("_adres=").Append(Memory.Escape(fromAdres)).Append("\r\n");
         foreach (KeyValuePair<string, Control> kv in inp) sb.Append(kv.Key).Append('=').Append(Memory.Escape(V(kv.Key))).Append("\r\n");
+        sb.Append("pu_n=").Append(meters.Count).Append("\r\n");
+        for (int i = 1; i <= meters.Count; i++)
+            foreach (string k in MeterKeys) sb.Append("pu").Append(i).Append('_').Append(k).Append('=').Append(Memory.Escape(V("pu" + i + "_" + k))).Append("\r\n");
+        // для списка сохранённых справок и отчёта пломб - лицевой и адрес первого прибора учёта
+        sb.Append("ls=").Append(Memory.Escape(V("pu1_ls"))).Append("\r\n");
+        sb.Append("adres=").Append(Memory.Escape(V("pu1_adres"))).Append("\r\n");
         string file = Path.Combine(dir, name + ".txt"), tmp = file + ".tmp";
         File.WriteAllText(tmp, sb.ToString(), new UTF8Encoding(true));
         if (File.Exists(file)) File.Replace(tmp, file, null);
@@ -16090,8 +16378,8 @@ public class SpravkaForm : Form {
         try {
             string name = FileName();
             string f = DocPreview.NewFile(here, name);
-            DocxTemplate.Fill(templateFile, f, Compose());
-            try { SpravkaQr.AddTo(f, SpravkaJournal.IdFor(here, name)); } catch { }
+            Build(f);
+            if (V("qr") == "1") { try { SpravkaQr.AddTo(f, SpravkaJournal.IdFor(here, name)); } catch { } }
             OldTemplateNote();
             DocPreview.Show(this, f);
             return f;
@@ -16116,21 +16404,9 @@ public class SpravkaForm : Form {
         Dictionary<string, string> v = new Dictionary<string, string>();
         string line = "______________________________";
         v["ДАТА"] = V("data");
-        string ls = V("ls");
-        v["ЛС"] = DigitsOnly(ls).Length == 13 ? BaseLink.Nab(ls) : ls;
-        v["ФИО"] = V("fio") + (V("tel").Length > 0 ? "\n(" + V("tel") + ")" : "");
-        v["АДРЕС"] = V("adres");
-        bool two = V("n") == "2 счётчика";
-        v["ТИП"] = V("pu1_tip");
-        v["НОМЕР"] = V("pu1_zav");
-        // не вписаны - нули по разрядности табло (СЕ 208 - 8, СЕ 318 - 6)
-        v["ПОКАЗАНИЯ"] = Reading(1);
-        v["ПОВЕРКА"] = V("pu1_pov");
-        // второго счётчика нет - строка таблицы убирается (поле «¶ТИП2» пустое)
-        v["ТИП2"] = two ? (V("pu2_tip").Length > 0 ? V("pu2_tip") : "-") : "";
-        v["НОМЕР2"] = two ? V("pu2_zav") : "";
-        v["ПОКАЗАНИЯ2"] = two ? Reading(2) : "";
-        v["ПОВЕРКА2"] = two ? V("pu2_pov") : "";
+        // таблица: строка на каждый прибор учёта (поля «ЛС_1», «ТИП_2»...); Ф.И.О. - одно на всю таблицу
+        foreach (Dictionary<string, string> r in Rows())
+            foreach (KeyValuePair<string, string> kv in r) if (kv.Key != "№") v[kv.Key + "_" + r["№"]] = kv.Value;
         v["СВИДЕТЕЛЬСТВО"] = V("svid").Length > 0 ? V("svid") : "__________";
         v["ВЛАДЕЛЬЦЫ"] = V("vlad").Length > 0 ? V("vlad") : "__ владелец";
         v["МЕСТО"] = V("mesto").Length > 0 ? V("mesto") : "__________";
@@ -16155,6 +16431,36 @@ public class SpravkaForm : Form {
         return v;
     }
 
+    // строки таблицы справки: по прибору учёта
+    List<Dictionary<string, string>> Rows() {
+        List<Dictionary<string, string>> rows = new List<Dictionary<string, string>>();
+        string fio = V("fio") + (V("tel").Length > 0 ? "\n(" + V("tel") + ")" : "");
+        for (int i = 1; i <= meters.Count; i++) {
+            string p = "pu" + i + "_", ls = V(p + "ls");
+            Dictionary<string, string> r = new Dictionary<string, string>();
+            r["№"] = i.ToString();
+            r["ЛС"] = DigitsOnly(ls).Length == 13 ? BaseLink.Nab(ls) : ls;
+            r["ФИО"] = fio;
+            r["АДРЕС"] = V(p + "adres");
+            r["ТИП"] = V(p + "tip");
+            r["НОМЕР"] = V(p + "zav");
+            // не вписаны - нули по разрядности табло (СЕ 208 - 8, СЕ 318 - 6)
+            r["ПОКАЗАНИЯ"] = Reading(i);
+            r["ПОВЕРКА"] = V(p + "pov");
+            rows.Add(r);
+        }
+        return rows;
+    }
+
+    // справка в файл out: строки таблицы по приборам учёта (одинаковые подряд лицевой и адрес - одной ячейкой), потом поля
+    List<string> Build(string output) {
+        string tpl = output + ".shablon";
+        try {
+            DocxTemplate.ExpandRows(templateFile, tpl, "ТИП", "ТИП2", Rows(), new string[] { "ФИО" }, new string[] { "ЛС", "АДРЕС" });
+            return DocxTemplate.Fill(tpl, output, Compose());
+        } finally { try { File.Delete(tpl); } catch { } }
+    }
+
     // разрядность табло - по модели (СЕ 208 - 8, СЕ 318 - 6), нет модели - по строке типа
     string Reading(int i) {
         string p = "pu" + i + "_";
@@ -16172,17 +16478,21 @@ public class SpravkaForm : Form {
     // что не заполнено (справку всё равно можно сохранить - дописать в Word)
     List<string> Missing() {
         List<string> m = new List<string>();
-        foreach (string k in new string[] { "ls", "fio", "adres", "pu1_tip", "pu1_zav", "pu1_pokaz", "pu1_pov", "inzh", "nach" })
-            if (V(k).Length == 0) m.Add(k);
-        if (V("n") == "2 счётчика")
-            foreach (string k in new string[] { "pu2_tip", "pu2_zav" }) if (V(k).Length == 0) m.Add(k);
+        if (V("fio").Length == 0) m.Add("fio");
+        for (int i = 1; i <= meters.Count; i++)
+            foreach (string k in new string[] { "ls", "adres", "tip", "zav", "pokaz", "pov" }) if (V("pu" + i + "_" + k).Length == 0) m.Add("pu" + i + "_" + k);
+        foreach (string k in new string[] { "inzh", "nach" }) if (V(k).Length == 0) m.Add(k);
         return m;
     }
 
     string Caption(string key) {
         string c;
-        string p = key.StartsWith("pu2_") ? "счётчик 2: " : key.StartsWith("pu1_") ? "счётчик 1: " : "";
-        return p + (captions.TryGetValue(key, out c) ? c : key);
+        if (key.StartsWith("pu")) {
+            int u = key.IndexOf('_'), i;
+            if (u > 2 && int.TryParse(key.Substring(2, u - 2), out i) && i >= 1 && i <= meters.Count && meters[i - 1].Caps.TryGetValue(key.Substring(u + 1), out c))
+                return (meters.Count > 1 ? "ПУ " + i + ": " : "") + c;
+        }
+        return captions.TryGetValue(key, out c) ? c : key;
     }
 
     void RefreshState() {
@@ -16199,10 +16509,12 @@ public class SpravkaForm : Form {
     // имя файла - как называли справки сами: «Копище Авиационная 15-83»
     public string FileName() {
         string name;
-        if (fromAdres.Length > 0 && V("adres") == fromAdres && (fNp.Length > 0 || fUlica.Length > 0))
-            name = (fNp + " " + fUlica + " " + fDom + (fKv.Length > 0 ? "-" + fKv : "")).Trim();
-        else name = AddressName(V("adres"));
-        if (name.Length == 0) name = ("Справка " + V("ls") + " " + Short(V("fio"))).Trim();
+        // по адресу первого прибора учёта: из частей, а если строку адреса поправили руками - из неё
+        MeterBlock m0 = meters[0];
+        if ((V("pu1_np").Length > 0 || V("pu1_ulica").Length > 0) && V("pu1_adres") == AddressOf(m0))
+            name = (Up(V("pu1_np")) + " " + Up(V("pu1_ulica")) + " " + V("pu1_dom") + (V("pu1_kv").Length > 0 ? "-" + V("pu1_kv") : "")).Trim();
+        else name = AddressName(V("pu1_adres"));
+        if (name.Length == 0) name = ("Справка " + V("pu1_ls") + " " + Short(V("fio"))).Trim();
         if (name == "Справка") name = "Справка " + DateTime.Now.ToString("yyyy-MM-dd HH-mm");
         foreach (char ch in Path.GetInvalidFileNameChars()) name = name.Replace(ch, '_');
         while (name.Contains("  ")) name = name.Replace("  ", " ");
@@ -16233,8 +16545,8 @@ public class SpravkaForm : Form {
             foreach (string k in m) names.Add("  • " + Caption(k));
             if (MessageBox.Show(this, "Не заполнено:\n" + string.Join("\n", names.ToArray()) + "\n\nВсё равно сохранить справку? (Незаполненное можно дописать в Word.)",
                     "Проверка перед сохранением", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) != DialogResult.Yes) {
-                Control c;
-                if (inp.TryGetValue(m[0], out c)) c.Focus();
+                Control c = Find(m[0]);
+                if (c != null) { content.ScrollControlIntoView(c); c.Focus(); }
                 return null;
             }
         }
@@ -16250,16 +16562,16 @@ public class SpravkaForm : Form {
             if (ask && !same && File.Exists(docx) && MessageBox.Show(this, "Справка «" + Path.GetFileNameWithoutExtension(docx) + "» уже есть в папке.\n\nЗаменить её?", Text,
                     MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2) != DialogResult.Yes) return null;
             string tmp = docx + ".tmp";
-            List<string> missing = DocxTemplate.Fill(templateFile, tmp, Compose());
-            // номер справки (та же справка - прежний номер) и QR-код с ним в правом верхнем углу
+            List<string> missing = Build(tmp);
+            // номер справки (та же справка - прежний номер); QR-код с ним в правом верхнем углу - если галочка (по умолчанию нет)
             string name = Path.GetFileNameWithoutExtension(docx), id = null, qrError = null;
             try {
                 id = SpravkaJournal.IdFor(here, name);
-                SpravkaQr.AddTo(tmp, id);
+                if (V("qr") == "1") SpravkaQr.AddTo(tmp, id);
             } catch (Exception ex) {
                 qrError = ex.Message;
                 id = null;
-                DocxTemplate.Fill(templateFile, tmp, Compose());
+                Build(tmp);
             }
             try {
                 if (File.Exists(docx)) File.Delete(docx);
@@ -16274,9 +16586,9 @@ public class SpravkaForm : Form {
                 rec.Id = id;
                 rec.Saved = DateTime.Now.ToString("dd.MM.yyyy HH:mm");
                 rec.Name = name;
-                rec.Ls = V("ls");
+                rec.Ls = V("pu1_ls");
                 rec.Fio = V("fio");
-                rec.Address = V("adres");
+                rec.Address = V("pu1_adres");
                 try { SpravkaJournal.Put(here, rec); } catch (Exception ex) { qrError = "журнал справок не записался: " + ex.Message; }
             }
             savedId = id;
@@ -16285,7 +16597,9 @@ public class SpravkaForm : Form {
             memory.Values["СправкаИнженер"] = V("inzh");
             memory.Values["СправкаНачальник"] = V("nach");
             memory.Values["СправкаБезСтрок"] = OffLines();
+            memory.Values["СправкаQR"] = V("qr");
             memory.Remember("место справки", V("mesto"));
+            for (int i = 1; i <= meters.Count; i++) { memory.Remember("нп", Up(V("pu" + i + "_np"))); memory.Remember("улица", Up(V("pu" + i + "_ulica"))); }
             memory.Save();
             savedFile = docx;
             dirty = false;
