@@ -42,13 +42,24 @@ jobs:
           python-version: "3.12"
       - run: pip install -q aiohttp
       - name: Проверить каналы по веб-страницам
-        run: python tools/web_scan.py "$SOURCE" --out state/cc_candidates.txt --limit "$LIMIT" ${{ inputs.merge && '--merge' || '' }}
+        run: python tools/web_scan.py "$SOURCE" --out /tmp/scan_result.txt --limit "$LIMIT"
       - name: Сохранить в репозиторий
+        env:
+          MERGE: ${{ inputs.merge && '1' || '' }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add state/cc_candidates.txt
-          if git diff --cached --quiet; then echo "Список не изменился"; exit 0; fi
-          git commit -m "Web scan of the big channel list: $(wc -l < state/cc_candidates.txt) channels with giveaway-like posts"
-          git pull --rebase -q origin main
-          git push
+          for attempt in 1 2 3 4 5; do
+            git fetch -q origin main && git reset -q --hard origin/main  # свежий список: пока шла проверка, его могли обновить
+            if [ -n "$MERGE" ]; then
+              python tools/web_scan.py "$SOURCE" --combine /tmp/scan_result.txt state/cc_candidates.txt
+            else
+              cp /tmp/scan_result.txt state/cc_candidates.txt
+            fi
+            git add state/cc_candidates.txt
+            if git diff --cached --quiet; then echo "Список не изменился"; exit 0; fi
+            git commit -qm "Web scan of the big channel list: $(wc -l < state/cc_candidates.txt) channels with giveaway-like posts"
+            git push -q origin HEAD:main && exit 0
+            sleep $((attempt * 5))
+          done
+          exit 1
