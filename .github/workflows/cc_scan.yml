@@ -14,6 +14,10 @@ on:
         description: "Какой список проверять (state/cc_candidates.txt — перепроверить кандидатов)"
         type: string
         default: "state/cc_usernames.txt"
+      merge:
+        description: "Добавить к уже найденным кандидатам, а не заменять список"
+        type: boolean
+        default: false
   schedule:
     - cron: "41 4 7 * *"   # 7-го числа, после ежемесячного обновления списка
 
@@ -38,7 +42,7 @@ jobs:
           python-version: "3.12"
       - run: pip install -q aiohttp
       - name: Проверить каналы по веб-страницам
-        run: python tools/web_scan.py "$SOURCE" --out state/cc_candidates.txt --limit "$LIMIT"
+        run: python tools/web_scan.py "$SOURCE" --out state/cc_candidates.txt --limit "$LIMIT" ${{ inputs.merge && '--merge' || '' }}
       - name: Сохранить в репозиторий
         run: |
           git config user.name "github-actions[bot]"

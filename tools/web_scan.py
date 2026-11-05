@@ -54,6 +54,8 @@ def main() -> None:
     ap.add_argument("--pages", type=int, default=3, help="страниц на канал, по ~20 постов (3)")
     ap.add_argument("--parallel", type=int, default=8, help="одновременных запросов к t.me (8)")
     ap.add_argument("--limit", type=int, default=0, help="проверить только первые N имён (0 — все)")
+    ap.add_argument("--merge", action="store_true",
+                    help="добавить найденное к уже имеющемуся списку --out, а не заменять его")
     args = ap.parse_args()
 
     names = [ln.split("#", 1)[0].strip().lstrip("@") for ln in Path(args.names).read_text(encoding="utf-8").splitlines()]
@@ -62,6 +64,22 @@ def main() -> None:
         names = names[:args.limit]
     t0 = time.time()
     with_page, found, w = asyncio.run(scan(names, args.days, args.pages, args.parallel))
+    if args.merge and Path(args.out).is_file():  # прежние кандидаты, которых в этой проверке не было
+        scanned = {u.lower() for u in names}
+        for ln in Path(args.out).read_text(encoding="utf-8").splitlines():
+            u, _, rest = ln.partition("#")
+            u = u.strip().lstrip("@")
+            if not u or u.lower() in scanned:
+                continue
+            parts = rest.split()
+            n = int(parts[0]) if parts and parts[0].isdigit() else 1
+            d = None
+            if len(parts) > 1 and parts[1] != "?":
+                try:
+                    d = datetime.fromisoformat(parts[1]).replace(tzinfo=timezone.utc)
+                except ValueError:
+                    d = None
+            found.append((u, n, d))
     # Порядок для поиска через API (поиск по имени у Telegram ограничен ~150–200 в сутки):
     # 1) свежие кандидаты (последний не старше 10 дней) — розыгрыш, скорее всего, ещё идёт;
     # 2) каналы с 1–3 кандидатами — обычный организатор проводит 1–2 розыгрыша в месяц,
