@@ -248,6 +248,29 @@ class WebCrawlTests(unittest.TestCase):
         await f.add_seeds()
         await f.crawl()
 
+    def test_checked_non_giveaway_stubs_are_not_reopened(self):
+        okko = channel(60, "okkomovies")
+        host = channel(61, "hostchan")
+        g = giveaway_media([61], stars=500, quantity=5)
+        history = {60: [message(60, 5)], 61: [message(61, 9, g)]}  # у Okko заглушка — не розыгрыш
+        client = WebClient([okko, host], history)
+        f = gf.GiveawayFinder(client, args())
+        f.web = FakeWeb({"okkomovies": [5], "hostchan": [9]})
+        f.enqueue(okko, 1)
+        f.enqueue(host, 1)
+        asyncio.run(f.crawl())
+        self.assertEqual(sorted(client.opened), [(60, [5]), (61, [9])])
+        self.assertEqual(f.seen_stubs, {"okkomovies": {5}})  # розыгрыш в учёт «не открывать» не попал
+
+        # следующий поиск: заглушку Okko уже проверяли — через API не открываем, розыгрыш открываем снова
+        client2 = WebClient([okko, host], history)
+        f2 = gf.GiveawayFinder(client2, args(seen_stubs={k: sorted(v) for k, v in f.seen_stubs.items()}))
+        f2.web = FakeWeb({"okkomovies": [5], "hostchan": [9]})
+        f2.enqueue(okko, 1)
+        f2.enqueue(host, 1)
+        asyncio.run(f2.crawl())
+        self.assertEqual(client2.opened, [(61, [9])])
+
     def test_seen_channel_not_checked_twice(self):
         host = channel(20, "host")
         client = WebClient([host], {})

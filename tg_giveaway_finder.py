@@ -336,7 +336,12 @@ class GiveawayFinder:
         self.discover_start = 0
         self.discover_consumed = 0
         self.discover_opened = 0   # открыто через API (поиск по @username у Telegram строго ограничен)
+        self.discover_found = 0    # активных розыгрышей нашлось в каналах большого списка
         self.discover_paused = False
+        # Посты-заглушки, которые уже открывали и это оказались не розыгрыши: {@username: {id}}.
+        # Хранятся в учёте между запусками, чтобы не открывать одно и то же через API каждый поиск.
+        self.seen_stubs: dict[str, set[int]] = {
+            k: set(v) for k, v in (getattr(args, "seen_stubs", None) or {}).items()}
 
     @property
     def found_enough(self) -> bool:
@@ -708,6 +713,8 @@ class GiveawayFinder:
         if self.web_checked % 250 == 0:
             log.info("Веб-проверка: каналов %d, открыто через API %d, в очереди %d",
                      self.web_checked, self.web_opened, len(self.queue))
+        seen = self.seen_stubs.get(key, set())
+        cands = [c for c in cands if c not in seen]  # уже проверенные не-розыгрыши не открываем
         if not cands:
             self.discover_consumed += web_only
             return True
@@ -737,13 +744,19 @@ class GiveawayFinder:
         except (errors.RPCError, ValueError) as e:
             log.debug("  пропуск: %s", e)
             return True
-        for msg in msgs or []:
+        giveaway_media = (types.MessageMediaGiveaway, types.MessageMediaGiveawayResults)
+        got = {getattr(m, "id", None): m for m in (msgs or []) if m is not None}
+        for mid in cands[:100]:
+            msg = got.get(mid)
+            if msg is None or not isinstance(getattr(msg, "media", None), giveaway_media):
+                self.seen_stubs.setdefault(key, set()).add(mid)  # не розыгрыш — больше не открываем
             if msg is None:
                 continue
             fwd = getattr(msg, "forward", None)
             if fwd is not None and isinstance(getattr(fwd, "chat", None), types.Channel):
                 self.refs.setdefault(fwd.chat.id, to_ref(fwd.chat))
-            self.handle_message(msg, cid, depth)
+            if self.handle_message(msg, cid, depth) is not None and web_only:
+                self.discover_found += 1
         await self.pause()
         return True
 
@@ -1256,12 +1269,16 @@ async def cmd_post_scheduled(client: TelegramClient, args: argparse.Namespace) -
                     and g.key not in scheduled and g.key not in known and g.key not in bad
                     and g.until_date - want_at >= min_left)
         args.discover_offset = int(st.get("discover_offset", 0) or 0)
+        args.seen_stubs = st.get("seen_stubs") or {}
         finder = await run_finder(client, args, want=want, want_count=args.reserve)
+        # учёт проверенных заглушек: не больше 5000 каналов, по 60 последних постов на канал
+        st["seen_stubs"] = {k: sorted(v)[-60:] for k, v in list(finder.seen_stubs.items())[-5000:]}
         if finder.discover_total:
             st["discover_offset"] = (finder.discover_start + finder.discover_consumed) % finder.discover_total
-            log.info("Большой список: разобрано %d каналов (с №%d из %d), открыто через API %d; следующий поиск — с №%d",
+            log.info("Большой список: разобрано %d каналов (с №%d из %d), открыто через API %d, "
+                     "активных розыгрышей в них %d; следующий поиск — с №%d",
                      finder.discover_consumed, finder.discover_start + 1, finder.discover_total,
-                     finder.discover_opened, st["discover_offset"] + 1)
+                     finder.discover_opened, finder.discover_found, st["discover_offset"] + 1)
         allowed = parse_countries(getattr(args, "countries", None))
         why: dict[str, int] = {}
         added = []
