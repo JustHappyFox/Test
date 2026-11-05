@@ -53,7 +53,20 @@ def get(url: str, rng: tuple[int, int] | None = None, tries: int = 6) -> bytes:
     return b""
 
 
-def tme_blocks(crawl: str) -> list[tuple[str, int, int]]:
+def tme_blocks(crawl: str, tries: int = 5) -> list[tuple[str, int, int]]:
+    """Блоки индекса с адресами t.me; сервер часто отвечает 503 — повторяем с паузой."""
+    for attempt in range(tries):
+        try:
+            return _tme_blocks(crawl)
+        except Exception as e:
+            if attempt == tries - 1:
+                raise
+            print(f"  {crawl}: оглавление — повтор ({e})", file=sys.stderr)
+            time.sleep(15 * (attempt + 1))
+    return []
+
+
+def _tme_blocks(crawl: str) -> list[tuple[str, int, int]]:
     """Блоки индекса, где могут быть адреса t.me: (файл cdx, смещение, длина)."""
     url = f"{BASE}cc-index/collections/{crawl}/indexes/cluster.idx"
     req = urllib.request.Request(url, headers={"User-Agent": "giveaway-finder"})
