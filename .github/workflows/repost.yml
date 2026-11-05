@@ -68,7 +68,7 @@ jobs:
         if: steps.check.outputs.ready == 'true'
         run: >
           python tg_giveaway_finder.py post --to TGaGifts
-          --countries RU,BY,KZ --min-stars 10000 --min-premium 5
+          --countries RU,BY,KZ --min-stars 5000 --min-premium 3
           --count 1 --min-hours-left 3 --min-interval-hours 3.5 --manual-gap-hours 5 --schedule-ahead 0
           --careful --max-channels 300 --search-pages 1
           --channels-file .state/sources.txt --save-sources .state/sources.txt
