@@ -41,6 +41,10 @@ on:
         description: "Посты вокруг: «канал/номер канал/номер …» — показать соседние сообщения ленты"
         type: string
         default: ""
+      recall:
+        description: "Сборники через пробел: сколько их розыгрышей видно по «Канал запустил розыгрыш»"
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -60,6 +64,15 @@ jobs:
       CC: ${{ inputs.cc }}
       AROUND: ${{ inputs.around }}
     steps:
+      - uses: actions/checkout@v4
+        if: inputs.recall != ''
+      - name: Доля розыгрышей с отметкой «Канал запустил розыгрыш»
+        if: inputs.recall != ''
+        env:
+          RECALL: ${{ inputs.recall }}
+        run: |
+          pip install -q aiohttp
+          python3 tools/launch_recall.py $RECALL
       - name: Соседние сообщения ленты вокруг постов
         if: inputs.around != ''
         run: |
