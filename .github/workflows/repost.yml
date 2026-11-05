@@ -1,10 +1,9 @@
 name: Репост розыгрышей в @TGaGifts
 
-# Раз в 3,5 часа пересылает в канал один новый активный официальный розыгрыш
-# (из канала-организатора). Для публичного репозитория минуты GitHub Actions бесплатны.
-# Следующий пост ставится в канал как ОТЛОЖЕННЫЙ (--schedule-ahead 1): его публикует сам Telegram точно
-# по времени, поэтому пропущенные GitHub запуски по расписанию не сбивают ритм. Запуски каждые
-# полчаса лишь проверяют, что следующий пост запланирован (ищут 1 розыгрыш раз в 3,5 ч).
+# Каждые 30 минут задание просто обновляется: проверяет время и ваши посты, ничего не ищет.
+# Раз в 3,5 часа (и не раньше 5 часов после вашего поста) ищет ОДИН подходящий розыгрыш,
+# пересылает его из канала-организатора и записывает в учёт, чтобы не повторяться.
+# Для публичного репозитория минуты GitHub Actions бесплатны.
 on:
   schedule:
     - cron: "13,43 * * * *"   # каждые 30 минут (UTC); не в :00 — меньше очередь у GitHub
@@ -70,7 +69,7 @@ jobs:
         run: >
           python tg_giveaway_finder.py post --to TGaGifts
           --countries RU,BY,KZ --min-stars 10000 --min-premium 5
-          --count 1 --min-hours-left 3 --min-interval-hours 3.5 --manual-gap-hours 5 --schedule-ahead 1
+          --count 1 --min-hours-left 3 --min-interval-hours 3.5 --manual-gap-hours 5 --schedule-ahead 0
           --careful --max-channels 300 --search-pages 1
           --channels-file .state/sources.txt --save-sources .state/sources.txt
           --state .state/posted.json

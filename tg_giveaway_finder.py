@@ -930,7 +930,16 @@ async def cmd_post_scheduled(client: TelegramClient, args: argparse.Namespace) -
                 and datetime.fromisoformat(e["until"]) - when >= min_left)
 
     scans, finder, last_published = 0, None, None
-    while len(scheduled) < args.schedule_ahead:
+
+    def need_more() -> bool:
+        if args.schedule_ahead > 0:  # держать N отложенных постов
+            return len(scheduled) < args.schedule_ahead
+        # 0 — публиковать один пост, только когда подошло время (раз в 3,5 ч / 5 ч после ваших постов)
+        return last_published is None and next_at <= now + timedelta(minutes=2)
+
+    if args.schedule_ahead == 0 and not need_more():
+        log.info("Ещё рано: следующий пост не раньше %s UTC — просто обновился", next_at.strftime("%d.%m %H:%M"))
+    while need_more():
         queue = sorted((e for e in queue if e["key"] not in posted and e["key"] not in scheduled
                         and e["key"] not in bad and datetime.fromisoformat(e["until"]) > now),
                        key=queue_order)
@@ -997,7 +1006,7 @@ async def cmd_post_scheduled(client: TelegramClient, args: argparse.Namespace) -
 
 
 async def cmd_post(client: TelegramClient, args: argparse.Namespace) -> None:
-    if getattr(args, "schedule_ahead", 0) and not args.refill:
+    if getattr(args, "schedule_ahead", None) is not None and not args.refill:
         return await cmd_post_scheduled(client, args)
     state_path = Path(args.state)
     st = load_state(state_path)
@@ -1208,9 +1217,9 @@ def build_parser() -> argparse.ArgumentParser:
     ps.add_argument("--manual-gap-hours", type=float, default=0, metavar="Ч",
                     help="если в канале есть пост, опубликованный не ботом (вручную), "
                          "следующий пост бота — не раньше чем через Ч часов после него (напр. 5)")
-    ps.add_argument("--schedule-ahead", type=int, default=0, metavar="N",
-                    help="держать в канале N отложенных постов (Telegram опубликует их сам точно "
-                         "по времени, даже если запуск по расписанию пропущен)")
+    ps.add_argument("--schedule-ahead", type=int, default=None, metavar="N",
+                    help="0 — публиковать один пост, когда подошло время (поиск одного розыгрыша, "
+                         "учёт, пропуск непригодных); N>0 — держать в канале N отложенных постов")
     ps.add_argument("--dry-run", action="store_true", help="только показать, что было бы переслано")
     ps.add_argument("--refill", action="store_true",
                     help="только найти розыгрыши и пополнить очередь, ничего не публикуя")

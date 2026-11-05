@@ -694,3 +694,45 @@ class UnforwardableTests(unittest.TestCase):
         self.assertEqual(sent, [(22, None)])                      # опубликован второй, сразу
         self.assertIn(gf.giveaway_key(a_media), st["bad"])        # первый запомнен как непригодный
         self.assertIn(gf.giveaway_key(b_media), st["posted"])
+
+
+class PostWhenDueTests(ScheduledPostTests):
+    """--schedule-ahead 0: раз в 30 минут просто обновляемся, раз в 3,5 часа ищем и публикуем ОДИН."""
+
+    def run_post(self, client, st):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp, "s.json")
+            gf.save_state(path, {"posted": {}, "queue": [], **st})
+            a = gf.apply_preset(gf.build_parser().parse_args(
+                ["post", "--to", "@mygroup", "--state", str(path), "--no-discover", "--no-aggregators",
+                 "--min-interval-hours", "3.5", "--manual-gap-hours", "5", "--schedule-ahead", "0"]))
+            asyncio.run(gf.cmd_post(client, a))
+            return gf.load_state(path)
+
+    def test_not_due_just_refreshes(self):
+        c = self.client()
+        st = self.run_post(c, {"last_post": (NOW - timedelta(hours=1)).isoformat(),
+                               "queue": [self.entry(1), self.entry(2)]})
+        self.assertEqual(c.forwards, [])
+        self.assertEqual(len(st["queue"]), 2)
+
+    def test_due_posts_exactly_one(self):
+        c = self.client()
+        st = self.run_post(c, {"last_post": (NOW - timedelta(hours=4)).isoformat(),
+                               "queue": [self.entry(1), self.entry(2)]})
+        self.assertEqual(c.forwards, [(1, None)])                 # один пост, сразу, без отложенных
+        self.assertEqual(st["scheduled"], [])
+        self.assertIn(self.entry(1)["key"], st["posted"])
+
+    # унаследованные тесты режима «N отложенных» здесь не нужны
+    test_posts_now_and_keeps_two_scheduled = None
+    test_nothing_to_do_when_two_already_scheduled = None
+    test_manual_post_reschedules_bot_posts = None
+    test_published_scheduled_post_counts_as_posted = None
+
+    def test_manual_post_blocks_when_due(self):
+        manual = types.Message(id=50, peer_id=types.PeerChannel(900), date=NOW - timedelta(hours=2),
+                               message="мой пост")
+        c = self.client(history=[manual])
+        self.run_post(c, {"last_post": (NOW - timedelta(hours=6)).isoformat(), "queue": [self.entry(1)]})
+        self.assertEqual(c.forwards, [])                          # 5 часов после вашего поста ещё не прошло
