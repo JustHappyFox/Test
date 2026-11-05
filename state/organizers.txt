@@ -1,0 +1,19 @@
+# Каналы-организаторы официальных розыгрышей. Найдены 05.11 веб-проверкой большого списка
+# («Канал запустил розыгрыш» на t.me/s) и проверены через Dolli: во всех 16 есть модули-розыгрыши.
+# Поиск читает их каждый раз (последние 100 постов) — подходящий розыгрыш может появиться в любой момент.
+@airdropinspector
+@comfysale
+@allonews
+@kubik_sales
+@pyyplru
+@rrozetka
+@zakis_azota_ballon_gaz
+@prontokod
+@promtyi
+@LWHikarik
+@taxi_online_lg
+@v1_discount
+@wormgptblog
+@restoplate
+@ukrposhta_news
+@blogonecat
