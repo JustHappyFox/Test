@@ -112,6 +112,14 @@ jobs:
               raw = urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"}), timeout=20).read().decode("utf-8", "replace")
               text = html.unescape(re.sub(r"<[^>]+>", " ", raw))
               text = re.sub(r"[ \t]+", " ", text)
+              if not os.environ["GREP"].strip():  # пустой поиск — показать весь текст страницы
+                  raw = re.sub(r"(?is)<(script|style|svg)[^>]*>.*?</\1>", " ", raw)
+                  text = html.unescape(re.sub(r"<[^>]+>", " ", raw))
+                  text = re.sub(r"\s+", " ", text).strip()
+                  print("=====", url, "chars", len(text))
+                  for i in range(0, min(len(text), 80000), 400):
+                      print("|", text[i:i + 400])
+                  continue
               hits = [m.start() for m in re.finditer(os.environ["GREP"], text, flags=re.I)]
               print("=====", url, "chars", len(text), "hits", len(hits))
               last = -1000
