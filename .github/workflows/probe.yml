@@ -29,6 +29,10 @@ on:
         description: "Что искать на странице (регулярное выражение)"
         type: string
         default: "giveaway"
+      rank:
+        description: "Каналы через пробел — посчитать у каждого модули-розыгрыши за 31 день"
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -44,7 +48,61 @@ jobs:
       PARALLEL: ${{ inputs.parallel }}
       DOC_URL: ${{ inputs.doc_url }}
       GREP: ${{ inputs.grep }}
+      RANK: ${{ inputs.rank }}
     steps:
+      - uses: actions/checkout@v4
+        if: inputs.rank != ''
+      - uses: actions/setup-python@v5
+        if: inputs.rank != ''
+        with:
+          python-version: "3.12"
+      - name: Оценить каналы-кандидаты в агрегаторы
+        if: inputs.rank != ''
+        run: |
+          pip install -q aiohttp
+          python - <<'EOF'
+          import asyncio, os, sys
+          from datetime import datetime, timedelta, timezone
+          sys.path.insert(0, ".")
+          import tg_web_preview as wp
+
+          async def main():
+              w = wp.WebPreview(parallel=6)
+              since = datetime.now(timezone.utc) - timedelta(days=31)
+              names = list(dict.fromkeys(os.environ["RANK"].replace(",", " ").split()))
+
+              async def one(u):
+                  url, got = w.BASE + u, []
+                  for _ in range(5):
+                      html = await w.fetch(url)
+                      posts = wp.parse_page(html) if html else None
+                      if not posts:
+                          break
+                      got += posts
+                      oldest = min(posts, key=lambda p: p.id)
+                      if oldest.date and oldest.date < since:
+                          break
+                      url = f"{w.BASE}{u}?before={oldest.id}"
+                  if not got:
+                      return u, None
+                  recent = [p for p in got if p.date and p.date >= since]
+                  newest = max((p.date for p in got if p.date), default=None)
+                  return u, (len(recent), sum(p.stub for p in recent), newest)
+
+              res = await asyncio.gather(*(one(u.lstrip("@")) for u in names))
+              await w.close()
+              res.sort(key=lambda r: -(r[1][1] if r[1] else -1))
+              for u, r in res:
+                  if r is None:
+                      print(f"{u:30s} нет веб-страницы")
+                  else:
+                      last = r[2].strftime("%Y-%m-%d") if r[2] else "?"
+                      print(f"{u:30s} постов за 31 день {r[0]:4d} | модулей-кандидатов {r[1]:4d} | последний пост {last}")
+              print("страниц", w.pages, "429:", w.limited)
+
+          asyncio.run(main())
+          EOF
+
       - name: Поиск слова на странице
         if: inputs.doc_url != ''
         run: |
