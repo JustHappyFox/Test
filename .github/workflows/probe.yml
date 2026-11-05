@@ -37,6 +37,10 @@ on:
         description: "Common Crawl: «снимок блоков выборка», напр. «CC-MAIN-2026-43 300 3000» (пусто — пропустить)"
         type: string
         default: ""
+      around:
+        description: "Посты вокруг: «канал/номер канал/номер …» — показать соседние сообщения ленты"
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -54,7 +58,33 @@ jobs:
       GREP: ${{ inputs.grep }}
       RANK: ${{ inputs.rank }}
       CC: ${{ inputs.cc }}
+      AROUND: ${{ inputs.around }}
     steps:
+      - name: Соседние сообщения ленты вокруг постов
+        if: inputs.around != ''
+        run: |
+          python3 - <<'EOF'
+          import html, os, re, urllib.request
+          for item in os.environ["AROUND"].split():
+              chan, num = item.strip("/").split("/")
+              url = f"https://t.me/s/{chan}?before={int(num) + 6}"
+              page = urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"}), timeout=20).read().decode("utf-8", "replace")
+              print("=====", url)
+              for blk in page.split('class="tgme_widget_message_wrap')[1:]:
+                  m = re.search(r'class="tgme_widget_message ([^"]*)"[^>]*data-post="[^"/]+/(\d+)"', blk)
+                  if not m:
+                      m2 = re.search(r'data-post="[^"/]+/(\d+)"', blk)
+                      pid, cls = (m2.group(1) if m2 else "?"), ""
+                  else:
+                      cls, pid = m.group(1), m.group(2)
+                  if abs(int(pid) - int(num)) > 5 if pid.isdigit() else False:
+                      continue
+                  inner = re.findall(r'class="(tgme_widget_message_[a-z_]+|message_media_[a-z_]+|service[a-z_]*)', blk)
+                  text = html.unescape(re.sub(r"<[^>]+>", " ", re.sub(r"(?is)<(svg|style|script)[^>]*>.*?</\1>", " ", blk)))
+                  text = re.sub(r"\s+", " ", text).strip()
+                  print(f"  {pid}: [{cls.split(' js-')[0]}] {sorted(set(inner))[:8]}")
+                  print(f"       {text[:220]}")
+          EOF
       - uses: actions/checkout@v4
         if: inputs.rank != '' || inputs.cc != ''
       - uses: actions/setup-python@v5
