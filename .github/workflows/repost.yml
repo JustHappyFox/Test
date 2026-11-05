@@ -76,7 +76,7 @@ jobs:
           python tg_giveaway_finder.py post --to TGaGifts
           --countries RU,BY,KZ --min-stars 5000 --min-premium 3
           --count 1 --min-hours-left 3 --min-interval-hours 3.5 --manual-gap-hours 5 --schedule-ahead 0 --reserve 10
-          --careful --max-channels 300 --search-pages 1 --source-limit 500
+          --careful --max-channels 1000 --search-pages 1 --source-limit 500
           --channels-file .state/sources.txt --save-sources .state/sources.txt
           --state .state/posted.json ${{ inputs.refill && '--refill' || '' }}
 

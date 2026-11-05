@@ -56,7 +56,11 @@ DEFAULT_HASHTAGS = ["розыгрыш", "giveaway", "конкурс", "разд�
 # и TGStat). Их надёжность не важна: в результат попадают только настоящие messageMediaGiveaway,
 # а не текстовые «конкурсы». Отключить: --no-aggregators.
 DEFAULT_AGGREGATORS = [
-    "@razdacha_TelegramPremium",  # источник владельца: там почти только официальные розыгрыши
+    # активные (проверено 05.11: среди последних 300 постов почти все — официальные розыгрыши)
+    "@giveaways_database",        # 287 розыгрышей на 300 постов, 11 активных; сайт telegramgiveaways.ru
+    "@razdacha_TelegramPremium",  # источник владельца
+    # архивные: новых постов давно нет, но в истории сотни организаторов — проверяем их каналы
+    "@Premiumlob", "@tg_premium_prize", "@giveaways_premium_telegramtg", "@tgpremiumx",
     "@giveaways", "@Giveaways_Premium_Tel", "@TgPremiumGiveaway",
     "@tgpremium_giveaways", "@ChannelGiveaways",
 ]
