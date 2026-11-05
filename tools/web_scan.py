@@ -107,6 +107,7 @@ def main() -> None:
     ap.add_argument("--pages", type=int, default=3, help="страниц на канал, по ~20 постов (3)")
     ap.add_argument("--parallel", type=int, default=8, help="одновременных запросов к t.me (8)")
     ap.add_argument("--limit", type=int, default=0, help="проверить только первые N имён (0 — все)")
+    ap.add_argument("--offset", type=int, default=0, help="начать с имени №N+1 (для проверки большого списка частями)")
     ap.add_argument("--merge", action="store_true",
                     help="добавить найденное к уже имеющемуся списку --out, а не заменять его")
     ap.add_argument("--combine", nargs=2, metavar=("NEW", "BASE"),
@@ -121,6 +122,7 @@ def main() -> None:
         ap.error("нужен --out")
     names = [ln.split("#", 1)[0].strip().lstrip("@") for ln in Path(args.names).read_text(encoding="utf-8").splitlines()]
     names = [n for n in names if n]
+    names = names[args.offset:]
     if args.limit:
         names = names[:args.limit]
     t0 = time.time()

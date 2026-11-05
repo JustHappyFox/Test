@@ -14,6 +14,10 @@ on:
         description: "Какой список проверять (state/cc_candidates.txt — перепроверить кандидатов)"
         type: string
         default: "state/cc_usernames.txt"
+      offset:
+        description: "Начать с имени №N+1 (большой список — частями)"
+        type: string
+        default: "0"
       merge:
         description: "Добавить к уже найденным кандидатам, а не заменять список"
         type: boolean
@@ -31,10 +35,11 @@ permissions:
 jobs:
   scan:
     runs-on: ubuntu-latest
-    timeout-minutes: 300
+    timeout-minutes: 350
     env:
       LIMIT: ${{ inputs.limit || '0' }}
       SOURCE: ${{ inputs.source || 'state/cc_usernames.txt' }}
+      OFFSET: ${{ inputs.offset || '0' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -42,7 +47,10 @@ jobs:
           python-version: "3.12"
       - run: pip install -q aiohttp
       - name: Проверить каналы по веб-страницам
-        run: python tools/web_scan.py "$SOURCE" --out /tmp/scan_result.txt --limit "$LIMIT"
+        run: |
+          python tools/web_scan.py "$SOURCE" --out /tmp/scan_result.txt --limit "$LIMIT" --offset "$OFFSET"
+          # для слияния: какие имена проверены в этой части (строки прежнего списка по ним заменяются)
+          tail -n +$((OFFSET + 1)) "$SOURCE" | { if [ "$LIMIT" != "0" ]; then head -n "$LIMIT"; else cat; fi; } > /tmp/scanned_names.txt
       - name: Сохранить в репозиторий
         env:
           MERGE: ${{ inputs.merge && '1' || '' }}
@@ -52,7 +60,7 @@ jobs:
           for attempt in 1 2 3 4 5; do
             git fetch -q origin main && git reset -q --hard origin/main  # свежий список: пока шла проверка, его могли обновить
             if [ -n "$MERGE" ]; then
-              python tools/web_scan.py "$SOURCE" --combine /tmp/scan_result.txt state/cc_candidates.txt
+              python tools/web_scan.py /tmp/scanned_names.txt --combine /tmp/scan_result.txt state/cc_candidates.txt
             else
               cp /tmp/scan_result.txt state/cc_candidates.txt
             fi
