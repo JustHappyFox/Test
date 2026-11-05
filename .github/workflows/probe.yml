@@ -113,6 +113,28 @@ jobs:
                       stubs += 1
                       m = re.search(r'datetime="([^"]+)"', blk)
                       if m: dates.append(m.group(1)[:10])
+          kinds = Counter()
+          examples = {}
+          for c, h, _ in res:
+              for blk in h.split('class="tgme_widget_message_wrap')[1:]:
+                  if "message_media_not_supported" not in blk:
+                      continue
+                  pid = re.search(r'data-post="([^"]+)"', blk)
+                  head = re.search(r'class="tgme_widget_message ([^"]*)"', blk)
+                  label = re.search(r'message_media_not_supported_label">([^<]*)<', blk)
+                  feats = (
+                      "text" if "tgme_widget_message_text" in blk else "no-text",
+                      "fwd" if "tgme_widget_message_forwarded_from" in blk else "own",
+                      "media:" + ",".join(sorted(set(re.findall(r"tgme_widget_message_(photo|video|document|voice|roundvideo|sticker|poll|location|service)", blk)))),
+                      (head.group(1).split(" js-")[0] if head else ""),
+                      (label.group(1).strip() if label else ""),
+                  )
+                  kinds[feats] += 1
+                  if feats not in examples:
+                      examples[feats] = pid.group(1) if pid else "?"
+          print("STUB KINDS:")
+          for k, n in kinds.most_common(12):
+              print(f"  {n:4d}  {k}  e.g. {examples[k]}")
           print(f"pages {len(res)} in {dt:.1f}s ({len(res)/dt:.1f}/s), codes {dict(codes)}")
           print(f"posts {posts}, stub posts (unsupported media) {stubs}")
           print("stub dates (newest first):", sorted(set(dates), reverse=True)[:15])
