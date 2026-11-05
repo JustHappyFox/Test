@@ -30,10 +30,12 @@ from __future__ import annotations
 import argparse
 import asyncio
 import csv
+import itertools
 import json
 import logging
 import os
 import random
+import re
 import sys
 from collections import deque
 from dataclasses import asdict, dataclass, field
@@ -69,6 +71,9 @@ DEFAULT_AGGREGATORS = [
     "@Premiumlob", "@tg_premium_prize", "@giveaways_premium_telegramtg", "@tgpremiumx",
     "@giveaways", "@Giveaways_Premium_Tel", "@TgPremiumGiveaway",
     "@tgpremium_giveaways", "@ChannelGiveaways",
+    # найдены веб-поиском 05.11 по заглушке «Please open Telegram to view this post» + «розыгрыш/giveaway»
+    "@loot_premium", "@yprmk", "@PremiumGiveAwayTg", "@giveawaystarstelegram", "@rf_free",
+    "@PremiumGiveaway_Prizes", "@giveawayprizeshub",
 ]
 
 # Значения по умолчанию для обычного и осторожного (--careful) режимов.
@@ -306,10 +311,31 @@ class GiveawayFinder:
         self.want: Any = None
         self.want_count = 0
         self.wanted = 0
+        # Предпроверка по веб-странице t.me/s/<канал> (--web): см. tg_web_preview.py
+        self.web: Any = None
+        self.web_seen: set[str] = set()
+        self.web_tasks: dict[str, asyncio.Future] = {}
+        self.web_checked = 0   # каналов проверено по веб-странице
+        self.web_opened = 0    # из них открыто через API (были посты-заглушки)
+        self.api_read = 0      # каналов прочитано через API целиком
+        self.ref_tried: set[int] = set()
+        self.entities: dict[int, Any] = {}
+        self.deadline: float | None = None  # loop.time(), после которого обход останавливается
 
     @property
     def found_enough(self) -> bool:
         return bool(self.want_count) and self.wanted >= self.want_count
+
+    @property
+    def checked(self) -> int:
+        """Сколько всего каналов проверено (по веб-странице и через API)."""
+        return self.web_checked + self.api_read
+
+    @property
+    def out_of_budget(self) -> bool:
+        """Обход упёрся в лимит каналов или времени — искать новые каналы уже незачем."""
+        web_full = self.web is not None and self.web_checked >= (getattr(self.args, "web_max", None) or 5000)
+        return bool(self.stopped_reason) or self.api_read >= self.args.max_channels or web_full
 
     async def pause(self) -> None:
         """Случайная пауза между запросами — чтобы не долбить API с ровным интервалом."""
@@ -334,6 +360,8 @@ class GiveawayFinder:
         (self.queue.appendleft if front else self.queue.append)((item, depth))
 
     async def resolve(self, item: Any) -> Any | None:
+        if isinstance(item, int) and item in self.entities:
+            return self.entities[item]
         try:
             if isinstance(item, (int, str)):
                 ent = await self.client.get_entity(types.PeerChannel(item) if isinstance(item, int) else item)
@@ -523,10 +551,157 @@ class GiveawayFinder:
                 self.refs.setdefault(fwd.chat.id, to_ref(fwd.chat))
             self.handle_message(msg, cid, depth)
 
-    async def crawl(self) -> None:
+    # ---------- предпроверка по веб-странице t.me ----------
+
+    @staticmethod
+    def cid_of(item: Any) -> int | None:
+        if isinstance(item, int):
+            return item
+        if isinstance(item, str):
+            return None
         try:
-            while self.queue and len(self.scanned) < self.args.max_channels and not self.found_enough:
+            return utils.get_peer_id(item, add_mark=False)
+        except (TypeError, ValueError):
+            return None
+
+    def username_of(self, item: Any) -> str | None:
+        if isinstance(item, str):
+            u = item.strip().split("?", 1)[0].rstrip("/")
+            for prefix in ("https://", "http://"):
+                if u.startswith(prefix):
+                    u = u[len(prefix):]
+            if u.startswith("t.me/"):
+                u = u[len("t.me/"):]
+            u = u.lstrip("@")
+            return u if re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{3,31}", u) else None
+        if isinstance(item, types.Channel):
+            return active_username(item)
+        if isinstance(item, int):
+            ref = self.refs.get(item)
+            return ref.username if ref else None
+        return None
+
+    @property
+    def web_since(self) -> datetime:
+        return self.now - timedelta(days=self.args.days)
+
+    def web_check(self, username: str) -> asyncio.Future:
+        return asyncio.ensure_future(
+            self.web.candidates(username, self.web_since, getattr(self.args, "web_pages", None) or 20))
+
+    async def batch_refs(self, first: int) -> None:
+        """@username для веб-проверки: один запрос сразу на 100 каналов из очереди (их id — из розыгрышей)."""
+        more = (it for it, _ in itertools.islice(self.queue, 0, 3000)
+                if isinstance(it, int) and it not in self.refs and it not in self.ref_tried)
+        ids = list(dict.fromkeys([first, *itertools.islice(more, 99)]))
+        inputs = []
+        for cid in ids:
+            self.ref_tried.add(cid)
+            try:
+                inputs.append(utils.get_input_channel(await self.client.get_input_entity(types.PeerChannel(cid))))
+            except (ValueError, TypeError):
+                pass
+        if not inputs:
+            return
+        try:
+            res = await self.client(functions.channels.GetChannelsRequest(inputs))
+        except errors.FloodWaitError:
+            raise
+        except errors.RPCError as e:
+            log.debug("Не удалось узнать каналы пачкой: %s", e)
+            return
+        for ch in getattr(res, "chats", []):
+            if isinstance(ch, types.Channel):
+                self.refs[ch.id] = to_ref(ch)
+                self.entities[ch.id] = ch
+        await self.pause()
+
+    def prefetch(self) -> None:
+        """Заранее (параллельно) запустить веб-проверку следующих каналов очереди."""
+        room = self.web.parallel * 2 - len(self.web_tasks)
+        for item, depth in itertools.islice(self.queue, 0, 60):
+            if room <= 0:
+                break
+            u = self.username_of(item) if depth else None
+            if not u or u.lower() in self.web_seen or u.lower() in self.web_tasks:
+                continue
+            self.web_tasks[u.lower()] = self.web_check(u)
+            room -= 1
+
+    async def try_web(self, item: Any, depth: int) -> bool:
+        """Проверить канал по веб-странице. True — проверен, целиком через API читать не нужно."""
+        if self.web is None or self.web.broken or depth == 0:
+            return False  # стартовые каналы читаем глубоко через API
+        cid = self.cid_of(item)
+        if cid is not None and cid in self.scanned:
+            return True
+        if isinstance(item, int) and item not in self.refs and item not in self.ref_tried:
+            await self.batch_refs(item)
+        uname = self.username_of(item)
+        if not uname:
+            return False
+        key = uname.lower()
+        if key in self.web_seen:
+            return True
+        self.web_seen.add(key)  # второй раз этот канал не проверяем никаким способом
+        task = self.web_tasks.pop(key, None) or self.web_check(uname)
+        self.prefetch()
+        cands = await task
+        if cands is None:
+            return False  # веб-страницы нет — проверим через API
+        self.web_checked += 1
+        if cid is not None:
+            self.scanned.add(cid)
+        if self.web_checked % 250 == 0:
+            log.info("Веб-проверка: каналов %d, открыто через API %d, в очереди %d",
+                     self.web_checked, self.web_opened, len(self.queue))
+        if not cands:
+            return True
+        ent = await self.resolve(item)
+        if ent is None:
+            return True
+        cid = utils.get_peer_id(ent, add_mark=False)
+        self.scanned.add(cid)
+        self.web_opened += 1
+        ref = self.refs.get(cid)
+        log.info("[веб %d, в очереди %d] %s: постов-заглушек %d — открываю через API",
+                 self.web_checked, len(self.queue), ref.label() if ref else f"@{uname}", len(cands))
+        try:
+            msgs = await self.client.get_messages(ent, ids=cands[:100])
+        except errors.FloodWaitError:
+            raise
+        except (errors.RPCError, ValueError) as e:
+            log.debug("  пропуск: %s", e)
+            return True
+        for msg in msgs or []:
+            if msg is None:
+                continue
+            fwd = getattr(msg, "forward", None)
+            if fwd is not None and isinstance(getattr(fwd, "chat", None), types.Channel):
+                self.refs.setdefault(fwd.chat.id, to_ref(fwd.chat))
+            self.handle_message(msg, cid, depth)
+        await self.pause()
+        return True
+
+    async def close_web(self) -> None:
+        for t in self.web_tasks.values():
+            t.cancel()
+        self.web_tasks.clear()
+        if self.web is not None:
+            await self.web.close()
+
+    async def crawl(self) -> None:
+        loop = asyncio.get_running_loop()
+        try:
+            while self.queue and self.api_read < self.args.max_channels and not self.found_enough:
+                if self.web is not None and self.web_checked >= (getattr(self.args, "web_max", None) or 5000):
+                    break
+                if self.deadline is not None and loop.time() > self.deadline:
+                    self.stopped_reason = f"вышло время поиска ({self.args.time_limit:g} мин)"
+                    break
                 item, depth = self.queue.popleft()
+                if await self.try_web(item, depth):
+                    continue
                 ent = await self.resolve(item)
                 if ent is None:
                     continue
@@ -534,8 +709,9 @@ class GiveawayFinder:
                 if cid in self.scanned:
                     continue
                 self.scanned.add(cid)
+                self.api_read += 1
                 ref = self.refs.get(cid)
-                log.info("[%d/%d, в очереди %d] %s", len(self.scanned), self.args.max_channels,
+                log.info("[%d/%d, в очереди %d] %s", self.api_read, self.args.max_channels,
                          len(self.queue), ref.label() if ref else f"id:{cid}")
                 try:
                     await self.scan_channel(ent, depth)
@@ -546,8 +722,8 @@ class GiveawayFinder:
                 await self.pause()
                 batch_size = getattr(self.args, "batch_size", 0)
                 batch_pause = getattr(self.args, "batch_pause", 0)
-                if batch_pause and batch_size and len(self.scanned) % batch_size == 0 and self.queue:
-                    log.info("Просканировано %d каналов — пауза %g с", len(self.scanned), batch_pause)
+                if batch_pause and batch_size and self.api_read % batch_size == 0 and self.queue:
+                    log.info("Через API прочитано %d каналов — пауза %g с", self.api_read, batch_pause)
                     await asyncio.sleep(batch_pause)
         except errors.FloodWaitError as e:
             self.stopped_reason = f"Telegram ограничил частоту запросов на {e.seconds} с — обход остановлен"
@@ -752,13 +928,27 @@ async def run_finder(client: TelegramClient, args: argparse.Namespace,
     finder = GiveawayFinder(client, args)
     finder.want, finder.want_count = want, want_count
     log.info(describe_sources(args))
+    if getattr(args, "web", False):
+        from tg_web_preview import WebPreview
+        finder.web = WebPreview(parallel=getattr(args, "web_parallel", None) or 8)
+    if getattr(args, "time_limit", None):
+        finder.deadline = asyncio.get_running_loop().time() + args.time_limit * 60
+    try:
+        return await _run_finder(finder, client, args)
+    finally:
+        await finder.close_web()
+
+
+async def _run_finder(finder: "GiveawayFinder", client: TelegramClient,
+                      args: argparse.Namespace) -> "GiveawayFinder":
+    want_count = finder.want_count
     try:
         await finder.add_seeds()
         if args.dialogs:
             await finder.add_dialogs()
         if want_count and finder.queue:
             await finder.crawl()
-        if not finder.found_enough:
+        if not finder.found_enough and not finder.out_of_budget:
             if not args.no_discover:
                 await finder.discover_keywords(args.keywords or DEFAULT_KEYWORDS)
                 await finder.discover_hashtags(args.hashtags or DEFAULT_HASHTAGS)
@@ -769,10 +959,14 @@ async def run_finder(client: TelegramClient, args: argparse.Namespace,
     if not finder.queue and not finder.scanned:
         sys.exit("Нечего сканировать: укажите -c/--channels-file, --dialogs или не отключайте поиск.")
 
-    if not finder.found_enough:
+    if not finder.found_enough and not finder.out_of_budget:
         await finder.crawl()
     if finder.found_enough:
         log.info("Нашёл %d подходящий розыгрыш — дальше не ищу", finder.wanted)
+    if finder.web is not None:
+        log.info("Веб-проверка t.me: каналов %d, страниц %d, открыто через API %d, ограничений частоты (429) %d%s",
+                 finder.web_checked, finder.web.pages, finder.web_opened, finder.web.limited,
+                 " — t.me перестал отвечать, остальное через API" if finder.web.broken else "")
     if args.check:
         log.info("Проверяю возможность участия (%d розыгрышей)...", len(finder.giveaways))
         await finder.check_eligibility()
@@ -783,7 +977,7 @@ async def run_finder(client: TelegramClient, args: argparse.Namespace,
 async def cmd_scan(client: TelegramClient, args: argparse.Namespace) -> None:
     finder = await run_finder(client, args)
     gs = filter_giveaways(finder.giveaways.values(), args)
-    print_report(gs, finder.refs, len(finder.scanned))
+    print_report(gs, finder.refs, finder.checked)
     export(gs, finder.refs, args.json, args.csv)
     if args.save_sources:
         save_sources(gs, args.save_sources)
@@ -1024,8 +1218,10 @@ async def cmd_post_scheduled(client: TelegramClient, args: argparse.Namespace) -
         queue.sort(key=queue_order)
         st["last_search"] = now.isoformat()
         st["last_search_added"] = len(added)
-        log.info("Итог поиска: проверено каналов %d, активных розыгрышей %d, в запас добавлено %d; отсеяно: %s",
-                 len(finder.scanned), len(finder.giveaways), len(added),
+        web = (f" (по веб-странице {finder.web_checked}, из них открыто через API {finder.web_opened}; "
+               f"целиком через API {finder.api_read})") if finder.web is not None else ""
+        log.info("Итог поиска: проверено каналов %d%s, активных розыгрышей %d, в запас добавлено %d; отсеяно: %s",
+                 finder.checked, web, len(finder.giveaways), len(added),
                  ", ".join(f"{k} — {v}" for k, v in why.items()) or "нет")
         for e in added:
             log.info("  + в запас: %s | до %s | %s", e["prize"], e["until"][:16], e["link"])
@@ -1262,6 +1458,14 @@ def add_scan_args(s: argparse.ArgumentParser) -> None:
                      help="пауза между отдельными каналами, напр. 1 или 1-3 (по умолчанию нет)")
     lim.add_argument("--page-delay", metavar="СЕК[-СЕК]",
                      help="пауза между страницами истории одного канала (по умолчанию нет)")
+    lim.add_argument("--web", action="store_true",
+                     help="сначала смотреть публичную веб-страницу канала t.me/s/…: модуль-розыгрыш там — "
+                          "заглушка «Please open Telegram», через API открываются только такие посты")
+    lim.add_argument("--web-max", type=int, default=5000, help="максимум каналов веб-проверкой за запуск (5000)")
+    lim.add_argument("--web-pages", type=int, default=20, help="страниц (по ~20 постов) на канал при веб-проверке (20)")
+    lim.add_argument("--web-parallel", type=int, default=8, help="одновременных запросов к t.me (8)")
+    lim.add_argument("--time-limit", type=float, default=0, metavar="МИН",
+                     help="остановить обход через столько минут и взять найденное (0 — без ограничения)")
     lim.add_argument("--max-flood-wait", type=int,
                      help="автоматически ждать FloodWait до N секунд, дольше — остановиться "
                           "(120; --careful: 300)")

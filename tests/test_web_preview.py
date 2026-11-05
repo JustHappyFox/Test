@@ -1,0 +1,207 @@
+"""Офлайн-тесты предпроверки каналов по веб-странице t.me/s/<канал>."""
+import asyncio
+import sys
+import unittest
+from datetime import timedelta
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from telethon.tl import functions, types  # noqa: E402
+
+import tg_giveaway_finder as gf  # noqa: E402
+import tg_web_preview as wp  # noqa: E402
+from test_finder import NOW, FakeClient, args, channel, giveaway_media, message  # noqa: E402
+
+
+def post_html(user, pid, stub=False, text=None, age_days=1.0):
+    when = (NOW - timedelta(days=age_days)).strftime("%Y-%m-%dT%H:%M:%S+00:00")
+    body = ('<div class="message_media_not_supported_wrap"><div class="message_media_not_supported">'
+            '<div class="message_media_not_supported_label">Please open Telegram to view this post</div>'
+            '</div></div>') if stub else ""
+    if text:
+        body += f'<div class="tgme_widget_message_text js-message_text" dir="auto">{text}</div>'
+    return (f'<div class="tgme_widget_message_wrap js-widget_message_wrap">'
+            f'<div class="tgme_widget_message text_not_supported_wrap js-widget_message" data-post="{user}/{pid}">'
+            f'<div class="tgme_widget_message_bubble">{body}'
+            f'<a class="tgme_widget_message_date" href="https://t.me/{user}/{pid}">'
+            f'<time datetime="{when}" class="time">12:00</time></a></div></div></div>')
+
+
+def page(user, posts):
+    return "<html><body><section>" + "".join(post_html(user, *p) for p in posts) + "</section></body></html>"
+
+
+class ParsePageTests(unittest.TestCase):
+    def test_stub_posts_and_dates(self):
+        html = page("otdel34", [(381, False, "привет"), (382, True), (383, False, "итоги скоро")])
+        posts = wp.parse_page(html)
+        self.assertEqual([p.id for p in posts], [381, 382, 383])
+        self.assertEqual([p.stub for p in posts], [False, True, False])
+        self.assertTrue(all(p.date is not None for p in posts))
+
+    def test_no_web_feed(self):
+        # канал без веб-ленты: t.me/s/… перенаправляет на обычную страницу канала
+        self.assertIsNone(wp.parse_page('<html><div class="tgme_page_title">Chan</div></html>'))
+
+
+class CandidatesTests(unittest.TestCase):
+    def test_pages_back_until_cutoff(self):
+        pages = {
+            "https://t.me/s/chan": page("chan", [(58, True, None, 2), (59, False, "x", 1), (60, False, "y", 0.5)]),
+            "https://t.me/s/chan?before=58": page("chan", [(55, True, None, 20), (57, False, "z", 10)]),
+            "https://t.me/s/chan?before=55": page("chan", [(50, True, None, 40), (54, False, "old", 35)]),
+        }
+        w = wp.WebPreview()
+        seen = []
+
+        async def fetch(url):
+            seen.append(url)
+            return pages.get(url)
+        w.fetch = fetch
+        got = asyncio.run(w.candidates("@chan", NOW - timedelta(days=31)))
+        self.assertEqual(got, [58, 55])  # пост 50 старше 31 дня
+        self.assertEqual(len(seen), 3)    # дальше 31 дня не листаем
+
+    def test_unavailable_page_means_use_api(self):
+        w = wp.WebPreview()
+
+        async def fetch(url):
+            return None
+        w.fetch = fetch
+        self.assertIsNone(asyncio.run(w.candidates("chan", NOW - timedelta(days=31))))
+
+
+class FetchTests(unittest.TestCase):
+    def test_retry_after_429_and_fallback(self):
+        from aiohttp import web
+
+        hits = {"busy": 0}
+
+        async def handler(request):
+            name = request.match_info["name"]
+            if name == "busy":
+                hits["busy"] += 1
+                if hits["busy"] == 1:
+                    return web.Response(status=429, headers={"Retry-After": "0"})
+                return web.Response(text=page("busy", [(7, True)]), content_type="text/html")
+            return web.Response(status=404)
+
+        async def run():
+            app = web.Application()
+            app.router.add_get("/s/{name}", handler)
+            runner = web.AppRunner(app)
+            await runner.setup()
+            site = web.TCPSite(runner, "127.0.0.1", 0)
+            await site.start()
+            port = site._server.sockets[0].getsockname()[1]
+            w = wp.WebPreview(parallel=2)
+            w.BASE = f"http://127.0.0.1:{port}/s/"
+            try:
+                busy = await w.candidates("busy", NOW - timedelta(days=31), max_pages=1)
+                missing = await w.candidates("missing", NOW - timedelta(days=31))
+            finally:
+                await w.close()
+                await runner.cleanup()
+            return w, busy, missing
+
+        w, busy, missing = asyncio.run(run())
+        self.assertEqual(busy, [7])        # после 429 повторил запрос и получил страницу
+        self.assertIsNone(missing)          # 404 — значит проверять через API
+        self.assertEqual(w.limited, 1)
+        self.assertFalse(w.broken)
+
+
+class FakeWeb:
+    parallel = 2
+    broken = False
+    pages = limited = 0
+
+    def __init__(self, stubs):
+        self.stubs = stubs  # username -> [id] или None (нет веб-страницы)
+        self.asked = []
+
+    async def candidates(self, username, since, max_pages=20):
+        self.asked.append(username)
+        return self.stubs.get(username, [])
+
+    async def close(self):
+        pass
+
+
+class WebClient(FakeClient):
+    def __init__(self, chans, history):
+        super().__init__(chans, history)
+        self.opened = []      # (cid, ids) — что открыли через API по веб-проверке
+        self.batches = []
+
+    async def get_messages(self, ent, ids=None, **kw):
+        self.opened.append((ent.id, list(ids)))
+        by_id = {m.id: m for m in self.history.get(ent.id, [])}
+        return [by_id.get(i) for i in ids]
+
+    async def __call__(self, req):
+        assert isinstance(req, functions.channels.GetChannelsRequest)
+        self.batches.append([c.channel_id for c in req.id])
+        return types.messages.Chats(chats=[self.chans[c.channel_id] for c in req.id if c.channel_id in self.chans])
+
+    async def get_input_entity(self, x):
+        c = await self.get_entity(x)
+        return types.InputPeerChannel(c.id, c.access_hash)
+
+
+class WebCrawlTests(unittest.TestCase):
+    def test_api_only_for_stub_posts(self):
+        agg = channel(1, "aggregator")
+        quiet = channel(10, "quiet")          # заглушек нет — API не трогаем
+        host = channel(20, "host")            # есть заглушка — открываем только её
+        sponsor = channel(30, "sponsor")      # пришёл из розыгрыша только как id
+        noweb = channel(40, "noweb")          # веб-страницы нет — обычная проверка через API
+        g = giveaway_media([20, 30], stars=500, quantity=5)
+        history = {
+            1: [message(1, 5, giveaway_media([20], days_left=-3, months=3))],  # завершён: проверить организатора
+            20: [message(20, 7), message(20, 9, g)],
+            30: [message(30, 3, g)],
+            40: [message(40, 1)],
+        }
+        client = WebClient([agg, quiet, host, sponsor, noweb], history)
+        f = gf.GiveawayFinder(client, args())
+        f.web = FakeWeb({"quiet": [], "host": [9], "sponsor": [3], "noweb": None})
+        f.enqueue("@aggregator", 0)
+        f.enqueue(quiet, 1)
+        f.enqueue(noweb, 1)
+
+        asyncio.run(f.crawl())
+
+        self.assertEqual(sorted(client.scanned), [1, 40])        # целиком через API: стартовый и без веб-страницы
+        self.assertEqual(sorted(client.opened), [(20, [9]), (30, [3])])  # через API — только посты-заглушки
+        self.assertIn([30], client.batches)                       # @username для id узнали одним пакетным запросом
+        self.assertEqual(f.web_checked, 3)
+        self.assertEqual(f.web_opened, 2)
+        self.assertEqual(f.api_read, 2)
+        self.assertEqual(len(f.giveaways), 1)
+        self.assertNotIn("aggregator", f.web.asked)               # стартовые каналы — не по веб-странице
+
+    def test_seen_channel_not_checked_twice(self):
+        host = channel(20, "host")
+        client = WebClient([host], {})
+        f = gf.GiveawayFinder(client, args())
+        f.web = FakeWeb({"host": []})
+        f.enqueue(host, 1)
+        f.enqueue("@host", 1)
+        asyncio.run(f.crawl())
+        self.assertEqual(f.web.asked, ["host"])
+        self.assertEqual(f.web_checked, 1)
+
+    def test_username_of(self):
+        f = gf.GiveawayFinder(client=None, args=args())
+        self.assertEqual(f.username_of("https://t.me/otdel34/"), "otdel34")
+        self.assertEqual(f.username_of("@Premiumlob"), "Premiumlob")
+        self.assertIsNone(f.username_of("https://t.me/+AbCdEf123"))
+        self.assertEqual(f.username_of(channel(5, "chan5")), "chan5")
+        self.assertIsNone(f.username_of(5))
+
+
+if __name__ == "__main__":
+    unittest.main()

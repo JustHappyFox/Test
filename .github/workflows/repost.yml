@@ -4,6 +4,8 @@ name: Репост розыгрышей в @TGaGifts
 # Раз в 3,5 часа (и не раньше 5 часов после вашего поста) публикует ОДИН розыгрыш из запаса —
 # тот, что раньше закончится; пересылает из канала-организатора и записывает в учёт.
 # Когда запас кончается, ищет новые перебором каналов (до 10 подходящих за поиск).
+# Каналы сначала смотрит по веб-странице t.me/s/… (без аккаунта и его лимитов): модуль-розыгрыш там —
+# заглушка «Please open Telegram»; через API Telegram открываются только такие посты.
 # Для публичного репозитория минуты GitHub Actions бесплатны.
 on:
   schedule:
@@ -29,7 +31,7 @@ permissions:
 jobs:
   repost:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 50
     env:
       TG_API_ID: ${{ secrets.TG_API_ID }}
       TG_API_HASH: ${{ secrets.TG_API_HASH }}
@@ -81,6 +83,7 @@ jobs:
           --countries RU,BY,KZ
           --count 1 --min-hours-left 3 --min-interval-hours 3.5 --manual-gap-hours 5 --schedule-ahead 0 --reserve 10
           --careful --max-channels 1000 --search-pages 2 --source-limit 500
+          --web --web-max 6000 --time-limit 30
           --channels-file .state/sources.txt --save-sources .state/sources.txt
           --state .state/posted.json ${{ inputs.refill && '--refill' || '' }} ${{ inputs.post_now && format('--post-now {0}', inputs.post_now) || '' }}
 
