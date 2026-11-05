@@ -117,6 +117,9 @@ class WebPreview:
         self.newest: dict[str, datetime] = {}  # дата самого свежего поста-кандидата по каналу
         self.launches: dict[str, int] = {}  # подтверждённых розыгрышей («Канал запустил розыгрыш»), по каналу
         self._origin: dict[str, bool] = {}  # «канал/номер» → у оригинала есть «Канал запустил розыгрыш»
+        # заглушек, перед которыми номер пропущен (сообщение удалено): админы иногда стирают «Канал запустил
+        # розыгрыш» — замер 05.11 по сборникам: так у ~5 из 81 розыгрыша. Слабее подтверждения, идут после.
+        self.gaps: dict[str, int] = {}
         self.broken = False  # t.me упорно ограничивает — дальше только через API
 
     async def _session(self) -> Any:
@@ -199,6 +202,11 @@ class WebPreview:
                 if not p.forwarded and p.id - 1 < oldest_id and p.id > 1:
                     if await self._has_launch(username, p.id):  # предыдущее сообщение — на следующей странице
                         confirmed.append(p)
+            ok_ids = {p.id for p in confirmed}
+            gapped = [p for p in hits if not p.forwarded and p.id not in ok_ids
+                      and oldest_id <= p.id - 1 and p.id - 1 not in by_id]
+            if gapped:
+                self.gaps[username.lower()] = len(gapped)
             checks = 0
             for p in sorted((p for p in hits if p.forwarded and p.source), key=lambda p: -p.id):
                 if checks >= FORWARD_CHECKS:
@@ -206,7 +214,7 @@ class WebPreview:
                 checks += 1
                 if await self._origin_launched(p.source):
                     confirmed.append(p)
-            hits = confirmed
+            hits = confirmed + gapped
         if confirmed:
             self.launches[username.lower()] = len(confirmed)
         dates = [p.date for p in hits if p.date]

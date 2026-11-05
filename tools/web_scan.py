@@ -28,6 +28,7 @@ async def scan(names: list[str], days: int, pages: int, parallel: int, chunk: in
     since = datetime.now(timezone.utc) - timedelta(days=days)
     with_page = 0
     found: list[tuple[str, int, datetime | None, int]] = []
+    gap_only: set[str] = set()  # только заглушки с пропуском номера перед ними (удалённый «запуск»)
     t0 = time.time()
     try:
         for i in range(0, len(names), chunk):
@@ -38,9 +39,11 @@ async def scan(names: list[str], days: int, pages: int, parallel: int, chunk: in
                     with_page += 1
                 if r and u.lower() not in w.blind:  # «слепые» каналы (сайт прячет все посты) не берём
                     found.append((u, len(r), w.newest.get(u.lower()), w.launches.get(u.lower(), 0)))
+                    if not found[-1][3]:
+                        gap_only.add(u.lower())
             done = min(i + chunk, len(names))
             print(f"  {done}/{len(names)}: веб-страница у {with_page}, «слепых» {len(w.blind)}, с кандидатами {len(found)} "
-                  f"(с «запуском розыгрыша» {sum(1 for x in found if x[3])}); "
+                  f"(с «запуском розыгрыша» {sum(1 for x in found if x[3])}, с пропуском перед заглушкой {len(gap_only)}); "
                   f"страниц {w.pages}, 429: {w.limited}, {time.time() - t0:.0f} с", flush=True)
     finally:
         await w.close()

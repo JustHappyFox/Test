@@ -183,6 +183,14 @@ class LaunchMessageTests(unittest.TestCase):
         self.assertEqual(got, [42, 41])  # без strict пересланные берутся все, оригиналы не открываются
         self.assertEqual(len(w.asked), 2)
 
+    def test_deleted_launch_message_is_second_tier(self):
+        # перед заглушкой номер пропущен — «Канал запустил розыгрыш» удалили; берём, но не считаем подтверждённым
+        text = '<div class="tgme_widget_message_text js-message_text">x</div>'
+        html = "<section>" + real_post(41, text) + GIVEAWAY + "</section>"   # 42 нет на странице
+        w, got = self._run(html, strict=True)
+        self.assertEqual(got, [43])
+        self.assertEqual((w.launches, w.gaps), ({}, {"rzavayuui": 1}))
+
     def test_launch_on_the_next_page(self):
         # заглушка — самый старый пост на загруженных страницах: «запуск» ищем на следующей странице
         text = '<div class="tgme_widget_message_text js-message_text">x</div>'
