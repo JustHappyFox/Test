@@ -433,14 +433,17 @@ class GiveawayFinder:
                 line = line.split("#", 1)[0].strip()
                 if line:
                     seeds.append(line)
+        # Сначала каналы большого списка: там только подтверждённые по веб-странице розыгрыши
+        # («Канал запустил розыгрыш»), их открыть быстро; стартовые каналы читаются дольше.
+        self.add_discover_file(skip={str(x).strip().lstrip("@").lower() for x in seeds})
         for s in seeds:
             self.enqueue(s, 0)
         if seeds:
             log.info("Стартовых каналов из списка: %d", len(seeds))
-        self.add_discover_file()
 
-    def add_discover_file(self) -> None:
-        """Большой список каналов (Common Crawl): только веб-проверка, с позиции --discover-offset по кругу."""
+    def add_discover_file(self, skip: set[str] = frozenset()) -> None:
+        """Большой список каналов (Common Crawl): только веб-проверка, с позиции --discover-offset по кругу.
+        skip — стартовые каналы: их читаем полностью, а не только по веб-странице."""
         path = getattr(self.args, "discover_file", None)
         if not path:
             return
@@ -454,7 +457,8 @@ class GiveawayFinder:
             return
         self.discover_start = (getattr(self.args, "discover_offset", 0) or 0) % len(names)
         for n in names[self.discover_start:] + names[:self.discover_start]:
-            self.enqueue(WebOnly(n), 1)
+            if n.lstrip("@").lower() not in skip:
+                self.enqueue(WebOnly(n), 1)
         log.info("Каналов из большого списка: %d, начинаю с №%d", len(names), self.discover_start + 1)
 
     async def add_dialogs(self) -> None:

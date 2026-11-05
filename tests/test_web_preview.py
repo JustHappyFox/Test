@@ -351,6 +351,15 @@ class WebCrawlTests(unittest.TestCase):
         asyncio.run(self._seed_and_crawl(f2))
         self.assertEqual(f2.web.asked[0], "chan3")
         self.assertEqual(client2.opened, [(53, [2])])
+
+        # каналы большого списка — в начале очереди, раньше стартовых; стартовый канал из списка не дублируется
+        f3 = gf.GiveawayFinder(WebClient(list(chans.values()), history),
+                               args(discover_file=f.name, discover_offset=0, channel=["@chan5", "@seedchan"],
+                                    channels_file=[], no_aggregators=True))
+        asyncio.run(f3.add_seeds())
+        order = [(str(i), isinstance(i, gf.WebOnly)) for i, _ in f3.queue]
+        self.assertEqual(order[:5], [(f"@chan{i}", True) for i in range(5)])
+        self.assertEqual(order[5:], [("@chan5", False), ("@seedchan", False)])
         Path(f.name).unlink()
 
     @staticmethod
