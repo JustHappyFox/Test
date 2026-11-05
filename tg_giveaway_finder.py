@@ -654,9 +654,13 @@ class GiveawayFinder:
         return self.now - timedelta(days=self.args.days)
 
     def web_check(self, username: str, strict: bool = False) -> asyncio.Future:
-        """strict — для каналов большого списка: только заглушки с «Канал запустил розыгрыш» перед ними."""
+        """strict — для каналов большого списка: только заглушки с «Канал запустил розыгрыш» перед ними,
+        и только за последние --discover-days дней (владелец: пост старше 7 дней скорее всего истёк)."""
+        since = self.web_since
+        if strict:
+            since = max(since, self.now - timedelta(days=getattr(self.args, "discover_days", None) or 7))
         return asyncio.ensure_future(
-            self.web.candidates(username, self.web_since, getattr(self.args, "web_pages", None) or 20, strict=strict))
+            self.web.candidates(username, since, getattr(self.args, "web_pages", None) or 20, strict=strict))
 
     async def batch_refs(self, first: int) -> None:
         """@username для веб-проверки: один запрос сразу на 100 каналов из очереди (их id — из розыгрышей)."""
@@ -1676,6 +1680,8 @@ def add_scan_args(s: argparse.ArgumentParser) -> None:
                      help="большой список @username (напр. из Common Crawl): только веб-проверка, "
                           "без веб-страницы — пропуск; разбирается по кругу с --discover-offset")
     lim.add_argument("--discover-offset", type=int, default=0, help="с какой строки списка начать (0)")
+    lim.add_argument("--discover-days", type=int, default=7,
+                     help="каналы большого списка: смотреть только посты не старше N дней (7)")
     lim.add_argument("--web-open-max", type=int, default=80,
                      help="сколько каналов большого списка можно открыть через API за запуск (80)")
     lim.add_argument("--time-limit", type=float, default=0, metavar="МИН",

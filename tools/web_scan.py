@@ -103,7 +103,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("names", help="файл с @username, по одному в строке")
     ap.add_argument("--out", help="куда записать каналы с кандидатами")
-    ap.add_argument("--days", type=int, default=31, help="насколько старые посты смотреть (31 — дольше розыгрыш не идёт)")
+    ap.add_argument("--days", type=int, default=7, help="насколько старые посты смотреть (7: старше — скорее всего истёк)")
     ap.add_argument("--pages", type=int, default=3, help="страниц на канал, по ~20 постов (3)")
     ap.add_argument("--parallel", type=int, default=8, help="одновременных запросов к t.me (8)")
     ap.add_argument("--limit", type=int, default=0, help="проверить только первые N имён (0 — все)")
