@@ -447,9 +447,9 @@ class QueueTests(unittest.TestCase):
                 ["post", "--to", "@mygroup", "--state", str(state), "--countries", "RU,BY,KZ"]))
             asyncio.run(gf.cmd_post(client, a))
             st = gf.load_state(state)
-        self.assertEqual(sent, [(5, 100, 7)])                     # «для всех стран» первым
-        self.assertEqual([e["key"] for e in st["queue"]], ["ru"])  # истекающий выброшен
-        self.assertEqual(list(st["posted"]), ["all"])              # завершившийся «old» забыт
+        self.assertEqual(sent, [(1, 100, 7)])                     # раньше кончится — раньше публикуем
+        self.assertEqual([e["key"] for e in st["queue"]], ["all"])  # истекающий (<3 ч) выброшен
+        self.assertEqual(list(st["posted"]), ["ru"])               # завершившийся «old» забыт
         self.assertIsNotNone(st["last_post"])
 
 
@@ -736,3 +736,35 @@ class PostWhenDueTests(ScheduledPostTests):
         c = self.client(history=[manual])
         self.run_post(c, {"last_post": (NOW - timedelta(hours=6)).isoformat(), "queue": [self.entry(1)]})
         self.assertEqual(c.forwards, [])                          # 5 часов после вашего поста ещё не прошло
+
+
+class ReserveTests(unittest.TestCase):
+    def test_search_builds_reserve_and_posts_soonest_ending(self):
+        target = channel(900, "mygroup", left=False)
+        chans = [target] + [channel(i, f"c{i}") for i in (1, 2, 3)]
+        medias = {1: giveaway_media([1], stars=8000, quantity=10, days_left=6),
+                  2: giveaway_media([2], months=3, quantity=5, days_left=1),     # кончится раньше всех
+                  3: giveaway_media([3], stars=9000, quantity=20, days_left=3)}
+        history = {i: [message(i, 10 + i, m)] for i, m in medias.items()}
+
+        class C(FakeClient):
+            async def get_messages(self, ent, scheduled=False, limit=None):
+                return []
+
+            async def forward_messages(self, to, mid, from_peer=None, schedule=None):
+                sent.append(mid)
+                return types.Message(id=600, peer_id=types.PeerChannel(900), date=NOW, message="")
+
+        sent = []
+        client = C(chans, history)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp, "s.json")
+            gf.save_state(path, {"posted": {}, "queue": [], "last_post": (NOW - timedelta(hours=4)).isoformat()})
+            a = gf.apply_preset(gf.build_parser().parse_args(
+                ["post", "--to", "@mygroup", "--state", str(path), "--no-discover", "--no-aggregators",
+                 "--depth", "0", "-c", "@c1", "-c", "@c2", "-c", "@c3", "--min-stars", "5000",
+                 "--min-premium", "3", "--min-interval-hours", "3.5", "--schedule-ahead", "0"]))
+            asyncio.run(gf.cmd_post(client, a))
+            st = gf.load_state(path)
+        self.assertEqual(sent, [12])                                   # опубликован тот, что кончится раньше
+        self.assertEqual([e["msg_id"] for e in st["queue"]], [13, 11])  # остальные — в запасе, по сроку

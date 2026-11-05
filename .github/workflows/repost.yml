@@ -1,8 +1,9 @@
 name: Репост розыгрышей в @TGaGifts
 
 # Каждые 30 минут задание просто обновляется: проверяет время и ваши посты, ничего не ищет.
-# Раз в 3,5 часа (и не раньше 5 часов после вашего поста) ищет ОДИН подходящий розыгрыш,
-# пересылает его из канала-организатора и записывает в учёт, чтобы не повторяться.
+# Раз в 3,5 часа (и не раньше 5 часов после вашего поста) публикует ОДИН розыгрыш из запаса —
+# тот, что раньше закончится; пересылает из канала-организатора и записывает в учёт.
+# Когда запас кончается, ищет новые перебором каналов (до 10 подходящих за поиск).
 # Для публичного репозитория минуты GitHub Actions бесплатны.
 on:
   schedule:
@@ -69,7 +70,7 @@ jobs:
         run: >
           python tg_giveaway_finder.py post --to TGaGifts
           --countries RU,BY,KZ --min-stars 5000 --min-premium 3
-          --count 1 --min-hours-left 3 --min-interval-hours 3.5 --manual-gap-hours 5 --schedule-ahead 0
+          --count 1 --min-hours-left 3 --min-interval-hours 3.5 --manual-gap-hours 5 --schedule-ahead 0 --reserve 10
           --careful --max-channels 300 --search-pages 1
           --channels-file .state/sources.txt --save-sources .state/sources.txt
           --state .state/posted.json

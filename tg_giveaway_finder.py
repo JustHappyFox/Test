@@ -846,7 +846,7 @@ async def inspect_target(client: TelegramClient, target: Any, st: dict[str, Any]
 
 
 def queue_order(e: dict[str, Any]) -> tuple:
-    return (bool(e.get("countries")), e["until"])  # «для всех стран» — первыми, затем кто раньше кончится
+    return (e["until"], bool(e.get("countries")))  # раньше кончится — раньше публикуем; при равенстве «для всех стран»
 
 
 async def queue_entry(client: TelegramClient, g: Giveaway, finder: "GiveawayFinder") -> dict[str, Any] | None:
@@ -948,7 +948,7 @@ async def cmd_post_scheduled(client: TelegramClient, args: argparse.Namespace) -
             if scans >= 3:  # не больше трёх поисков за запуск
                 break
             scans += 1
-            log.info("Подходящих в очереди нет — ищу один новый розыгрыш")
+            log.info("Запас кончился — ищу новые розыгрыши перебором каналов (запас до %d)", args.reserve)
             known = {e["key"] for e in queue}
             want_at = next_at
 
@@ -956,7 +956,7 @@ async def cmd_post_scheduled(client: TelegramClient, args: argparse.Namespace) -
                 return (bool(filter_giveaways([g], args)) and g.key not in posted
                         and g.key not in scheduled and g.key not in known and g.key not in bad
                         and g.until_date - want_at >= min_left)
-            finder = await run_finder(client, args, want=want, want_count=1)
+            finder = await run_finder(client, args, want=want, want_count=args.reserve)
             for g in filter_giveaways(finder.giveaways.values(), args):
                 if g.key in posted or g.key in scheduled or g.key in known or g.until_date - now < min_left:
                     continue
@@ -1211,6 +1211,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="файл с уже пересланными розыгрышами, чтобы не повторяться (posted.json)")
     ps.add_argument("--min-hours-left", type=float, default=3.0,
                     help="не пересылать розыгрыши, до конца которых меньше N часов (3)")
+    ps.add_argument("--reserve", type=int, default=10, metavar="N",
+                    help="сколько подходящих розыгрышей набирать в запас за один поиск (10); "
+                         "новый поиск — только когда запас кончится")
     ps.add_argument("--min-interval-hours", type=float, default=0, metavar="Ч",
                     help="не постить чаще, чем раз в Ч часов (напр. 3.5); при раннем запуске "
                          "выходит сразу, ничего не сканируя")
