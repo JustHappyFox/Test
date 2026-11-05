@@ -974,16 +974,37 @@ async def cmd_post_scheduled(client: TelegramClient, args: argparse.Namespace) -
                     and g.key not in scheduled and g.key not in known and g.key not in bad
                     and g.until_date - want_at >= min_left)
         finder = await run_finder(client, args, want=want, want_count=args.reserve)
-        for g in filter_giveaways(finder.giveaways.values(), args):
-            if g.key in posted or g.key in scheduled or g.key in known or g.key in bad \
-                    or g.until_date - now < min_left:
-                continue
-            e = await queue_entry(client, g, finder)
-            if e:
-                queue.append(e)
-            else:  # нет публичного поста организатора — больше не берём
-                bad[g.key] = g.until_date.isoformat()
+        allowed = parse_countries(getattr(args, "countries", None))
+        why: dict[str, int] = {}
+        added = []
+
+        def skip(reason: str) -> None:
+            why[reason] = why.get(reason, 0) + 1
+        for g in finder.giveaways.values():
+            if g.key in posted or g.key in scheduled or g.key in known or g.key in bad:
+                skip("уже был / в канале")
+            elif not country_ok(g, allowed):
+                skip("другие страны")
+            elif not filter_giveaways([g], args):
+                skip("мал приз")
+            elif g.until_date - now < min_left:
+                skip("скоро кончится")
+            else:
+                e = await queue_entry(client, g, finder)
+                if e:
+                    queue.append(e)
+                    added.append(e)
+                else:  # нет публичного поста организатора — больше не берём
+                    bad[g.key] = g.until_date.isoformat()
+                    skip("закрытый канал")
         queue.sort(key=queue_order)
+        st["last_search"] = now.isoformat()
+        st["last_search_added"] = len(added)
+        log.info("Итог поиска: проверено каналов %d, активных розыгрышей %d, в запас добавлено %d; отсеяно: %s",
+                 len(finder.scanned), len(finder.giveaways), len(added),
+                 ", ".join(f"{k} — {v}" for k, v in why.items()) or "нет")
+        for e in added:
+            log.info("  + в запас: %s | до %s | %s", e["prize"], e["until"][:16], e["link"])
 
     if args.refill:  # только пополнить запас, ничего не публикуя
         await search()
@@ -997,8 +1018,17 @@ async def cmd_post_scheduled(client: TelegramClient, args: argparse.Namespace) -
         if entry is None:
             if scans >= 3:  # не больше трёх поисков за запуск
                 break
+            last = st.get("last_search")
+            if (scans == 0 and last and not st.get("last_search_added")
+                    and now - datetime.fromisoformat(last) < timedelta(hours=args.search_cooldown_hours)):
+                log.info("Запас пуст, но поиск в %s UTC ничего нового не дал — следующий поиск не раньше чем "
+                         "через %g ч (бережём аккаунт)", datetime.fromisoformat(last).strftime("%H:%M"),
+                         args.search_cooldown_hours)
+                break
             scans += 1
             await search()
+            if not st.get("last_search_added"):  # ничего нового — повторять в этом запуске бессмысленно
+                break
             continue
         queue.remove(entry)
         when = next_at
@@ -1250,6 +1280,8 @@ def build_parser() -> argparse.ArgumentParser:
                     help="файл с уже пересланными розыгрышами, чтобы не повторяться (posted.json)")
     ps.add_argument("--min-hours-left", type=float, default=3.0,
                     help="не пересылать розыгрыши, до конца которых меньше N часов (3)")
+    ps.add_argument("--search-cooldown-hours", type=float, default=2.0, metavar="Ч",
+                    help="если поиск ничего не дал, следующий — не раньше чем через Ч часов (2)")
     ps.add_argument("--reserve", type=int, default=10, metavar="N",
                     help="сколько подходящих розыгрышей набирать в запас за один поиск (10); "
                          "новый поиск — только когда запас кончится")

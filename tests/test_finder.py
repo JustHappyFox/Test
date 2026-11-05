@@ -869,3 +869,39 @@ class RefillTests(unittest.TestCase):
             asyncio.run(gf.cmd_post(client, a))
             st = gf.load_state(path)
         self.assertEqual([e["msg_id"] for e in st["queue"]], [12, 11])  # запас по сроку окончания
+
+
+class SearchCooldownTests(unittest.TestCase):
+    def run_post(self, st_extra):
+        target = channel(900, "mygroup", left=False)
+
+        class C(FakeClient):
+            async def get_messages(self, ent, scheduled=False, limit=None):
+                return []
+
+            async def iter_messages(self, ent, limit=None, wait_time=None):
+                if ent.id != 900:
+                    calls.append(ent.id)
+                for m in []:
+                    yield m
+
+        calls = []
+        client = C([target, channel(1, "c1")], {})
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp, "s.json")
+            gf.save_state(path, {"posted": {}, "queue": [], "last_post": (NOW - timedelta(hours=4)).isoformat(),
+                                 **st_extra})
+            a = gf.apply_preset(gf.build_parser().parse_args(
+                ["post", "--to", "@mygroup", "--state", str(path), "--no-discover", "--no-aggregators",
+                 "--depth", "0", "-c", "@c1", "--min-interval-hours", "3.5", "--schedule-ahead", "0"]))
+            asyncio.run(gf.cmd_post(client, a))
+            return calls, gf.load_state(path)
+
+    def test_empty_search_recently_skips_new_search(self):
+        calls, _ = self.run_post({"last_search": (NOW - timedelta(hours=1)).isoformat(), "last_search_added": 0})
+        self.assertEqual(calls, [])                       # перебор каналов не запускался
+
+    def test_search_allowed_after_cooldown(self):
+        calls, st = self.run_post({"last_search": (NOW - timedelta(hours=3)).isoformat(), "last_search_added": 0})
+        self.assertEqual(calls, [1])                      # один поиск; пусто — без повторов
+        self.assertEqual(st["last_search_added"], 0)
