@@ -911,6 +911,36 @@ public class Lists {
         Load();
         try { AddMissing(); } catch { }
         try { AddMeters(); } catch { }
+        try { ClearOformil(); } catch { }
+    }
+
+    // 05.11: список «Оформил» (кто оформил договор, инженер в справке) - один человек, Степанович А.С.; в старом справочнике
+    // список очищается один раз (метка в файле), дальше можно дописывать других - они останутся. Раздел [Справка: инженер]
+    // (был день) убирается
+    public const string OformilMark = "# список очищен программой 05.11 - оставлен один; других можно дописать строками ниже";
+
+    void ClearOformil() {
+        List<string> outl = new List<string>();
+        bool changed = false, inOf = false, inEng = false, marked = false;
+        foreach (string line in lines) if (line.Trim() == OformilMark) marked = true;
+        foreach (string line in lines) {
+            string s = line.Trim();
+            if (s.StartsWith("[") && s.EndsWith("]")) {
+                string k = Key(s.Substring(1, s.Length - 2));
+                inOf = !marked && k == Key("Оформил");
+                inEng = k == Key("Справка: инженер");
+                if (inEng) { changed = true; continue; }
+                outl.Add(line);
+                if (inOf) { outl.Add(OformilMark); outl.Add("Степанович А.С."); changed = true; }
+                continue;
+            }
+            if (inEng) continue;
+            if (inOf) { if (s.Length == 0) { outl.Add(line); inOf = false; } continue; }
+            outl.Add(line);
+        }
+        if (!changed) return;
+        System.IO.File.WriteAllLines(File, outl.ToArray(), new UTF8Encoding(true));
+        Load();
     }
 
     // Новые типы счётчиков из встроенного списка дописываются в раздел [Счётчики] старого справочника - один раз
@@ -1057,7 +1087,8 @@ public class Lists {
 "Зенченко Д.И. | начальника группы по работе с потребителями Острошицкого производственно-сбытового участка отделения по сбыту электрической энергии Минского района филиала Энергосбыт РУП «МИНСКЭНЕРГО» | Зенченко Дмитрия Ивановича | № 3/1832 от 11.09.2026 | Д.И.Зенченко\r\n" +
 "\r\n" +
 "[Оформил]\r\n" +
-"Гаврош В.А.\r\nКолотило А.С.\r\nГалай А.В.\r\nНюнько В.С.\r\nВолкович В.Н.\r\nХилевич Р.А.\r\nМихалевич Д.А.\r\nШевчик Я.Е.\r\nПоляков И.А.\r\nЦеховой А.Н.\r\nЗеленевская Е.В.\r\nГоряев С.А.\r\nУстинович И.И.\r\nСинегуб Д.С.\r\n" +
+OformilMark + "\r\n" +
+"Степанович А.С.\r\n" +
 "\r\n" +
 "[Объект электроснабжения]\r\n" +
 "Жилой дом\r\nСтройплощадка жилого дома\r\nЛичное подсобное хозяйство\r\nКвартира\r\nГараж\r\nЖилой дом (1-ая очередь)\r\nКвартира в блокированном жилом доме\r\n" +
@@ -1151,10 +1182,6 @@ public class Lists {
 "[Ток аппарата, А]\r\n" +
 "# номиналы автоматов\r\n" +
 "6\r\n10\r\n16\r\n20\r\n25\r\n32\r\n40\r\n50\r\n63\r\n80\r\n100\r\n120\r\n" +
-"\r\n" +
-"[Справка: инженер]\r\n" +
-"# справка: инженер по работе с потребителями (подпись внизу справки)\r\n" +
-"Степанович А.С.\r\n" +
 "\r\n" +
 "[Справка: заключение]\r\n" +
 "# справка (данные прибора учёта): строка после таблицы\r\n" +
@@ -16505,7 +16532,7 @@ public class SpravkaForm : Form {
             SetV("qr", memory.Get("СправкаQR", ""));
             // два экземпляра на листе (половину отрезают и возвращают) - по умолчанию да
             SetV("dve", memory.Get("СправкаДвеКопии", "1"));
-            // инженер - из своего списка справочника (сейчас один - Степанович А.С.); запомненный - если он в списке
+            // инженер - из списка «Оформил» (сейчас один - Степанович А.С.); запомненный - если он есть в списке
             string eng = memory.Get("СправкаИнженер", "");
             SetV("inzh", Engineers().Contains(eng) ? eng : First(Engineers()));
             SetV("nach", memory.Get("СправкаНачальник", First(Names())));
@@ -16524,11 +16551,8 @@ public class SpravkaForm : Form {
         RefreshState();
     }
 
-    // инженеры справки: раздел [Справка: инженер]; пустой - как «Оформил» в договоре
-    List<string> Engineers() {
-        List<string> l = lists.Get("Справка: инженер");
-        return l.Count > 0 ? l : lists.Get("Оформил");
-    }
+    // инженеры справки - общий список «Оформил» (как в договоре)
+    List<string> Engineers() { return lists.Get("Оформил"); }
 
     List<string> Names() {
         List<string> r = new List<string>();
@@ -16594,6 +16618,7 @@ public class SpravkaForm : Form {
             string own = Get(d, "pu1_prinadl");
             if (own.Length > 0) SetV("prinadl", own == "Потребитель" ? "собственности абонента" : "собственности " + own);
             if (Get(d, "pu1_gruppa").Length > 0) SetV("gruppa", Get(d, "pu1_gruppa"));
+            if (Get(d, "oformil").Length > 0) SetV("inzh", Get(d, "oformil"));
             if (Get(d, "podp").Length > 0) SetV("nach", Get(d, "podp"));
             savedFile = null;
             savedId = null;
