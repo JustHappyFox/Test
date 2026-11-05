@@ -539,6 +539,258 @@ public static class DocxTemplate {
         Zip.Write(output, entries);
     }
 
+    // Два экземпляра на листе (справку отдают, половину отрезают и оставляют, половину возвращают): всё содержимое документа -
+    // в таблицу из двух строк, по экземпляру в строке, без рамок; строка не ниже половины листа, между ними - пунктир (линия
+    // отреза). Экземпляр больше половины листа - строка растёт, второй экземпляр уходит на следующий лист целиком.
+    // Картинки «поверх текста» (QR-код): у первого экземпляра - от края листа, как были, у второго - от его первого абзаца.
+    public static void TwoCopies(string docx) {
+        List<ZipEntry> entries = Zip.Read(docx);
+        // размер шрифта по умолчанию (стиль «Обычный»), пт
+        double defPt = 11;
+        foreach (ZipEntry e in entries) {
+            if (e.Name != "word/styles.xml") continue;
+            Match m = Regex.Match(Encoding.UTF8.GetString(e.GetData()), "<w:style [^>]*w:default=\"1\"[^>]*w:type=\"paragraph\"|<w:style [^>]*w:type=\"paragraph\"[^>]*w:default=\"1\"");
+            if (m.Success) {
+                string rest = Encoding.UTF8.GetString(e.GetData()).Substring(m.Index);
+                int end = rest.IndexOf("</w:style>");
+                Match sz = Regex.Match(end > 0 ? rest.Substring(0, end) : rest, "<w:sz w:val=\"(\\d+)\"");
+                if (sz.Success) defPt = int.Parse(sz.Groups[1].Value) / 2.0;
+            }
+        }
+        foreach (ZipEntry e in entries) {
+            if (e.Name != "word/document.xml") continue;
+            XmlDocument doc = new XmlDocument();
+            doc.PreserveWhitespace = true;
+            using (MemoryStream ms = new MemoryStream(e.GetData())) doc.Load(ms);
+            XmlNamespaceManager ns = new XmlNamespaceManager(doc.NameTable);
+            ns.AddNamespace("w", W);
+            XmlNode body = doc.SelectSingleNode("/w:document/w:body", ns);
+            if (body == null) return;
+            XmlNode sect = null;
+            List<XmlNode> content = new List<XmlNode>();
+            foreach (XmlNode c in Children(body)) {
+                if (c.NodeType != XmlNodeType.Element) continue;
+                if (c.LocalName == "sectPr") sect = c; else content.Add(c);
+            }
+            // размеры листа и поля (твипы)
+            int pw = 11906, ph = 16838, ml = 1134, mr = 1134, mt = 1134, mb = 1134;
+            if (sect != null) {
+                XmlNode sz = sect.SelectSingleNode("w:pgSz", ns), mar = sect.SelectSingleNode("w:pgMar", ns);
+                pw = Twips(sz, "w", pw); ph = Twips(sz, "h", ph);
+                ml = Twips(mar, "left", ml); mr = Twips(mar, "right", mr); mt = Twips(mar, "top", mt); mb = Twips(mar, "bottom", mb);
+            }
+            int width = pw - ml - mr, half = (ph - mt - mb) / 2 - 140;
+            // экземпляр должен влезть в половину листа: не влезает - сначала убрать двойные пустые строки, потом чуть
+            // уменьшить шрифт (не меньше чем до 3/4); не влез и так - второй экземпляр уйдёт на следующий лист
+            // оценка примерная (Word и другие программы рисуют чуть по-разному) - с запасом 6%
+            double avail = (half - 340) / 20.0 / 1.06, wpt = width / 20.0;
+            if (Estimate(content, wpt, defPt, 1) > avail) {
+                for (int i = content.Count - 1; i > 0; i--)
+                    if (content[i].LocalName == "p" && content[i - 1].LocalName == "p" && EmptyPara(content[i]) && EmptyPara(content[i - 1])) {
+                        body.RemoveChild(content[i]);
+                        content.RemoveAt(i);
+                    }
+                double f = 1;
+                for (f = 1; f > 0.75; f -= 0.025) if (Estimate(content, wpt, defPt, f) <= avail) break;
+                f = Math.Max(f, 0.75);
+                if (f < 1) foreach (XmlNode c in content) ScaleFont(doc, c, defPt, f);
+            }
+            string x = "<w:tbl xmlns:w=\"" + W + "\"><w:tblPr><w:tblW w:w=\"" + width + "\" w:type=\"dxa\"/><w:tblLayout w:type=\"fixed\"/>" +
+                "<w:tblCellMar><w:top w:w=\"0\" w:type=\"dxa\"/><w:left w:w=\"0\" w:type=\"dxa\"/><w:bottom w:w=\"0\" w:type=\"dxa\"/><w:right w:w=\"0\" w:type=\"dxa\"/></w:tblCellMar>" +
+                "</w:tblPr><w:tblGrid><w:gridCol w:w=\"" + width + "\"/></w:tblGrid>" +
+                CopyRow(width, half, "<w:tcBorders><w:bottom w:val=\"dashed\" w:sz=\"12\" w:space=\"0\" w:color=\"000000\"/></w:tcBorders><w:tcMar><w:bottom w:w=\"340\" w:type=\"dxa\"/></w:tcMar>") +
+                CopyRow(width, half, "<w:tcMar><w:top w:w=\"454\" w:type=\"dxa\"/></w:tcMar>") + "</w:tbl>";
+            XmlDocument t = new XmlDocument();
+            t.LoadXml(x);
+            XmlNode tbl = doc.ImportNode(t.DocumentElement, true);
+            List<XmlNode> cells = new List<XmlNode>();
+            foreach (XmlNode c in ((XmlElement)tbl).GetElementsByTagName("tc", W)) cells.Add(c);
+            foreach (XmlNode c in content) { body.RemoveChild(c); cells[0].AppendChild(c); }
+            foreach (XmlNode c in content) cells[1].AppendChild(c.CloneNode(true));
+            foreach (XmlNode cell in cells) {
+                // ячейка таблицы должна кончаться абзацем
+                if (cell.LastChild == null || cell.LastChild.LocalName != "p") cell.AppendChild(doc.CreateElement("w", "p", W));
+            }
+            // второй экземпляр: без закладок (повтор номеров), картинки - от своего первого абзаца, свои номера
+            foreach (string tag in new string[] { "bookmarkStart", "bookmarkEnd" }) {
+                List<XmlNode> l = new List<XmlNode>();
+                foreach (XmlNode b in ((XmlElement)cells[1]).GetElementsByTagName(tag, W)) l.Add(b);
+                foreach (XmlNode b in l) b.ParentNode.RemoveChild(b);
+            }
+            const string WP = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing";
+            for (int k = 0; k < 2; k++)
+                foreach (XmlNode a in ((XmlElement)cells[k]).GetElementsByTagName("anchor", WP)) {
+                    XmlElement an = (XmlElement)a;
+                    XmlElement pos = null;
+                    foreach (XmlNode c in an.ChildNodes) if (c.LocalName == "positionV") pos = (XmlElement)c;
+                    bool page = pos != null && pos.GetAttribute("relativeFrom") == "page";
+                    if (k == 0) { if (page) an.SetAttribute("layoutInCell", "0"); continue; }
+                    foreach (XmlNode c in an.ChildNodes)
+                        if (c.LocalName == "docPr") { int id; if (int.TryParse(((XmlElement)c).GetAttribute("id"), out id)) ((XmlElement)c).SetAttribute("id", (id + 1000).ToString()); }
+                    if (!page) continue;
+                    pos.SetAttribute("relativeFrom", "paragraph");
+                    foreach (XmlNode c in pos.ChildNodes) if (c.LocalName == "posOffset") c.InnerText = (-7 * 36000).ToString();
+                    an.SetAttribute("layoutInCell", "1");
+                }
+            if (sect != null) body.InsertBefore(tbl, sect); else body.AppendChild(tbl);
+            // после таблицы - крошечный абзац (документ не должен кончаться таблицей); места почти не занимает
+            XmlDocument pd = new XmlDocument();
+            pd.LoadXml("<w:p xmlns:w=\"" + W + "\"><w:pPr><w:spacing w:before=\"0\" w:after=\"0\" w:line=\"20\" w:lineRule=\"exact\"/>" +
+                "<w:rPr><w:sz w:val=\"2\"/></w:rPr></w:pPr></w:p>");
+            XmlNode tail = doc.ImportNode(pd.DocumentElement, true);
+            if (sect != null) body.InsertBefore(tail, sect); else body.AppendChild(tail);
+            using (MemoryStream ms = new MemoryStream()) {
+                XmlWriterSettings ws = new XmlWriterSettings();
+                ws.Encoding = new UTF8Encoding(false);
+                using (XmlWriter xw = XmlWriter.Create(ms, ws)) doc.Save(xw);
+                e.SetData(ms.ToArray());
+            }
+        }
+        Zip.Write(docx, entries);
+    }
+
+    static bool EmptyPara(XmlNode p) {
+        return AllText(p).Trim().Length == 0 && ((XmlElement)p).GetElementsByTagName("drawing", W).Count == 0 && ((XmlElement)p).GetElementsByTagName("br", W).Count == 0;
+    }
+
+    // высота куска документа (абзацы и таблицы), пт - примерно, по ширине букв Times New Roman; f - во сколько раз шрифт меньше
+    static double Estimate(List<XmlNode> nodes, double widthPt, double defPt, double f) {
+        double h = 0;
+        foreach (XmlNode n in nodes) {
+            if (n.LocalName == "p") h += ParaHeight(n, widthPt, defPt, f);
+            else if (n.LocalName == "tbl") h += TableHeight(n, defPt, f);
+        }
+        return h;
+    }
+
+    static XmlNode Child(XmlNode n, string name) {
+        if (n == null) return null;
+        foreach (XmlNode c in n.ChildNodes) if (c.LocalName == name && c.NamespaceURI == W) return c;
+        return null;
+    }
+
+    static double Attr(XmlNode n, string a) {
+        double v;
+        return n != null && double.TryParse(((XmlElement)n).GetAttribute(a, W), out v) ? v : 0;
+    }
+
+    // размер шрифта абзаца, пт: у первого куска текста, у знака абзаца или по умолчанию
+    static double ParaSize(XmlNode p, double defPt) {
+        foreach (XmlNode t in Texts(p)) {
+            XmlNode sz = Child(Child(t.ParentNode, "rPr"), "sz");
+            if (sz != null) return Attr(sz, "val") / 2;
+            break;
+        }
+        XmlNode psz = Child(Child(Child(p, "pPr"), "rPr"), "sz");
+        return psz != null ? Attr(psz, "val") / 2 : defPt;
+    }
+
+    static double ParaHeight(XmlNode p, double widthPt, double defPt, double f) {
+        double size = ParaSize(p, defPt) * f;
+        StringBuilder sb = new StringBuilder();
+        bool bold = false;
+        foreach (XmlNode t in Texts(p)) {
+            sb.Append(t.InnerText);
+            XmlNode b = Child(Child(t.ParentNode, "rPr"), "b");
+            if (b != null && ((XmlElement)b).GetAttribute("val", W) != "0") bold = true;
+        }
+        XmlNode pPr = Child(p, "pPr"), ind = Child(pPr, "ind"), sp = Child(pPr, "spacing");
+        double w = widthPt - (Attr(ind, "left") + Attr(ind, "right") + Attr(ind, "firstLine") / 2) / 20;
+        string text = sb.ToString().Replace('\t', ' ');
+        int lines = text.Trim().Length == 0 ? 1 : Fit.Lines(text, (float)(size * (bold ? 1.07 : 1)), (float)Math.Max(20, w));
+        lines += ((XmlElement)p).GetElementsByTagName("br", W).Count;
+        return lines * size * 1.16 + (Attr(sp, "before") + Attr(sp, "after")) / 20;
+    }
+
+    static double TableHeight(XmlNode tbl, double defPt, double f) {
+        List<List<XmlNode>> rows = new List<List<XmlNode>>();
+        List<XmlNode> trs = new List<XmlNode>();
+        foreach (XmlNode tr in tbl.ChildNodes) if (tr.LocalName == "tr") { trs.Add(tr); rows.Add(Cells(tr)); }
+        double h = 0;
+        for (int r = 0; r < trs.Count; r++) {
+            double row = Attr(Child(Child(trs[r], "trPr"), "trHeight"), "val") / 20;
+            for (int c = 0; c < rows[r].Count; c++) {
+                XmlNode tc = rows[r][c], pr = Child(tc, "tcPr");
+                string vm = VMerge(tc);
+                if (vm == "continue") continue;
+                // слитая по вертикали ячейка - её текст делится на все строки, которые она занимает
+                int span = 1;
+                if (vm == "restart") while (r + span < rows.Count && c < rows[r + span].Count && VMerge(rows[r + span][c]) == "continue") span++;
+                double cw = Attr(Child(pr, "tcW"), "w") / 20 - 6, ch = 0;
+                foreach (XmlNode x in tc.ChildNodes) if (x.LocalName == "p") ch += ParaHeight(x, Math.Max(20, cw), defPt, f);
+                row = Math.Max(row, (ch + 2) / span);
+            }
+            h += row;
+        }
+        return h;
+    }
+
+    // слияние по вертикали: "restart", "continue" или "" (нет)
+    static string VMerge(XmlNode tc) {
+        XmlNode vm = Child(Child(tc, "tcPr"), "vMerge");
+        if (vm == null) return "";
+        return ((XmlElement)vm).GetAttribute("val", W) == "restart" ? "restart" : "continue";
+    }
+
+    // шрифт меньше в f раз: размер у каждого куска текста и у знаков абзацев (пустые строки тоже ниже)
+    static void ScaleFont(XmlDocument doc, XmlNode n, double defPt, double f) {
+        List<XmlNode> runs = new List<XmlNode>(), paras = new List<XmlNode>();
+        foreach (XmlNode r in ((XmlElement)n).GetElementsByTagName("r", W)) runs.Add(r);
+        foreach (XmlNode p in ((XmlElement)n).GetElementsByTagName("p", W)) paras.Add(p);
+        if (n.LocalName == "p") paras.Add(n);
+        foreach (XmlNode r in runs) {
+            XmlNode rPr = Child(r, "rPr");
+            if (rPr == null) { rPr = doc.CreateElement("w", "rPr", W); r.PrependChild(rPr); }
+            XmlNode sz = Child(rPr, "sz");
+            double cur = sz != null ? Attr(sz, "val") : ParaSize(OwnParagraph(r) ?? r, defPt) * 2;
+            SetSize(doc, rPr, (int)Math.Round(cur * f));
+        }
+        foreach (XmlNode p in paras) {
+            XmlNode pPr = Child(p, "pPr");
+            if (pPr == null) { pPr = doc.CreateElement("w", "pPr", W); p.PrependChild(pPr); }
+            XmlNode rPr = Child(pPr, "rPr");
+            if (rPr == null) {
+                rPr = doc.CreateElement("w", "rPr", W);
+                // в pPr знак абзаца (rPr) - перед sectPr и pPrChange, если они есть
+                XmlNode before = Child(pPr, "sectPr") ?? Child(pPr, "pPrChange");
+                pPr.InsertBefore(rPr, before);
+            }
+            XmlNode sz = Child(rPr, "sz");
+            double cur = sz != null ? Attr(sz, "val") : ParaSize(p, defPt) * 2;
+            SetSize(doc, rPr, (int)Math.Round(cur * f));
+        }
+    }
+
+    // размер (полупункты) в rPr - по порядку элементов: ... sz, szCs, highlight, u ...
+    static void SetSize(XmlDocument doc, XmlNode rPr, int size) {
+        foreach (string n in new string[] { "sz", "szCs" }) {
+            XmlElement e = null;
+            foreach (XmlNode c in rPr.ChildNodes) if (c.LocalName == n) e = (XmlElement)c;
+            if (e == null) {
+                e = doc.CreateElement("w", n, W);
+                XmlNode before = null;
+                foreach (XmlNode c in rPr.ChildNodes)
+                    if (before == null && (c.LocalName == "highlight" || c.LocalName == "u" || c.LocalName == "effect" || c.LocalName == "bdr" ||
+                        c.LocalName == "shd" || c.LocalName == "fitText" || c.LocalName == "vertAlign" || c.LocalName == "rtl" ||
+                        c.LocalName == "cs" || c.LocalName == "em" || c.LocalName == "lang" || c.LocalName == "eastAsianLayout" ||
+                        c.LocalName == "specVanish" || c.LocalName == "oMath" || (n == "sz" && c.LocalName == "szCs"))) before = c;
+                rPr.InsertBefore(e, before);
+            }
+            e.SetAttribute("val", W, size.ToString());
+        }
+    }
+
+    static string CopyRow(int width, int height, string cellProps) {
+        return "<w:tr><w:trPr><w:cantSplit/><w:trHeight w:val=\"" + height + "\" w:hRule=\"atLeast\"/></w:trPr><w:tc><w:tcPr><w:tcW w:w=\"" + width +
+            "\" w:type=\"dxa\"/>" + cellProps + "</w:tcPr></w:tc></w:tr>";
+    }
+
+    static int Twips(XmlNode n, string attr, int def) {
+        if (n == null) return def;
+        int v;
+        return int.TryParse(((XmlElement)n).GetAttribute(attr, W), out v) && v > 0 ? v : def;
+    }
+
     static string AllText(XmlNode n) {
         StringBuilder sb = new StringBuilder();
         foreach (XmlNode t in ((XmlElement)n).GetElementsByTagName("t", W)) sb.Append(t.InnerText);
@@ -1219,6 +1471,7 @@ public static class Ui {
 
     // высота элемента в сетке
     public static int HeightOf(Control c, int width) {
+        if (c is Rule) return c.Height;
         if (c is TextBox && ((TextBox)c).Multiline) {
             int lines = c.Tag is int ? (int)c.Tag : 3;
             return lines * c.Font.Height + 10;
@@ -1754,6 +2007,57 @@ public class NavItem : Control {
                 g.DrawLine(p, cx - 1, cy + 4, cx + 6, cy - 4);
             }
         }
+    }
+}
+
+// Жирная чёрная линия-разделитель внутри рамки (группы полей прибора учёта в справке)
+public class Rule : Control {
+    public Rule() {
+        Height = 12;
+        TabStop = false;
+        SetStyle(ControlStyles.Selectable, false);
+        SetStyle(ControlStyles.ResizeRedraw | ControlStyles.SupportsTransparentBackColor, true);
+        BackColor = Color.Transparent;
+    }
+    protected override void OnPaint(PaintEventArgs e) {
+        base.OnPaint(e);
+        using (SolidBrush b = new SolidBrush(Color.Black)) e.Graphics.FillRectangle(b, 0, Height / 2 - 1, Width, 3);
+    }
+}
+
+// Щелчок мимо полей - по пустому месту окна, раздела, рамки, подписи: курсор уходит из поля (жёлтое выделение снимается).
+// Один фильтр на всю программу: смотрит нажатия мыши до того, как их получит окно
+public class UnfocusFilter : IMessageFilter {
+    public bool PreFilterMessage(ref Message m) {
+        if (m.Msg != 0x0201) return false;   // WM_LBUTTONDOWN
+        try { Unfocus(Control.FromHandle(m.HWnd)); } catch { }
+        return false;
+    }
+
+    // c - то, по чему щёлкнули: если это «пустое место», а курсор стоит в поле ввода - убрать его оттуда
+    public static bool Unfocus(Control c) {
+        if (c == null || !(c is Panel || c is Form || c is GroupBox || c is Rule || (c is Label && !(c is LinkLabel)))) return false;
+        Form f = c.FindForm();
+        if (f == null) return false;
+        Control a = f.ActiveControl;
+        while (a is ContainerControl && ((ContainerControl)a).ActiveControl != null) a = ((ContainerControl)a).ActiveControl;
+        if (!(a is TextBoxBase || a is ComboBox || a is DateTimePicker || a is NumericUpDown)) return false;
+        f.ActiveControl = null;
+        // не ушёл - курсор на невидимую служебную кнопку окна (не поле: выделения нет)
+        if (a.Focused || a.ContainsFocus) {
+            Control sink = null;
+            foreach (Control x in f.Controls) if (x.Name == "unfocusSink") sink = x;
+            if (sink == null) {
+                Button b = new Button();
+                b.Name = "unfocusSink";
+                b.TabStop = false;
+                b.SetBounds(-60, -60, 1, 1);
+                f.Controls.Add(b);
+                sink = b;
+            }
+            sink.Focus();
+        }
+        return true;
     }
 }
 
@@ -15247,6 +15551,8 @@ public static class DogovorApp {
         // ошибки - в своё окно с подробностями и в oshibki.txt (до создания окон)
         Crash.Install(here);
         try { Application.EnableVisualStyles(); } catch { }
+        // щелчок мимо полей снимает выделение поля - во всех окнах программы
+        Application.AddMessageFilter(new UnfocusFilter());
         // главное меню: «Создать договор», «Создать справку»
         using (StartMenu m = new StartMenu(here, launch)) Application.Run(m);
         // файлы предпросмотра больше не нужны (открытые в Word удалятся в следующий раз)
@@ -15733,7 +16039,7 @@ public class SpravkaForm : Form {
         c.Grid.Row(F("Данные прибора учёта на (дата справки)", date, 14), F("Инженер по работе с потребителями", C("inzh", false, "Фамилия И.О."), 22),
             F("Начальник ГРП", C("nach", false, "Фамилия И.О."), 22));
 
-        c.Grid.Row(F(null, X("qr", "QR-код на справке (для журнала ответов)"), 34));
+        c.Grid.Row(F(null, X("dve", "Два экземпляра на листе (линия отреза посередине)"), 40), F(null, X("qr", "QR-код на справке (для журнала ответов)"), 34));
 
         // приборы учёта: у каждого свои Ф.И.О., лицевой и адрес; «+» - ещё прибор
         meterCard = c = new Card("Прибор учёта", "Ф.И.О., лицевой, адрес, тип, номер, показания, поверка - у каждого свои", 4);
@@ -15777,14 +16083,18 @@ public class SpravkaForm : Form {
         MeterBlock m = new MeterBlock();
         m.Grid = new Grid(m.Box, 4);
         m.Grid.PadTop = MeterBox.Head + 10;
+        // группы полей разделены жирными чёрными линиями: кто (лицевой, Ф.И.О., телефон) | адрес | тип счётчика | номер, показания, поверка
         m.Grid.Row(MF(m, "ls", "Лицевой счёт (номер в базе)", MT(m, "ls", "9 цифр"), 16), MF(m, "fio", "Фамилия, имя, отчество", MT(m, "fio", "Иванов Иван Иванович"), 0),
             MF(m, "tel", "Телефон", MT(m, "tel", "+375..."), 18));
+        m.Grid.Row(Line());
         m.Grid.Row(MF(m, "np_tip", "Тип н.п.", MC(m, "np_tip"), 7), MF(m, "np", "Населённый пункт / СТ", MC(m, "np"), 0),
             MF(m, "ulica_tip", "Тип улицы", MC(m, "ulica_tip"), 7), MF(m, "ulica", "Улица", MC(m, "ulica"), 0));
         m.Grid.Row(MF(m, "dom", "Дом / участок", MT(m, "dom", null), 8), MF(m, "korp", "Корпус", MT(m, "korp", null), 6), MF(m, "kv", "Квартира", MT(m, "kv", null), 6),
             MF(m, "adres", "Адрес в справке (собирается сам из полей слева и выше, можно поправить)", MT(m, "adres", null), 0));
+        m.Grid.Row(Line());
         m.Grid.Row(MF(m, "model", "Модель", MC(m, "model"), 12), MF(m, "korpus", "Тип корпуса", MC(m, "korpus"), 10), MF(m, "modif", "Модификация", MC(m, "modif"), 22));
         m.Grid.Row(MF(m, "tip", "Тип в справке (собирается сам, можно поправить)", MT(m, "tip", "CE 208 BY S51.145.1.JRQ"), 0));
+        m.Grid.Row(Line());
         m.Grid.Row(MF(m, "zav", "Номер", MT(m, "zav", null), 14), MF(m, "pokaz", "Показания", MT(m, "pokaz", null), 12),
             MF(m, "pov", "Поверка (год-квартал)", MT(m, "pov", "2025-2"), 10));
         m.Pick = new MeterPick(lists, (Combo)m.Ctl["model"], (Combo)m.Ctl["korpus"], (Combo)m.Ctl["modif"], (TextBox)m.Ctl["tip"]);
@@ -15802,12 +16112,14 @@ public class SpravkaForm : Form {
         tip.SetToolTip(m.Same, "Подставить лицевой, адрес и Ф.И.О. (с телефоном) как у предыдущего прибора учёта");
         m.Box.Controls.Add(m.Same);
         m.Box.Resize += delegate {
-            mm.Remove.Location = new Point(mm.Box.Width - mm.Remove.Width - 8, 4);
-            mm.Same.Location = new Point(mm.Remove.Left - mm.Same.Width - 6, 4);
+            mm.Remove.Location = new Point(mm.Box.Width - mm.Remove.Width - 8, 6);
+            mm.Same.Location = new Point(mm.Remove.Left - mm.Same.Width - 6, 6);
         };
         MeterLists(m);
         return m;
     }
+
+    static Cell Line() { return Cell.F(null, new Rule(), 4); }
 
     Cell MF(MeterBlock m, string k, string caption, Control c, int chars) {
         Cell x = Cell.F(caption, c, chars == 0 ? 4 : 1);
@@ -15892,13 +16204,10 @@ public class SpravkaForm : Form {
     // приборы учёта - в раздел заново: заголовки «Прибор учёта 1, 2...», «× убрать» - когда их больше одного, внизу «+»
     void RebuildMeters() {
         meterCard.Grid.Clear();
-        meterCard.Grid.RowGap = 16;
+        meterCard.Grid.RowGap = 12;
         for (int i = 0; i < meters.Count; i++) {
             MeterBlock m = meters[i];
-            m.Box.Title = meters.Count == 1 ? "Прибор учёта" : "Прибор учёта " + (i + 1);
-            // свой цвет у каждого: шапка, рамка, фон - чтобы приборы учёта не сливались
-            m.Box.Mark = MeterBox.Marks[i % MeterBox.Marks.Length];
-            m.Box.BackColor = MeterBox.Tints[i % MeterBox.Tints.Length];
+            m.Box.Number = (i + 1).ToString();
             m.Remove.Visible = meters.Count > 1;
             m.Same.Visible = i > 0;
             m.Box.Invalidate();
@@ -16187,6 +16496,8 @@ public class SpravkaForm : Form {
             meters[0].AutoAdres = "";
             // QR-код - по умолчанию выключен (включили - запоминается)
             SetV("qr", memory.Get("СправкаQR", ""));
+            // два экземпляра на листе (половину отрезают и возвращают) - по умолчанию да
+            SetV("dve", memory.Get("СправкаДвеКопии", "1"));
             SetV("inzh", memory.Get("СправкаИнженер", ""));
             SetV("nach", memory.Get("СправкаНачальник", First(Names())));
             SetV("vlad", "1 владелец");
@@ -16407,6 +16718,7 @@ public class SpravkaForm : Form {
             string f = DocPreview.NewFile(here, name);
             Build(f);
             if (V("qr") == "1") { try { SpravkaQr.AddTo(f, SpravkaJournal.IdFor(here, name)); } catch { } }
+            if (V("dve") == "1") DocxTemplate.TwoCopies(f);
             OldTemplateNote();
             DocPreview.Show(this, f);
             return f;
@@ -16614,6 +16926,8 @@ public class SpravkaForm : Form {
                 id = null;
                 Build(tmp);
             }
+            // два экземпляра на листе с линией отреза посередине
+            if (V("dve") == "1") DocxTemplate.TwoCopies(tmp);
             try {
                 if (File.Exists(docx)) File.Delete(docx);
             } catch (IOException) {
@@ -16639,6 +16953,7 @@ public class SpravkaForm : Form {
             memory.Values["СправкаНачальник"] = V("nach");
             memory.Values["СправкаБезСтрок"] = OffLines();
             memory.Values["СправкаQR"] = V("qr");
+            memory.Values["СправкаДвеКопии"] = V("dve");
             memory.Remember("место справки", V("mesto"));
             for (int i = 1; i <= meters.Count; i++) { memory.Remember("нп", Up(V("pu" + i + "_np"))); memory.Remember("улица", Up(V("pu" + i + "_ulica"))); }
             memory.Save();
@@ -16669,6 +16984,9 @@ public class SpravkaForm : Form {
 
     // перед выходом из программы: несохранённая справка - спросить. true - можно выходить
     public string SavedId { get { return savedId; } }
+
+    // для проверки: поле по ключу
+    public Control Field(string key) { return Find(key); }
 
     // для проверки: прокрутить вниз на px точек
     public void ScrollDown(int px) { content.AutoScrollPosition = new Point(0, -content.AutoScrollPosition.Y + px); }
@@ -16827,20 +17145,16 @@ public static class DocPreview {
     }
 }
 
-// Рамка прибора учёта в справке: цветная шапка - номер («Прибор учёта 2»), лицевой, номер счётчика, адрес; рамка и фон
-// своего цвета у каждого прибора учёта - чтобы они не сливались в одну кучу
+// Рамка прибора учёта в справке: в левом верхнем углу - номер крупной красной цифрой, рядом «Прибор учёта» и подпись
+// (лицевой, номер счётчика, адрес) - видно, какой это; внутри группы полей разделены жирными чёрными линиями
 public class MeterBox : Panel {
-    public string Title = "", Info = "";
-    public Color Mark = Color.FromArgb(52, 110, 190);
-    public const int Head = 36;
-    public static readonly Color[] Marks = { Color.FromArgb(52, 110, 190), Color.FromArgb(196, 126, 24), Color.FromArgb(118, 90, 190),
-        Color.FromArgb(46, 138, 78), Color.FromArgb(184, 68, 94), Color.FromArgb(22, 126, 138) };
-    public static readonly Color[] Tints = { Color.FromArgb(236, 243, 252), Color.FromArgb(253, 245, 229), Color.FromArgb(243, 240, 251),
-        Color.FromArgb(235, 247, 238), Color.FromArgb(252, 238, 241), Color.FromArgb(232, 246, 247) };
-    static readonly Font TitleFont = new Font("Segoe UI", 11.5f, FontStyle.Bold);
+    public string Number = "1", Info = "";
+    public const int Head = 40;
+    static readonly Font NumberFont = new Font("Segoe UI", 20f, FontStyle.Bold), TitleFont = new Font("Segoe UI", 11.5f, FontStyle.Bold);
+    static readonly Color Red = Color.FromArgb(205, 30, 30);
 
     public MeterBox() {
-        BackColor = Tints[0];
+        BackColor = Color.White;
         DoubleBuffered = true;
         SetStyle(ControlStyles.ResizeRedraw, true);
     }
@@ -16848,17 +17162,23 @@ public class MeterBox : Panel {
     protected override void OnPaint(PaintEventArgs e) {
         base.OnPaint(e);
         Graphics g = e.Graphics;
-        using (SolidBrush b = new SolidBrush(Mark)) g.FillRectangle(b, 0, 0, Width, Head);
-        using (Pen p = new Pen(Mark, 3f)) g.DrawRectangle(p, 1, 1, Width - 3, Height - 3);
-        Size ts = TextRenderer.MeasureText(Title, TitleFont);
-        TextRenderer.DrawText(g, Title, TitleFont, new Point(12, (Head - ts.Height) / 2), Color.White);
+        Color mark = St.TintOf("Прибор учёта").Mark;
+        using (Pen p = new Pen(mark, 2f)) {
+            g.DrawRectangle(p, 1, 1, Width - 2, Height - 2);
+            g.DrawLine(p, 1, Head, Width - 2, Head);
+        }
+        Size ns = TextRenderer.MeasureText(Number, NumberFont);
+        TextRenderer.DrawText(g, Number, NumberFont, new Point(8, (Head - ns.Height) / 2 + 1), Red);
+        int x = 8 + ns.Width;
+        Size ts = TextRenderer.MeasureText("Прибор учёта", TitleFont);
+        TextRenderer.DrawText(g, "Прибор учёта", TitleFont, new Point(x, (Head - ts.Height) / 2), St.Text);
+        x += ts.Width + 8;
         if (Info.Length == 0) return;
         // подпись - до кнопок в шапке
         int right = Width - 10;
         foreach (Control c in Controls) if (c.Visible && c.Top < Head) right = Math.Min(right, c.Left - 10);
-        int x = 12 + ts.Width + 10;
         if (right - x < 40) return;
-        TextRenderer.DrawText(g, Info, St.Base, new Rectangle(x, 0, right - x, Head), Color.White,
+        TextRenderer.DrawText(g, Info, St.Base, new Rectangle(x, 0, right - x, Head), St.Hint,
             TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
     }
 }
