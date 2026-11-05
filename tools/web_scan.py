@@ -27,7 +27,7 @@ async def scan(names: list[str], days: int, pages: int, parallel: int, chunk: in
     w = wp.WebPreview(parallel=parallel, max_limited=10 ** 9)
     since = datetime.now(timezone.utc) - timedelta(days=days)
     with_page = 0
-    found: list[tuple[str, int]] = []
+    found: list[tuple[str, int, datetime | None]] = []
     t0 = time.time()
     try:
         for i in range(0, len(names), chunk):
@@ -37,7 +37,7 @@ async def scan(names: list[str], days: int, pages: int, parallel: int, chunk: in
                 if r is not None:
                     with_page += 1
                 if r and u.lower() not in w.blind:  # «слепые» каналы (сайт прячет все посты) не берём
-                    found.append((u, len(r)))
+                    found.append((u, len(r), w.newest.get(u.lower())))
             done = min(i + chunk, len(names))
             print(f"  {done}/{len(names)}: веб-страница у {with_page}, «слепых» {len(w.blind)}, с кандидатами {len(found)}; "
                   f"страниц {w.pages}, 429: {w.limited}, {time.time() - t0:.0f} с", flush=True)
@@ -62,13 +62,22 @@ def main() -> None:
         names = names[:args.limit]
     t0 = time.time()
     with_page, found, w = asyncio.run(scan(names, args.days, args.pages, args.parallel))
-    # сначала каналы с 1–2 кандидатами: обычный организатор проводит 1–2 розыгрыша в месяц,
-    # а десятки «заглушек» — чаще скрытые посты другого рода (репосты историй и т.п.)
-    found.sort(key=lambda x: x[1])
-    Path(args.out).write_text("".join(f"@{u}  # {n}\n" for u, n in found), encoding="utf-8")
+    # Порядок для поиска через API (поиск по имени у Telegram ограничен ~150–200 в сутки):
+    # 1) свежие кандидаты (последний не старше 10 дней) — розыгрыш, скорее всего, ещё идёт;
+    # 2) каналы с 1–3 кандидатами — обычный организатор проводит 1–2 розыгрыша в месяц,
+    #    а десятки «заглушек» — чаще скрытые посты другого рода (репосты историй и т.п.).
+    now = datetime.now(timezone.utc)
+
+    def order(x):
+        _, n, newest = x
+        fresh = newest is not None and now - newest <= timedelta(days=10)
+        return (not fresh, n > 3, n, -(newest.timestamp() if newest else 0))
+    found.sort(key=order)
+    Path(args.out).write_text("".join(
+        f"@{u}  # {n} {d.strftime('%Y-%m-%d') if d else '?'}\n" for u, n, d in found), encoding="utf-8")
     print(f"Итог: имён {len(names)}, веб-страница есть у {with_page}, «слепых» (сайт прячет все посты) {len(w.blind)}, "
           f"с постами-кандидатами за {args.days} дн. — "
-          f"{len(found)} (постов-кандидатов {sum(n for _, n in found)}); страниц {w.pages}, 429: {w.limited}, "
+          f"{len(found)} (постов-кандидатов {sum(x[1] for x in found)}); страниц {w.pages}, 429: {w.limited}, "
           f"ошибок {w.failed}, {(time.time() - t0) / 60:.0f} мин → {args.out}")
 
 

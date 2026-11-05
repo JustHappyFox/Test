@@ -24,6 +24,7 @@ import re
 import sys
 import time
 import urllib.request
+from pathlib import Path
 
 BASE = "https://data.commoncrawl.org/"
 SURT_PREFIX = "me,t)/"
@@ -119,10 +120,15 @@ def main() -> None:
                     help="снимки Common Crawl (список — index.commoncrawl.org/collinfo.json)")
     ap.add_argument("--out", required=True, help="куда записать @username, по одному в строке")
     ap.add_argument("--max-blocks", type=int, default=0, help="взять не больше N блоков (равномерно по всему t.me); 0 — все")
+    ap.add_argument("--merge", action="store_true",
+                    help="добавить к уже собранным именам в --out (снимки почти не пересекаются — ничего не теряем)")
     args = ap.parse_args()
 
     t0 = time.time()
     names: set[str] = set()
+    if args.merge and Path(args.out).is_file():
+        names = {ln.strip().lstrip("@") for ln in Path(args.out).read_text(encoding="utf-8").splitlines() if ln.strip()}
+        print(f"Уже было имён: {len(names)}")
     total = 0
     for crawl in args.crawl:
         try:

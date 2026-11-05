@@ -1,6 +1,6 @@
 name: Обновить большой список каналов (Common Crawl)
 
-# Раз в месяц собирает @username публичных каналов из трёх последних снимков Common Crawl
+# Раз в месяц добавляет @username публичных каналов из последних снимков Common Crawl
 # (общедоступный архив интернета) и кладёт их в state/cc_usernames.txt. Репост проверяет эти каналы
 # по веб-странице t.me/s/… понемногу, по кругу. Аккаунт Telegram здесь не используется.
 on:
@@ -43,7 +43,7 @@ jobs:
             )
           fi
           echo "Снимки: ${CRAWLS:-по умолчанию}"
-          python tools/cc_telegram.py --out state/cc_usernames.txt ${CRAWLS:+--crawl $CRAWLS}
+          python tools/cc_telegram.py --merge --out state/cc_usernames.txt ${CRAWLS:+--crawl $CRAWLS}
           wc -l state/cc_usernames.txt
       - name: Сохранить в репозиторий
         run: |

@@ -81,6 +81,7 @@ class WebPreview:
         self.limited = 0    # ответов 429 (t.me просит сбавить частоту)
         self.failed = 0
         self.blind: set[str] = set()  # каналы, где сайт прячет все посты (имена в нижнем регистре)
+        self.newest: dict[str, datetime] = {}  # дата самого свежего поста-кандидата по каналу
         self.broken = False  # t.me упорно ограничивает — дальше только через API
 
     async def _session(self) -> Any:
@@ -148,7 +149,11 @@ class WebPreview:
         own = [p for p in seen if not p.forwarded]
         if len(own) >= BLIND_MIN_POSTS and sum(p.stub for p in own) >= BLIND_SHARE * len(own):
             self.blind.add(username.lower())  # сайт прячет все посты — по заглушкам розыгрыш не отличить
-        return sorted({p.id for p in seen if p.stub and (p.date is None or p.date >= since)}, reverse=True)
+        hits = [p for p in seen if p.stub and (p.date is None or p.date >= since)]
+        dates = [p.date for p in hits if p.date]
+        if dates:
+            self.newest[username.lower()] = max(dates)
+        return sorted({p.id for p in hits}, reverse=True)
 
     async def close(self) -> None:
         if self.session is not None:

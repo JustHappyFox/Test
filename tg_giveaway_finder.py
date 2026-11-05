@@ -1330,7 +1330,11 @@ async def cmd_post_scheduled(client: TelegramClient, args: argparse.Namespace) -
                     and g.key not in scheduled and g.key not in known and g.key not in bad
                     and g.until_date - want_at >= min_left)
         # смена файла большого списка — начинаем его с начала
-        same_list = st.get("discover_file") == getattr(args, "discover_file", None)
+        list_path = getattr(args, "discover_file", None)
+        list_id = None
+        if list_path and Path(list_path).is_file():
+            list_id = f"{list_path}:{sum(1 for ln in Path(list_path).read_text(encoding='utf-8').splitlines() if ln.strip())}"
+        same_list = list_id is not None and st.get("discover_file") == list_id
         args.discover_offset = int(st.get("discover_offset", 0) or 0) if same_list else 0
         args.seen_stubs = st.get("seen_stubs") or {}
         args.peer_cache = st.get("peer_cache") or {}
@@ -1339,7 +1343,7 @@ async def cmd_post_scheduled(client: TelegramClient, args: argparse.Namespace) -
         # учёт проверенных заглушек: не больше 5000 каналов, по 60 последних постов на канал
         st["seen_stubs"] = {k: sorted(v)[-60:] for k, v in list(finder.seen_stubs.items())[-5000:]}
         if finder.discover_total:
-            st["discover_file"] = args.discover_file
+            st["discover_file"] = list_id
             st["discover_offset"] = (finder.discover_start + finder.discover_consumed) % finder.discover_total
             log.info("Большой список: разобрано %d каналов (с №%d из %d), открыто через API %d, "
                      "активных розыгрышей в них %d; следующий поиск — с №%d",
