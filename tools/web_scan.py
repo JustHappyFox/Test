@@ -36,10 +36,10 @@ async def scan(names: list[str], days: int, pages: int, parallel: int, chunk: in
             for u, r in zip(part, res):
                 if r is not None:
                     with_page += 1
-                if r:
+                if r and u.lower() not in w.blind:  # «слепые» каналы (сайт прячет все посты) не берём
                     found.append((u, len(r)))
             done = min(i + chunk, len(names))
-            print(f"  {done}/{len(names)}: веб-страница у {with_page}, с кандидатами {len(found)}; "
+            print(f"  {done}/{len(names)}: веб-страница у {with_page}, «слепых» {len(w.blind)}, с кандидатами {len(found)}; "
                   f"страниц {w.pages}, 429: {w.limited}, {time.time() - t0:.0f} с", flush=True)
     finally:
         await w.close()
@@ -56,15 +56,16 @@ def main() -> None:
     ap.add_argument("--limit", type=int, default=0, help="проверить только первые N имён (0 — все)")
     args = ap.parse_args()
 
-    names = [ln.strip().lstrip("@") for ln in Path(args.names).read_text(encoding="utf-8").splitlines()]
-    names = [n for n in names if n and not n.startswith("#")]
+    names = [ln.split("#", 1)[0].strip().lstrip("@") for ln in Path(args.names).read_text(encoding="utf-8").splitlines()]
+    names = [n for n in names if n]
     if args.limit:
         names = names[:args.limit]
     t0 = time.time()
     with_page, found, w = asyncio.run(scan(names, args.days, args.pages, args.parallel))
     found.sort(key=lambda x: -x[1])
     Path(args.out).write_text("".join(f"@{u}  # {n}\n" for u, n in found), encoding="utf-8")
-    print(f"Итог: имён {len(names)}, веб-страница есть у {with_page}, с постами-кандидатами за {args.days} дн. — "
+    print(f"Итог: имён {len(names)}, веб-страница есть у {with_page}, «слепых» (сайт прячет все посты) {len(w.blind)}, "
+          f"с постами-кандидатами за {args.days} дн. — "
           f"{len(found)} (постов-кандидатов {sum(n for _, n in found)}); страниц {w.pages}, 429: {w.limited}, "
           f"ошибок {w.failed}, {(time.time() - t0) / 60:.0f} мин → {args.out}")
 

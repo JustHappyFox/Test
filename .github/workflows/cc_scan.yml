@@ -10,6 +10,10 @@ on:
         description: "Проверить только первые N каналов (0 — все)"
         type: string
         default: "0"
+      source:
+        description: "Какой список проверять (state/cc_candidates.txt — перепроверить кандидатов)"
+        type: string
+        default: "state/cc_usernames.txt"
   schedule:
     - cron: "41 4 7 * *"   # 7-го числа, после ежемесячного обновления списка
 
@@ -26,6 +30,7 @@ jobs:
     timeout-minutes: 300
     env:
       LIMIT: ${{ inputs.limit || '0' }}
+      SOURCE: ${{ inputs.source || 'state/cc_usernames.txt' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -33,7 +38,7 @@ jobs:
           python-version: "3.12"
       - run: pip install -q aiohttp
       - name: Проверить каналы по веб-страницам
-        run: python tools/web_scan.py state/cc_usernames.txt --out state/cc_candidates.txt --limit "$LIMIT"
+        run: python tools/web_scan.py "$SOURCE" --out state/cc_candidates.txt --limit "$LIMIT"
       - name: Сохранить в репозиторий
         run: |
           git config user.name "github-actions[bot]"

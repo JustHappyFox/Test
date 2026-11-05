@@ -52,6 +52,23 @@ class ParsePageTests(unittest.TestCase):
         html = "<section>" + photo + video + post_html("okko", 12, stub=True) + "</section>"
         self.assertEqual([p.stub for p in wp.parse_page(html)], [False, False, True])
 
+    def test_blind_channel_detected(self):
+        w = wp.WebPreview()
+        blind = page("hidden", [(i, True, None, 1) for i in range(1, 11)])          # все 10 своих постов — заглушки
+        fwd = "<section>" + "".join(post_html("agg", i, stub=True).replace(
+            'class="tgme_widget_message_bubble">', 'class="tgme_widget_message_bubble"><div class="tgme_widget_message_forwarded_from"></div>')
+            for i in range(1, 11)) + "</section>"                                     # агрегатор: заглушки пересланы
+        normal = page("norm", [(i, i == 5, None if i == 5 else "текст", 1) for i in range(1, 11)])
+        pages = {"https://t.me/s/hidden": blind, "https://t.me/s/agg": fwd, "https://t.me/s/norm": normal}
+
+        async def fetch(url):
+            return pages.get(url.split("?")[0])
+        w.fetch = fetch
+        since = NOW - timedelta(days=31)
+        for name in ("hidden", "agg", "norm"):
+            asyncio.run(w.candidates(name, since, max_pages=1))
+        self.assertEqual(w.blind, {"hidden"})
+
     def test_no_web_feed(self):
         # канал без веб-ленты: t.me/s/… перенаправляет на обычную страницу канала
         self.assertIsNone(wp.parse_page('<html><div class="tgme_page_title">Chan</div></html>'))

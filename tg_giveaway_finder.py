@@ -715,6 +715,8 @@ class GiveawayFinder:
                      self.web_checked, self.web_opened, len(self.queue))
         seen = self.seen_stubs.get(key, set())
         cands = [c for c in cands if c not in seen]  # уже проверенные не-розыгрыши не открываем
+        if web_only and key in getattr(self.web, "blind", ()):
+            cands = []  # канал списка, где сайт прячет все посты: вслепую через API не открываем
         if not cands:
             self.discover_consumed += web_only
             return True
@@ -1268,12 +1270,15 @@ async def cmd_post_scheduled(client: TelegramClient, args: argparse.Namespace) -
             return (bool(filter_giveaways([g], args)) and g.key not in posted
                     and g.key not in scheduled and g.key not in known and g.key not in bad
                     and g.until_date - want_at >= min_left)
-        args.discover_offset = int(st.get("discover_offset", 0) or 0)
+        # смена файла большого списка — начинаем его с начала
+        same_list = st.get("discover_file") == getattr(args, "discover_file", None)
+        args.discover_offset = int(st.get("discover_offset", 0) or 0) if same_list else 0
         args.seen_stubs = st.get("seen_stubs") or {}
         finder = await run_finder(client, args, want=want, want_count=args.reserve)
         # учёт проверенных заглушек: не больше 5000 каналов, по 60 последних постов на канал
         st["seen_stubs"] = {k: sorted(v)[-60:] for k, v in list(finder.seen_stubs.items())[-5000:]}
         if finder.discover_total:
+            st["discover_file"] = args.discover_file
             st["discover_offset"] = (finder.discover_start + finder.discover_consumed) % finder.discover_total
             log.info("Большой список: разобрано %d каналов (с №%d из %d), открыто через API %d, "
                      "активных розыгрышей в них %d; следующий поиск — с №%d",

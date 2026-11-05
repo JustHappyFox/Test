@@ -37,6 +37,13 @@ class WebPost:
     id: int
     date: datetime | None
     stub: bool  # заглушка без текста и без фото/видео — так выглядит модуль-розыгрыш
+    forwarded: bool = False
+
+
+# Бывают каналы, у которых сайт прячет вообще все посты (одни пустые заглушки). По ним веб-проверка
+# ничего не говорит: если среди собственных постов канала таких больше этой доли — канал «слепой».
+BLIND_SHARE = 0.8
+BLIND_MIN_POSTS = 8
 
 
 def parse_page(html: str) -> list[WebPost] | None:
@@ -54,7 +61,8 @@ def parse_page(html: str) -> list[WebPost] | None:
         except ValueError:
             date = None
         stub = STUB_CLASS in block and TEXT_CLASS not in block and not _MEDIA_RE.search(block)
-        posts.append(WebPost(id=int(m.group(2)), date=date, stub=stub))
+        posts.append(WebPost(id=int(m.group(2)), date=date, stub=stub,
+                             forwarded="tgme_widget_message_forwarded_from" in block))
     return posts
 
 
@@ -72,6 +80,7 @@ class WebPreview:
         self.pages = 0      # прочитано страниц
         self.limited = 0    # ответов 429 (t.me просит сбавить частоту)
         self.failed = 0
+        self.blind: set[str] = set()  # каналы, где сайт прячет все посты (имена в нижнем регистре)
         self.broken = False  # t.me упорно ограничивает — дальше только через API
 
     async def _session(self) -> Any:
@@ -117,22 +126,29 @@ class WebPreview:
         """id постов-заглушек не старше since. None — веб-страницы нет, проверять через API."""
         username = username.lstrip("@")
         url = self.BASE + username
-        found: list[int] = []
+        seen: list[WebPost] = []
         for page in range(max_pages):
             html = await self.fetch(url)
             if html is None:
-                return None if page == 0 else found
+                if page == 0:
+                    return None
+                break
             posts = parse_page(html)
             if posts is None:
-                return None if page == 0 else found
+                if page == 0:
+                    return None
+                break
             if not posts:
                 break
-            found += [p.id for p in posts if p.stub and (p.date is None or p.date >= since)]
+            seen += posts
             oldest = min(posts, key=lambda p: p.id)
             if (oldest.date and oldest.date < since) or oldest.id <= 1:
                 break
             url = f"{self.BASE}{username}?before={oldest.id}"
-        return sorted(set(found), reverse=True)
+        own = [p for p in seen if not p.forwarded]
+        if len(own) >= BLIND_MIN_POSTS and sum(p.stub for p in own) >= BLIND_SHARE * len(own):
+            self.blind.add(username.lower())  # сайт прячет все посты — по заглушкам розыгрыш не отличить
+        return sorted({p.id for p in seen if p.stub and (p.date is None or p.date >= since)}, reverse=True)
 
     async def close(self) -> None:
         if self.session is not None:
