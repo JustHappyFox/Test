@@ -768,3 +768,40 @@ class ReserveTests(unittest.TestCase):
             st = gf.load_state(path)
         self.assertEqual(sent, [12])                                   # опубликован тот, что кончится раньше
         self.assertEqual([e["msg_id"] for e in st["queue"]], [13, 11])  # остальные — в запасе, по сроку
+
+
+class OrganizerHistoryTests(unittest.TestCase):
+    def test_finds_relaunched_giveaway_via_old_aggregator_post(self):
+        agg, org = channel(1, "agg"), channel(50, "organizer")
+        old = giveaway_media([50], months=3, quantity=5, days_left=-60)        # закончился 2 месяца назад
+        fwd = types.MessageFwdHeader(date=NOW, from_id=types.PeerChannel(50), channel_post=3)
+        new = giveaway_media([50], stars=7000, quantity=10, days_left=4)       # организатор запустил новый
+        history = {1: [message(1, 900, old, fwd_from=fwd, age_days=70)],      # старше 31 дня
+                   50: [message(50, 40, new, age_days=1)]}
+        client = FakeClient([agg, org], history)
+        a = gf.apply_preset(gf.build_parser().parse_args(
+            ["scan", "--no-discover", "--no-aggregators", "-c", "@agg", "--source-limit", "500",
+             "--min-stars", "5000", "--min-premium", "3"]))
+        f = gf.GiveawayFinder(client, a)
+
+        async def run():
+            await f.add_seeds()
+            await f.crawl()
+        asyncio.run(run())
+        self.assertEqual(client.scanned, [1, 50])                 # организатор старого розыгрыша проверен
+        gs = gf.filter_giveaways(f.giveaways.values(), a)
+        self.assertEqual([(g.stars, g.quantity) for g in gs], [(7000, 10)])
+
+    def test_without_source_limit_old_posts_are_ignored(self):
+        agg, org = channel(1, "agg"), channel(50, "organizer")
+        old = giveaway_media([50], months=3, quantity=5, days_left=-60)
+        history = {1: [message(1, 900, old, age_days=70)], 50: []}
+        client = FakeClient([agg, org], history)
+        a = gf.apply_preset(gf.build_parser().parse_args(["scan", "--no-discover", "--no-aggregators", "-c", "@agg"]))
+        f = gf.GiveawayFinder(client, a)
+
+        async def run():
+            await f.add_seeds()
+            await f.crawl()
+        asyncio.run(run())
+        self.assertEqual(client.scanned, [1])                     # старше 31 дня — не смотрим

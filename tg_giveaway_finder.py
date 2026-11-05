@@ -443,14 +443,25 @@ class GiveawayFinder:
 
     def handle_message(self, msg: types.Message, chat_id: int, depth: int) -> Giveaway | None:
         media = getattr(msg, "media", None)
+        if isinstance(media, types.MessageMediaGiveawayResults):
+            # итоги розыгрыша: сам розыгрыш кончился, но его организатор мог запустить новый
+            if depth < self.args.depth:
+                self.enqueue(media.channel_id, depth + 1)
+            return None
         if not isinstance(media, types.MessageMediaGiveaway):
             return None
-        if not media.until_date or media.until_date <= self.now:
-            return None  # уже завершён
 
         fwd = getattr(msg, "fwd_from", None)
         is_forward = bool(fwd and isinstance(fwd.from_id, types.PeerChannel) and fwd.channel_post)
         origin = (fwd.from_id.channel_id, fwd.channel_post) if is_forward else (chat_id, msg.id)
+
+        if not media.until_date or media.until_date <= self.now:
+            # завершённый розыгрыш сам не берём, но каналы его организаторов проверяем:
+            # кто-то мог запустить новый и не скинуть его в агрегатор
+            if depth < self.args.depth:
+                for cid in [*(media.channels or []), origin[0]]:
+                    self.enqueue(cid, depth + 1)
+            return None
 
         key = giveaway_key(media)
         g = self.giveaways.get(key)
@@ -486,12 +497,16 @@ class GiveawayFinder:
         return g
 
     async def scan_channel(self, ent: Any, depth: int) -> None:
-        cutoff = self.now - timedelta(days=self.args.days)
+        # Стартовые каналы (агрегаторы, свой список) читаем глубже — последние --source-limit записей
+        # без ограничения по дате: оттуда берём организаторов и старых розыгрышей.
+        deep = depth == 0 and getattr(self.args, "source_limit", 0)
+        limit = self.args.source_limit if deep else self.args.per_channel_limit
+        cutoff = None if deep else self.now - timedelta(days=self.args.days)
         cid = utils.get_peer_id(ent, add_mark=False)
         # wait_time — пауза между страницами истории (по 100 сообщений) одного канала
-        async for msg in self.client.iter_messages(ent, limit=self.args.per_channel_limit,
+        async for msg in self.client.iter_messages(ent, limit=limit,
                                                    wait_time=rand_pause(self.args.page_delay) or None):
-            if msg.date and msg.date < cutoff:
+            if cutoff and msg.date and msg.date < cutoff:
                 break
             fwd = getattr(msg, "forward", None)
             if fwd is not None and isinstance(getattr(fwd, "chat", None), types.Channel):
@@ -1163,6 +1178,9 @@ def add_scan_args(s: argparse.ArgumentParser) -> None:
     lim.add_argument("--max-channels", type=int, help="максимум каналов за запуск (2000)")
     lim.add_argument("--days", type=int, default=31, help="насколько старые посты смотреть, дней (31)")
     lim.add_argument("--per-channel-limit", type=int, help="макс. сообщений на канал (400)")
+    lim.add_argument("--source-limit", type=int, default=0, metavar="N",
+                     help="стартовые каналы (агрегаторы, свой список) читать на N последних записей "
+                          "без ограничения по дате — чтобы найти организаторов и старых розыгрышей")
     lim.add_argument("--batch-size", type=int, help="размер пачки каналов для --batch-pause (500)")
     lim.add_argument("--batch-pause", type=float,
                      help="пауза в секундах после каждой пачки каналов (0; --careful: 30)")
