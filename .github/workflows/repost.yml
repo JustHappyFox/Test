@@ -84,7 +84,7 @@ jobs:
           --count 1 --min-hours-left 3 --min-interval-hours 3.5 --manual-gap-hours 5 --schedule-ahead 0 --reserve 10
           --careful --max-channels 1000 --search-pages 2 --source-limit 100
           --web --web-max 6000 --time-limit 30
-          --discover-file state/cc_candidates.txt --web-open-max 40
+          --discover-file state/cc_candidates.txt --web-open-max 40 --no-discover
           --state .state/posted.json ${{ inputs.refill && '--refill' || '' }} ${{ inputs.post_now && format('--post-now {0}', inputs.post_now) || '' }}
 
       - name: Сохранить состояние
