@@ -342,6 +342,8 @@ class GiveawayFinder:
         # Хранятся в учёте между запусками, чтобы не открывать одно и то же через API каждый поиск.
         self.seen_stubs: dict[str, set[int]] = {
             k: set(v) for k, v in (getattr(args, "seen_stubs", None) or {}).items()}
+        # Каналы, которые уже находили: {@username: [id, access_hash]} — без повторного поиска по имени
+        self.peer_cache: dict[str, list[int]] = dict(getattr(args, "peer_cache", None) or {})
 
     @property
     def found_enough(self) -> bool:
@@ -380,9 +382,19 @@ class GiveawayFinder:
             self.queued_ids.add(cid)
         (self.queue.appendleft if front else self.queue.append)((item, depth))
 
+    def remember_peer(self, ent: Any) -> None:
+        """Запомнить канал (id и access_hash) по @username, чтобы в следующих запусках не искать его по имени."""
+        u = active_username(ent)
+        if u and isinstance(ent, types.Channel) and ent.access_hash and not getattr(ent, "min", False):
+            self.peer_cache[u.lower()] = [ent.id, ent.access_hash]
+
     async def resolve(self, item: Any) -> Any | None:
         if isinstance(item, int) and item in self.entities:
             return self.entities[item]
+        if isinstance(item, str):
+            cached = self.peer_cache.get((self.username_of(item) or "").lower())
+            if cached:  # канал уже находили раньше — поиск по имени (строго ограничен) не нужен
+                return types.InputPeerChannel(int(cached[0]), int(cached[1]))
         try:
             if isinstance(item, (int, str)):
                 ent = await self.client.get_entity(types.PeerChannel(item) if isinstance(item, int) else str(item))
@@ -390,6 +402,7 @@ class GiveawayFinder:
                     log.warning("%s — не канал/супергруппа, пропускаю", item)
                     return None
                 self.refs[ent.id] = to_ref(ent)
+                self.remember_peer(ent)
                 return ent
             return item
         except (ValueError, TypeError, errors.RPCError) as e:
@@ -467,6 +480,7 @@ class GiveawayFinder:
             chats = {c.id: c for c in getattr(res, "chats", []) if isinstance(c, types.Channel)}
             for ch in chats.values():
                 self.refs.setdefault(ch.id, to_ref(ch))
+                self.remember_peer(ch)
             msgs = [m for m in getattr(res, "messages", []) if isinstance(m, types.Message)]
             for m in msgs:
                 cid = utils.get_peer_id(m.peer_id, add_mark=False)
@@ -663,6 +677,7 @@ class GiveawayFinder:
             if isinstance(ch, types.Channel):
                 self.refs[ch.id] = to_ref(ch)
                 self.entities[ch.id] = ch
+                self.remember_peer(ch)
         await self.pause()
 
     def prefetch(self) -> None:
@@ -722,13 +737,14 @@ class GiveawayFinder:
             return True
         if web_only:
             limit = getattr(self.args, "web_open_max", None) or 80
-            if self.discover_opened >= limit:
+            known = key in self.peer_cache  # уже находили — поиск по имени не нужен и лимит не тратит
+            if not known and self.discover_opened >= limit:
                 self.discover_paused = True
                 self.web_seen.discard(key)  # этот и следующие каналы списка — в следующий поиск
-                log.info("Большой список: через API открыто %d каналов — это предел на один поиск "
+                log.info("Большой список: %d новых каналов найдено по имени — это предел на один поиск "
                          "(поиск по @username у Telegram строго ограничен), остальные в следующий раз", limit)
                 return True
-            self.discover_opened += 1
+            self.discover_opened += not known
             self.discover_consumed += 1
         ent = await self.resolve(item)
         if ent is None:
@@ -745,6 +761,7 @@ class GiveawayFinder:
             raise
         except (errors.RPCError, ValueError) as e:
             log.debug("  пропуск: %s", e)
+            self.peer_cache.pop(key, None)  # запомненный канал мог смениться — в следующий раз найдём заново
             return True
         giveaway_media = (types.MessageMediaGiveaway, types.MessageMediaGiveawayResults)
         got = {getattr(m, "id", None): m for m in (msgs or []) if m is not None}
@@ -798,6 +815,8 @@ class GiveawayFinder:
                     raise
                 except (errors.RPCError, ValueError) as e:
                     log.debug("  пропуск: %s", e)
+                    if isinstance(item, str):
+                        self.peer_cache.pop((self.username_of(item) or "").lower(), None)
                 await self.pause()
                 batch_size = getattr(self.args, "batch_size", 0)
                 batch_pause = getattr(self.args, "batch_pause", 0)
@@ -1274,7 +1293,9 @@ async def cmd_post_scheduled(client: TelegramClient, args: argparse.Namespace) -
         same_list = st.get("discover_file") == getattr(args, "discover_file", None)
         args.discover_offset = int(st.get("discover_offset", 0) or 0) if same_list else 0
         args.seen_stubs = st.get("seen_stubs") or {}
+        args.peer_cache = st.get("peer_cache") or {}
         finder = await run_finder(client, args, want=want, want_count=args.reserve)
+        st["peer_cache"] = dict(list(finder.peer_cache.items())[-30000:])
         # учёт проверенных заглушек: не больше 5000 каналов, по 60 последних постов на канал
         st["seen_stubs"] = {k: sorted(v)[-60:] for k, v in list(finder.seen_stubs.items())[-5000:]}
         if finder.discover_total:

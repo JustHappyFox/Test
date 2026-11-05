@@ -165,8 +165,9 @@ class WebClient(FakeClient):
         self.batches = []
 
     async def get_messages(self, ent, ids=None, **kw):
-        self.opened.append((ent.id, list(ids)))
-        by_id = {m.id: m for m in self.history.get(ent.id, [])}
+        cid = getattr(ent, "id", None) or ent.channel_id  # Channel или запомненный InputPeerChannel
+        self.opened.append((cid, list(ids)))
+        by_id = {m.id: m for m in self.history.get(cid, [])}
         return [by_id.get(i) for i in ids]
 
     async def __call__(self, req):
@@ -287,6 +288,40 @@ class WebCrawlTests(unittest.TestCase):
         f2.enqueue(host, 1)
         asyncio.run(f2.crawl())
         self.assertEqual(client2.opened, [(61, [9])])
+
+    def test_found_channels_are_remembered(self):
+        import tempfile
+        chan = channel(70, "promochan")
+        g = giveaway_media([70], stars=500, quantity=5)
+        history = {70: [message(70, 4, g)]}
+
+        class CountingClient(WebClient):
+            by_name = 0
+
+            async def get_entity(self, x):
+                if isinstance(x, str):
+                    CountingClient.by_name += 1
+                return await super().get_entity(x)
+
+        with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False, encoding="utf-8") as f:
+            f.write("@promochan\n")
+        client = CountingClient([chan], history)
+        f1 = gf.GiveawayFinder(client, args(discover_file=f.name, web_open_max=5))
+        f1.web = FakeWeb({"promochan": [4]})
+        asyncio.run(self._seed_and_crawl(f1))
+        self.assertEqual(CountingClient.by_name, 1)
+        self.assertEqual(f1.peer_cache, {"promochan": [70, 70 * 7]})
+        self.assertEqual(f1.discover_opened, 1)
+
+        # следующий запуск: канал уже знаком — по имени не ищем, лимит не тратим
+        f2 = gf.GiveawayFinder(client, args(discover_file=f.name, web_open_max=5, peer_cache=f1.peer_cache))
+        f2.web = FakeWeb({"promochan": [4]})
+        asyncio.run(self._seed_and_crawl(f2))
+        self.assertEqual(CountingClient.by_name, 1)
+        self.assertEqual(f2.discover_opened, 0)
+        self.assertEqual(client.opened, [(70, [4]), (70, [4])])
+        self.assertEqual(len(f2.giveaways), 1)
+        Path(f.name).unlink()
 
     def test_seen_channel_not_checked_twice(self):
         host = channel(20, "host")

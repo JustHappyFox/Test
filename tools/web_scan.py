@@ -62,7 +62,9 @@ def main() -> None:
         names = names[:args.limit]
     t0 = time.time()
     with_page, found, w = asyncio.run(scan(names, args.days, args.pages, args.parallel))
-    found.sort(key=lambda x: -x[1])
+    # сначала каналы с 1–2 кандидатами: обычный организатор проводит 1–2 розыгрыша в месяц,
+    # а десятки «заглушек» — чаще скрытые посты другого рода (репосты историй и т.п.)
+    found.sort(key=lambda x: x[1])
     Path(args.out).write_text("".join(f"@{u}  # {n}\n" for u, n in found), encoding="utf-8")
     print(f"Итог: имён {len(names)}, веб-страница есть у {with_page}, «слепых» (сайт прячет все посты) {len(w.blind)}, "
           f"с постами-кандидатами за {args.days} дн. — "
