@@ -1152,8 +1152,12 @@ public class Lists {
 "# номиналы автоматов\r\n" +
 "6\r\n10\r\n16\r\n20\r\n25\r\n32\r\n40\r\n50\r\n63\r\n80\r\n100\r\n120\r\n" +
 "\r\n" +
+"[Справка: инженер]\r\n" +
+"# справка: инженер по работе с потребителями (подпись внизу справки)\r\n" +
+"Степанович А.С.\r\n" +
+"\r\n" +
 "[Справка: заключение]\r\n" +
-"# справка (данные прибора учёта): текст жирным после таблицы\r\n" +
+"# справка (данные прибора учёта): строка после таблицы\r\n" +
 "СИСТЕМА УЧЁТА ПРОВЕРЕНА, ПУ на балансе абонента, ТРЕБУЕТСЯ ОТКРЫТЬ ДАННЫЙ Л/С ПО ЗАЯВЛЕНИЮ ПОТРЕБИТЕЛЯ.\r\n" +
 "\r\n" +
 "[Справка: где установлен прибор учёта]\r\n" +
@@ -15873,7 +15877,7 @@ public class SpravkaForm : Form {
     // строки под таблицей, которые можно отключить галочкой: галочка -> поля этой строки
     static readonly string[][] LineKeys = {
         new string[] { "on_egrni", "svid", "vlad" }, new string[] { "on_mesto", "mesto", "prinadl" }, new string[] { "on_zakl", "zakl" },
-        new string[] { "on_gruppa", "gruppa" }, new string[] { "on_reg", "reg" } };
+        new string[] { "on_gruppa", "gruppa" }, new string[] { "on_reg", "reg" }, new string[] { "on_plomby" } };
 
     public bool Unsaved { get { return dirty; } }
 
@@ -16052,7 +16056,7 @@ public class SpravkaForm : Form {
         RebuildMeters();
 
         // пломбы - не в текст справки, а в «Мои отчёты пломб» (как пломбы договора)
-        c = new Card("Пломбы", "для «Мои отчёты пломб» - в справку не печатаются", 4);
+        c = new Card("Пломбы", "в справку (строка «Пломбы: …») и в «Мои отчёты пломб»", 4);
         cards.Add(c);
         Seals other = new Seals();
         Reg("plomba_drugoe", other);
@@ -16065,9 +16069,12 @@ public class SpravkaForm : Form {
         const int box = 25;
         c.Grid.Row(F(null, X("on_egrni", "«Согласно данным ЕГРНИ…»"), box), F("Свидетельство (ЕГРНИ) №", T("svid", "например 600/D-123456"), 20),
             F("Владельцев", C("vlad", false, null), 14));
-        c.Grid.Row(F(null, X("on_zakl", "Заключение (жирным)"), box), F("Заключение", C("zakl", true, null), 0));
+        c.Grid.Row(F(null, X("on_zakl", "Заключение"), box), F("Заключение", C("zakl", true, null), 0));
         c.Grid.Row(F(null, X("on_mesto", "«Прибор учета установлен…»"), box), F("где установлен", C("mesto", false, "в тамбуре"), 26),
             F("чьей собственности", C("prinadl", false, "собственности абонента"), 0));
+        Label pl = Ui.Caption("номера - в разделе «Пломбы» выше (ВА, КК, другие); нет пломб - строки нет");
+        pl.TextAlign = ContentAlignment.MiddleLeft;
+        c.Grid.Row(F(null, X("on_plomby", "«Пломбы: …»"), box), F(null, pl, 0));
         c.Grid.Row(F(null, X("on_gruppa", "Тарифная группа"), box), F("Тарифная группа", C("gruppa", true, null), 0));
         c.Grid.Row(F(null, X("on_reg", "«Регистрация …»"), box), F("Регистрация", T("reg", "пусто - линия, вписать от руки"), 0));
         TextBox own = Ui.Text(3);
@@ -16273,7 +16280,7 @@ public class SpravkaForm : Form {
         bool was = loading;
         loading = true;
         try {
-            Items("inzh", lists.Get("Оформил"));
+            Items("inzh", Engineers());
             List<string> names = new List<string>();
             foreach (string[] s in lists.Signers()) names.Add(s[0]);
             Items("nach", names);
@@ -16498,7 +16505,9 @@ public class SpravkaForm : Form {
             SetV("qr", memory.Get("СправкаQR", ""));
             // два экземпляра на листе (половину отрезают и возвращают) - по умолчанию да
             SetV("dve", memory.Get("СправкаДвеКопии", "1"));
-            SetV("inzh", memory.Get("СправкаИнженер", ""));
+            // инженер - из своего списка справочника (сейчас один - Степанович А.С.); запомненный - если он в списке
+            string eng = memory.Get("СправкаИнженер", "");
+            SetV("inzh", Engineers().Contains(eng) ? eng : First(Engineers()));
             SetV("nach", memory.Get("СправкаНачальник", First(Names())));
             SetV("vlad", "1 владелец");
             SetV("prinadl", First(lists.Get("Справка: чья собственность")));
@@ -16513,6 +16522,12 @@ public class SpravkaForm : Form {
         head.Text = "Новая справка";
         headSub.Text = "Данные прибора учёта для открытия лицевого счёта - заполните или возьмите из договора";
         RefreshState();
+    }
+
+    // инженеры справки: раздел [Справка: инженер]; пустой - как «Оформил» в договоре
+    List<string> Engineers() {
+        List<string> l = lists.Get("Справка: инженер");
+        return l.Count > 0 ? l : lists.Get("Оформил");
     }
 
     List<string> Names() {
@@ -16579,7 +16594,6 @@ public class SpravkaForm : Form {
             string own = Get(d, "pu1_prinadl");
             if (own.Length > 0) SetV("prinadl", own == "Потребитель" ? "собственности абонента" : "собственности " + own);
             if (Get(d, "pu1_gruppa").Length > 0) SetV("gruppa", Get(d, "pu1_gruppa"));
-            if (Get(d, "oformil").Length > 0) SetV("inzh", Get(d, "oformil"));
             if (Get(d, "podp").Length > 0) SetV("nach", Get(d, "podp"));
             savedFile = null;
             savedId = null;
@@ -16730,11 +16744,15 @@ public class SpravkaForm : Form {
 
     // свой текст вписан, а в шаблоне (старом) для него места нет
     void OldTemplateNote() {
-        if (V("svoy").Length == 0) return;
+        bool own = V("svoy").Length > 0, seals = V("on_plomby") == "1" && SealsText().Length > 0;
+        if (!own && !seals) return;
         List<string> f;
         try { f = DocxTemplate.Fields(templateFile); } catch { return; }
-        if (f.Contains("ТЕКСТ") && f.Contains("ТЕКСТЖ")) return;
-        MessageBox.Show(this, "Шаблон spravka.docx старый: в нём нет места для своего текста, и в справку он не попадёт.\n\n" +
+        List<string> lost = new List<string>();
+        if (own && !(f.Contains("ТЕКСТ") && f.Contains("ТЕКСТЖ"))) lost.Add("своего текста");
+        if (seals && !f.Contains("ПЛОМБЫ")) lost.Add("пломб");
+        if (lost.Count == 0) return;
+        MessageBox.Show(this, "Шаблон spravka.docx старый: в нём нет места для " + string.Join(" и ", lost.ToArray()) + ", и в справку они не попадут.\n\n" +
             "Положите рядом с программой spravka.docx из нового архива.", Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
     }
 
@@ -16753,7 +16771,9 @@ public class SpravkaForm : Form {
         string z = V("zakl");
         v["ЗАКЛЮЧЕНИЕ"] = z.Length > 0 ? z : DocxTemplate.Drop;
         string g = V("gruppa");
-        v["ГРУППА"] = g.Length > 0 && !g.EndsWith(".") ? g + "." : g;
+        v["ГРУППА"] = g.Length == 0 ? DocxTemplate.Drop : !g.EndsWith(".") ? g + "." : g;
+        string pl = SealsText();
+        v["ПЛОМБЫ"] = pl.Length > 0 ? pl : DocxTemplate.Drop;
         v["РЕГИСТРАЦИЯ"] = V("reg").Length > 0 ? V("reg") : line;
         v["ИНЖЕНЕР"] = V("inzh");
         v["НАЧАЛЬНИК"] = V("nach");
@@ -16763,11 +16783,28 @@ public class SpravkaForm : Form {
         if (V("on_zakl") != "1") v["ЗАКЛЮЧЕНИЕ"] = DocxTemplate.Drop;
         if (V("on_gruppa") != "1") v["ГРУППА"] = DocxTemplate.Drop;
         if (V("on_reg") != "1") v["РЕГИСТРАЦИЯ"] = DocxTemplate.Drop;
+        if (V("on_plomby") != "1") v["ПЛОМБЫ"] = DocxTemplate.Drop;
         // свой текст - перед «Регистрация», каждая строка - абзац; жирным или обычным
         bool bold = V("svoy_b") == "1";
         v["ТЕКСТ"] = bold ? "" : V("svoy");
         v["ТЕКСТЖ"] = bold ? V("svoy") : "";
         return v;
+    }
+
+    // пломбы для строки справки: «ВА № 45678801; КК № 45678802; ДСТП № 45678803»
+    public string SealsText() {
+        List<string> parts = new List<string>();
+        foreach (string[] pk in new string[][] { new string[] { "ВА", "plomba_vvod" }, new string[] { "КК", "plomba_klemm" } }) {
+            List<string> n = SealRegistry.Numbers(V(pk[1]));
+            if (n.Count > 0) parts.Add(pk[0] + " № " + string.Join(", ", n.ToArray()));
+            else if (V(pk[1]).Length > 0) parts.Add(pk[0] + " " + V(pk[1]));
+        }
+        foreach (string[] sl in Seals.Parse(V("plomba_drugoe"))) {
+            string place = sl[0].Length > 0 ? sl[0] + " " : "";
+            List<string> n = SealRegistry.Numbers(sl[1]);
+            parts.Add((place + (n.Count > 0 ? "№ " + string.Join(", ", n.ToArray()) : sl[1])).Trim());
+        }
+        return string.Join("; ", parts.ToArray());
     }
 
     // строки таблицы справки: по прибору учёта
