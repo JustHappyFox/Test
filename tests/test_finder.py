@@ -66,9 +66,10 @@ class FakeClient:
         return await self.get_entity(x)
 
     async def iter_messages(self, ent, limit=None, wait_time=None):
-        self.scanned.append(ent.id)
+        cid = getattr(ent, "id", None) or ent.channel_id  # Channel или запомненный InputPeerChannel
+        self.scanned.append(cid)
         self.wait_times.append(wait_time)
-        for m in self.history.get(ent.id, [])[:limit]:
+        for m in self.history.get(cid, [])[:limit]:
             yield m
 
 

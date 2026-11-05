@@ -344,6 +344,7 @@ class GiveawayFinder:
             k: set(v) for k, v in (getattr(args, "seen_stubs", None) or {}).items()}
         # Каналы, которые уже находили: {@username: [id, access_hash]} — без повторного поиска по имени
         self.peer_cache: dict[str, list[int]] = dict(getattr(args, "peer_cache", None) or {})
+        self.names_blocked = False  # Telegram временно запретил поиск по имени (FloodWait на ResolveUsername)
 
     @property
     def found_enough(self) -> bool:
@@ -395,6 +396,8 @@ class GiveawayFinder:
             cached = self.peer_cache.get((self.username_of(item) or "").lower())
             if cached:  # канал уже находили раньше — поиск по имени (строго ограничен) не нужен
                 return types.InputPeerChannel(int(cached[0]), int(cached[1]))
+            if self.names_blocked:
+                return None  # Telegram временно ограничил поиск по имени — не дёргаем его
         try:
             if isinstance(item, (int, str)):
                 ent = await self.client.get_entity(types.PeerChannel(item) if isinstance(item, int) else str(item))
@@ -405,6 +408,13 @@ class GiveawayFinder:
                 self.remember_peer(ent)
                 return ent
             return item
+        except errors.FloodWaitError as e:
+            if isinstance(item, str):
+                self.names_blocked = True
+                log.warning("Telegram ограничил поиск каналов по имени на %d мин — в этом запуске "
+                            "проверяю только уже знакомые каналы", e.seconds // 60)
+                return None
+            raise
         except (ValueError, TypeError, errors.RPCError) as e:
             log.debug("Не удалось получить %r: %s", item, e)
             return None
@@ -698,8 +708,13 @@ class GiveawayFinder:
         """Проверить канал по веб-странице. True — проверен, целиком через API читать не нужно.
         Каналы большого списка (WebOnly) через API целиком не читаются никогда."""
         web_only = isinstance(item, WebOnly)
-        if web_only and (self.discover_paused or self.web is None or self.web.broken):
+        if web_only and (self.web is None or self.web.broken):
             return True  # оставляем на следующий поиск
+        count = web_only  # засчитать ли канал списка как разобранный (место остановки — по ним)
+        if web_only and self.discover_paused:
+            if (self.username_of(item) or "").lower() not in self.peer_cache:
+                return True  # незнакомые каналы — в следующий поиск
+            count = False  # знакомый проверим (поиск по имени не нужен), но в разобранные не засчитываем
         if self.web is None or self.web.broken or depth == 0:
             return False  # стартовые каналы читаем глубоко через API
         cid = self.cid_of(item)
@@ -709,18 +724,18 @@ class GiveawayFinder:
             await self.batch_refs(item)
         uname = self.username_of(item)
         if not uname:
-            self.discover_consumed += web_only
+            self.discover_consumed += count
             return web_only
         key = uname.lower()
         if key in self.web_seen:
-            self.discover_consumed += web_only
+            self.discover_consumed += count
             return True
         self.web_seen.add(key)  # второй раз этот канал не проверяем никаким способом
         task = self.web_tasks.pop(key, None) or self.web_check(uname)
         self.prefetch()
         cands = await task
         if cands is None:
-            self.discover_consumed += web_only
+            self.discover_consumed += count
             return web_only  # веб-страницы нет: обычный канал проверим через API, из списка — пропустим
         self.web_checked += 1
         if cid is not None:
@@ -733,19 +748,19 @@ class GiveawayFinder:
         if web_only and key in getattr(self.web, "blind", ()):
             cands = []  # канал списка, где сайт прячет все посты: вслепую через API не открываем
         if not cands:
-            self.discover_consumed += web_only
+            self.discover_consumed += count
             return True
         if web_only:
             limit = getattr(self.args, "web_open_max", None) or 80
             known = key in self.peer_cache  # уже находили — поиск по имени не нужен и лимит не тратит
-            if not known and self.discover_opened >= limit:
+            if not known and (self.discover_opened >= limit or self.names_blocked):
                 self.discover_paused = True
                 self.web_seen.discard(key)  # этот и следующие каналы списка — в следующий поиск
                 log.info("Большой список: %d новых каналов найдено по имени — это предел на один поиск "
                          "(поиск по @username у Telegram строго ограничен), остальные в следующий раз", limit)
                 return True
             self.discover_opened += not known
-            self.discover_consumed += 1
+            self.discover_consumed += count
         ent = await self.resolve(item)
         if ent is None:
             return True
@@ -1188,6 +1203,31 @@ async def queue_entry(client: TelegramClient, g: Giveaway, finder: "GiveawayFind
             "link": message_link(ref, cid, mid)}
 
 
+async def get_target(client: TelegramClient, args: argparse.Namespace, st: dict[str, Any]) -> Any:
+    """Наш канал: из учёта (без запросов), иначе по имени, а если поиск по имени временно ограничен
+    Telegram — из списка чатов аккаунта (он админ канала). Поиск по имени у Telegram строго лимитирован."""
+    want = str(args.to or "").lstrip("@").lower()
+    cached = st.get("target_peer") or {}
+    if cached.get("username") == want and cached.get("id") and cached.get("hash"):
+        return types.InputPeerChannel(int(cached["id"]), int(cached["hash"]))
+    try:
+        ent = await client.get_entity(args.to)
+    except errors.FloodWaitError as e:
+        log.warning("Поиск по имени ограничен Telegram ещё на %d мин — беру @%s из списка чатов",
+                    e.seconds // 60, want)
+        ent = None
+        async for d in client.iter_dialogs():
+            u = active_username(d.entity)
+            if isinstance(d.entity, types.Channel) and u and u.lower() == want:
+                ent = d.entity
+                break
+        if ent is None:
+            raise
+    if isinstance(ent, types.Channel) and ent.access_hash:
+        st["target_peer"] = {"username": want, "id": ent.id, "hash": ent.access_hash}
+    return ent
+
+
 async def cmd_post_scheduled(client: TelegramClient, args: argparse.Namespace) -> None:
     """Режим отложенных постов: в канале всегда стоят --schedule-ahead запланированных постов бота
     с шагом --min-interval-hours. Публикует их сам Telegram точно по времени, поэтому пропущенные
@@ -1200,7 +1240,7 @@ async def cmd_post_scheduled(client: TelegramClient, args: argparse.Namespace) -
     gap = timedelta(hours=args.manual_gap_hours or 0)
     min_left = timedelta(hours=args.min_hours_left)
 
-    target = await client.get_entity(args.to)
+    target = await get_target(client, args, st)
     manual, in_channel = await inspect_target(client, target, st)
 
     posted = {k: v for k, v in st["posted"].items() if datetime.fromisoformat(v) > now}
@@ -1416,7 +1456,7 @@ async def cmd_post(client: TelegramClient, args: argparse.Namespace) -> None:
         log.info("Ещё рано: последний пост %s, следующий не раньше %s (UTC)",
                  last_post.strftime("%d.%m %H:%M"), next_at.strftime("%d.%m %H:%M"))
         return
-    target = await client.get_entity(args.to)
+    target = await get_target(client, args, st)
     manual, in_channel = await inspect_target(client, target, st)
     if args.manual_gap_hours and not args.refill:
         due_m, next_m = post_is_due(manual, args.manual_gap_hours, now)

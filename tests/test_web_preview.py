@@ -343,5 +343,52 @@ class WebCrawlTests(unittest.TestCase):
         self.assertIsNone(f.username_of(5))
 
 
+class NameLookupLimitTests(unittest.TestCase):
+    """Telegram строго лимитирует поиск каналов по имени (ResolveUsername) — 05.11 Dolli получил FloodWait на 6 ч."""
+
+    def test_target_from_dialogs_and_then_from_state(self):
+        import argparse
+        from telethon import errors
+        target = channel(99, "TGaGifts", left=False)
+
+        class Limited:
+            async def get_entity(self, x):
+                raise errors.FloodWaitError(request=None, capture=21767)
+
+            async def iter_dialogs(self):
+                class D:
+                    entity = target
+                yield D()
+
+        st = {}
+        self.assertIs(asyncio.run(gf.get_target(Limited(), argparse.Namespace(to="TGaGifts"), st)), target)
+        self.assertEqual(st["target_peer"], {"username": "tgagifts", "id": 99, "hash": 99 * 7})
+        again = asyncio.run(gf.get_target(None, argparse.Namespace(to="TGaGifts"), st))  # без запросов
+        self.assertEqual((again.channel_id, again.access_hash), (99, 99 * 7))
+
+    def test_stop_name_lookups_after_flood_wait(self):
+        from telethon import errors
+        known = channel(80, "knownchan")
+
+        class Limited(WebClient):
+            calls = 0
+
+            async def get_entity(self, x):
+                if isinstance(x, str):
+                    Limited.calls += 1
+                    raise errors.FloodWaitError(request=None, capture=21767)
+                return await super().get_entity(x)
+
+        client = Limited([known], {80: [message(80, 3)]})
+        f = gf.GiveawayFinder(client, args(peer_cache={"knownchan": [80, 560]}))
+        f.web = FakeWeb({"newchan1": [5], "newchan2": [6], "knownchan": [3]})
+        for name in ("@newchan1", "@newchan2", "@knownchan"):
+            f.enqueue(gf.WebOnly(name), 1)
+        asyncio.run(f.crawl())
+        self.assertEqual(Limited.calls, 1)              # после первого отказа по имени больше не ищем
+        self.assertTrue(f.names_blocked)
+        self.assertEqual(client.opened, [(80, [3])])    # знакомый канал проверили без поиска по имени
+
+
 if __name__ == "__main__":
     unittest.main()
