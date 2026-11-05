@@ -15544,7 +15544,7 @@ public class SpravkaForm : Form {
     readonly ToolTip tip = new ToolTip();
     // приборы учёта: сколько угодно (кнопка «+»), у каждого свой лицевой и адрес - бывает по 5 ПУ на разных адресах одного объекта
     class MeterBlock {
-        public readonly BoxPanel Box = new BoxPanel();
+        public readonly MeterBox Box = new MeterBox();
         public Grid Grid;
         public readonly Dictionary<string, Control> Ctl = new Dictionary<string, Control>();
         public readonly Dictionary<string, string> Caps = new Dictionary<string, string>();
@@ -15775,9 +15775,8 @@ public class SpravkaForm : Form {
     // «свое»), полный тип собирается сам; номер, показания, поверка
     MeterBlock NewMeter() {
         MeterBlock m = new MeterBlock();
-        m.Box.Mark = St.TintOf("Прибор учёта").Mark;
         m.Grid = new Grid(m.Box, 4);
-        m.Grid.PadTop = 34;
+        m.Grid.PadTop = MeterBox.Head + 10;
         m.Grid.Row(MF(m, "ls", "Лицевой счёт (номер в базе)", MT(m, "ls", "9 цифр"), 16), MF(m, "fio", "Фамилия, имя, отчество", MT(m, "fio", "Иванов Иван Иванович"), 0),
             MF(m, "tel", "Телефон", MT(m, "tel", "+375..."), 18));
         m.Grid.Row(MF(m, "np_tip", "Тип н.п.", MC(m, "np_tip"), 7), MF(m, "np", "Населённый пункт / СТ", MC(m, "np"), 0),
@@ -15803,8 +15802,8 @@ public class SpravkaForm : Form {
         tip.SetToolTip(m.Same, "Подставить лицевой, адрес и Ф.И.О. (с телефоном) как у предыдущего прибора учёта");
         m.Box.Controls.Add(m.Same);
         m.Box.Resize += delegate {
-            mm.Remove.Location = new Point(mm.Box.Width - mm.Remove.Width - 10, 5);
-            mm.Same.Location = new Point(mm.Remove.Left - mm.Same.Width - 8, 5);
+            mm.Remove.Location = new Point(mm.Box.Width - mm.Remove.Width - 8, 4);
+            mm.Same.Location = new Point(mm.Remove.Left - mm.Same.Width - 6, 4);
         };
         MeterLists(m);
         return m;
@@ -15893,9 +15892,13 @@ public class SpravkaForm : Form {
     // приборы учёта - в раздел заново: заголовки «Прибор учёта 1, 2...», «× убрать» - когда их больше одного, внизу «+»
     void RebuildMeters() {
         meterCard.Grid.Clear();
+        meterCard.Grid.RowGap = 16;
         for (int i = 0; i < meters.Count; i++) {
             MeterBlock m = meters[i];
             m.Box.Title = meters.Count == 1 ? "Прибор учёта" : "Прибор учёта " + (i + 1);
+            // свой цвет у каждого: шапка, рамка, фон - чтобы приборы учёта не сливались
+            m.Box.Mark = MeterBox.Marks[i % MeterBox.Marks.Length];
+            m.Box.BackColor = MeterBox.Tints[i % MeterBox.Tints.Length];
             m.Remove.Visible = meters.Count > 1;
             m.Same.Visible = i > 0;
             m.Box.Invalidate();
@@ -16518,7 +16521,22 @@ public class SpravkaForm : Form {
         return captions.TryGetValue(key, out c) ? c : key;
     }
 
+    // в шапке прибора учёта: лицевой, номер счётчика, адрес - видно, какой это
+    void UpdateInfos() {
+        for (int i = 1; i <= meters.Count; i++) {
+            string p = "pu" + i + "_";
+            List<string> l = new List<string>();
+            if (V(p + "ls").Length > 0) l.Add("лицевой " + V(p + "ls"));
+            if (V(p + "zav").Length > 0) l.Add("№ " + V(p + "zav"));
+            if (V(p + "adres").Length > 0) l.Add(V(p + "adres"));
+            string info = string.Join("  ·  ", l.ToArray());
+            MeterBox b = meters[i - 1].Box;
+            if (b.Info != info) { b.Info = info; b.Invalidate(); }
+        }
+    }
+
     void RefreshState() {
+        UpdateInfos();
         List<string> m = Missing();
         if (m.Count == 0) { status.Text = savedFile != null && !dirty ? "Справка сохранена" : "Всё основное заполнено"; status.ForeColor = St.Good; }
         else {
@@ -16651,6 +16669,9 @@ public class SpravkaForm : Form {
 
     // перед выходом из программы: несохранённая справка - спросить. true - можно выходить
     public string SavedId { get { return savedId; } }
+
+    // для проверки: прокрутить вниз на px точек
+    public void ScrollDown(int px) { content.AutoScrollPosition = new Point(0, -content.AutoScrollPosition.Y + px); }
 
     // для проверки: прокрутить к разделу
     public void ScrollToCard(int i) { content.AutoScrollPosition = new Point(0, Math.Max(0, cards[i].Panel.Top - content.AutoScrollPosition.Y - 4)); }
@@ -16803,6 +16824,42 @@ public static class DocPreview {
         try { File.SetAttributes(file, FileAttributes.ReadOnly); } catch { }
         try { Open(file); }
         catch (Exception ex) { MessageBox.Show(owner, "Предпросмотр готов, но открыть его в Word не получилось:\n" + file + "\n\n" + ex.Message, "Предпросмотр"); }
+    }
+}
+
+// Рамка прибора учёта в справке: цветная шапка - номер («Прибор учёта 2»), лицевой, номер счётчика, адрес; рамка и фон
+// своего цвета у каждого прибора учёта - чтобы они не сливались в одну кучу
+public class MeterBox : Panel {
+    public string Title = "", Info = "";
+    public Color Mark = Color.FromArgb(52, 110, 190);
+    public const int Head = 36;
+    public static readonly Color[] Marks = { Color.FromArgb(52, 110, 190), Color.FromArgb(196, 126, 24), Color.FromArgb(118, 90, 190),
+        Color.FromArgb(46, 138, 78), Color.FromArgb(184, 68, 94), Color.FromArgb(22, 126, 138) };
+    public static readonly Color[] Tints = { Color.FromArgb(236, 243, 252), Color.FromArgb(253, 245, 229), Color.FromArgb(243, 240, 251),
+        Color.FromArgb(235, 247, 238), Color.FromArgb(252, 238, 241), Color.FromArgb(232, 246, 247) };
+    static readonly Font TitleFont = new Font("Segoe UI", 11.5f, FontStyle.Bold);
+
+    public MeterBox() {
+        BackColor = Tints[0];
+        DoubleBuffered = true;
+        SetStyle(ControlStyles.ResizeRedraw, true);
+    }
+
+    protected override void OnPaint(PaintEventArgs e) {
+        base.OnPaint(e);
+        Graphics g = e.Graphics;
+        using (SolidBrush b = new SolidBrush(Mark)) g.FillRectangle(b, 0, 0, Width, Head);
+        using (Pen p = new Pen(Mark, 3f)) g.DrawRectangle(p, 1, 1, Width - 3, Height - 3);
+        Size ts = TextRenderer.MeasureText(Title, TitleFont);
+        TextRenderer.DrawText(g, Title, TitleFont, new Point(12, (Head - ts.Height) / 2), Color.White);
+        if (Info.Length == 0) return;
+        // подпись - до кнопок в шапке
+        int right = Width - 10;
+        foreach (Control c in Controls) if (c.Visible && c.Top < Head) right = Math.Min(right, c.Left - 10);
+        int x = 12 + ts.Width + 10;
+        if (right - x < 40) return;
+        TextRenderer.DrawText(g, Info, St.Base, new Rectangle(x, 0, right - x, Head), Color.White,
+            TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
     }
 }
 
