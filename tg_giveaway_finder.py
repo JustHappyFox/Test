@@ -846,7 +846,128 @@ async def queue_entry(client: TelegramClient, g: Giveaway, finder: "GiveawayFind
             "link": message_link(ref, cid, mid)}
 
 
+async def cmd_post_scheduled(client: TelegramClient, args: argparse.Namespace) -> None:
+    """Режим отложенных постов: в канале всегда стоят --schedule-ahead запланированных постов бота
+    с шагом --min-interval-hours. Публикует их сам Telegram точно по времени, поэтому пропущенные
+    запуски по расписанию GitHub не сбивают ритм. Ваши посты (опубликованные и отложенные)
+    учитываются: посты бота сдвигаются на --manual-gap-hours после них."""
+    state_path = Path(args.state)
+    st = load_state(state_path)
+    now = datetime.now(timezone.utc)
+    interval = timedelta(hours=args.min_interval_hours or 0)
+    gap = timedelta(hours=args.manual_gap_hours or 0)
+    min_left = timedelta(hours=args.min_hours_left)
+
+    target = await client.get_entity(args.to)
+    manual, in_channel = await inspect_target(client, target, st)
+
+    posted = {k: v for k, v in st["posted"].items() if datetime.fromisoformat(v) > now}
+    for k, v in in_channel.items():
+        if datetime.fromisoformat(v) > now:
+            posted.setdefault(k, v)
+    scheduled: dict[str, dict[str, Any]] = {e["key"]: e for e in (st.get("scheduled") or [])}
+    post_times = [datetime.fromisoformat(t) for t in (st.get("post_times") or [])]
+    our_ids: list[int] = list(st.get("our_ids") or [])
+    queue: list[dict[str, Any]] = list(st["queue"])
+
+    # что сейчас реально стоит в отложенных канала
+    live: dict[str, Any] = {}
+    for m in await client.get_messages(target, scheduled=True, limit=100):
+        media = getattr(m, "media", None)
+        k = giveaway_key(media) if isinstance(media, types.MessageMediaGiveaway) else None
+        if k in scheduled:
+            live[k] = m
+        elif is_manual_post(m):  # ваш собственный отложенный пост — после него тоже пауза
+            manual = max(manual, m.date) if manual else m.date
+    # наши отложенные, которых больше нет: опубликованы или удалены вами — в любом случае не повторяем
+    for k in [k for k in scheduled if k not in live]:
+        posted[k] = scheduled.pop(k)["until"]
+
+    # наш отложенный пост попал в паузу после вашего поста — переносим
+    if manual and gap:
+        bad = [k for k, m in live.items() if manual <= m.date < manual + gap]
+        if bad and not args.dry_run:
+            await client(functions.messages.DeleteScheduledMessagesRequest(
+                peer=target, id=[live[k].id for k in bad]))
+            for k in bad:
+                e = scheduled.pop(k)
+                at = datetime.fromisoformat(e["at"])
+                post_times = [t for t in post_times if abs((t - at).total_seconds()) > 120]
+                queue.insert(0, {kk: vv for kk, vv in e.items() if kk != "at"})
+            log.info("Перенёс отложенных постов: %d (ваш пост от %s UTC)", len(bad), manual.strftime("%d.%m %H:%M"))
+
+    times = [datetime.fromisoformat(e["at"]) for e in scheduled.values()] + [t for t in post_times if t <= now]
+    if st.get("last_post"):
+        times.append(datetime.fromisoformat(st["last_post"]))
+    last_bot = max(times, default=None)
+    next_at = max([now] + ([last_bot + interval] if last_bot else []) + ([manual + gap] if manual and gap else []))
+
+    def fits(e: dict[str, Any], when: datetime) -> bool:
+        return (e["key"] not in posted and e["key"] not in scheduled
+                and datetime.fromisoformat(e["until"]) - when >= min_left)
+
+    scanned, finder, last_published = False, None, None
+    while len(scheduled) < args.schedule_ahead:
+        queue = sorted((e for e in queue if e["key"] not in posted and e["key"] not in scheduled
+                        and datetime.fromisoformat(e["until"]) > now), key=queue_order)
+        entry = next((e for e in queue if fits(e, next_at)), None)
+        if entry is None:
+            if scanned:
+                break
+            scanned = True
+            log.info("Подходящих в очереди нет — ищу новые розыгрыши")
+            finder = await run_finder(client, args)
+            known = {e["key"] for e in queue}
+            for g in filter_giveaways(finder.giveaways.values(), args):
+                if g.key in posted or g.key in scheduled or g.key in known or g.until_date - now < min_left:
+                    continue
+                e = await queue_entry(client, g, finder)
+                if e:
+                    queue.append(e)
+            continue
+        queue.remove(entry)
+        when = next_at
+        immediate = when <= now + timedelta(minutes=2)
+        if args.dry_run:
+            print(f"[dry-run] {'сейчас' if immediate else when.strftime('%d.%m %H:%M UTC')}: "
+                  f"{entry['prize']} | {entry['link']}")
+            scheduled[entry["key"]] = {**entry, "at": when.isoformat()}
+            next_at = when + interval
+            continue
+        try:
+            fwd = await client.forward_messages(
+                target, entry["msg_id"],
+                from_peer=types.InputPeerChannel(entry["channel_id"], entry["access_hash"]),
+                schedule=None if immediate else when)
+        except errors.RPCError as ex:  # канал запретил пересылку, пост удалён и т.п.
+            log.warning("Не удалось переслать %s: %s — убираю из очереди", entry["link"], ex)
+            continue
+        if immediate:
+            posted[entry["key"]] = entry["until"]
+            if getattr(fwd, "id", None) is not None:
+                our_ids.append(fwd.id)
+            post_times.append(now)
+            last_published = now
+            log.info("✅ Переслано сейчас: %s | %s", entry["prize"], entry["link"])
+        else:
+            scheduled[entry["key"]] = {**entry, "at": when.isoformat()}
+            post_times.append(when)
+            log.info("🕒 Запланировано на %s UTC: %s | %s", when.strftime("%d.%m %H:%M"), entry["prize"], entry["link"])
+        next_at = when + interval
+
+    if not args.dry_run:
+        st.update(posted=posted, queue=queue, scheduled=list(scheduled.values()),
+                  post_times=[t.isoformat() for t in post_times][-50:], our_ids=our_ids[-100:],
+                  last_post=(last_published.isoformat() if last_published else st.get("last_post")))
+        save_state(state_path, st)
+    if args.save_sources and finder is not None:
+        save_sources(filter_giveaways(finder.giveaways.values(), args), args.save_sources)
+    log.info("Отложено постов бота: %d, в очереди: %d", len(scheduled), len(queue))
+
+
 async def cmd_post(client: TelegramClient, args: argparse.Namespace) -> None:
+    if getattr(args, "schedule_ahead", 0) and not args.refill:
+        return await cmd_post_scheduled(client, args)
     state_path = Path(args.state)
     st = load_state(state_path)
     now = datetime.now(timezone.utc)
@@ -1056,6 +1177,9 @@ def build_parser() -> argparse.ArgumentParser:
     ps.add_argument("--manual-gap-hours", type=float, default=0, metavar="Ч",
                     help="если в канале есть пост, опубликованный не ботом (вручную), "
                          "следующий пост бота — не раньше чем через Ч часов после него (напр. 5)")
+    ps.add_argument("--schedule-ahead", type=int, default=0, metavar="N",
+                    help="держать в канале N отложенных постов (Telegram опубликует их сам точно "
+                         "по времени, даже если запуск по расписанию пропущен)")
     ps.add_argument("--dry-run", action="store_true", help="только показать, что было бы переслано")
     ps.add_argument("--refill", action="store_true",
                     help="только найти розыгрыши и пополнить очередь, ничего не публикуя")

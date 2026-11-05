@@ -550,3 +550,96 @@ class ManualPostTests(unittest.TestCase):
                  "--min-interval-hours", "3.5", "--manual-gap-hours", "5"]))
             asyncio.run(gf.cmd_post(client, a))
         self.assertEqual(sent, [6])  # дубликат пропущен, опубликован следующий
+
+
+class ScheduledPostTests(unittest.TestCase):
+    """Отложенные посты: Telegram публикует их сам, запуски GitHub могут пропускаться."""
+
+    def client(self, history=(), sched=()):
+        target = channel(900, "mygroup", left=False)
+
+        class C(FakeClient):
+            def __init__(self):
+                super().__init__([target], {})
+                self.sched, self.forwards, self.deleted = list(sched), [], []
+
+            async def iter_messages(self, ent, limit=None, wait_time=None):
+                if ent.id == 900:
+                    for m in history:
+                        yield m
+
+            async def get_messages(self, ent, scheduled=False, limit=None):
+                return list(self.sched) if scheduled else []
+
+            async def forward_messages(self, to, mid, from_peer=None, schedule=None):
+                self.forwards.append((mid, schedule))
+                return types.Message(id=1000 + len(self.forwards), peer_id=types.PeerChannel(900),
+                                     date=schedule or NOW, message="")
+
+            async def __call__(self, req):
+                self.deleted.extend(req.id)
+        return C()
+
+    def media(self, n):
+        return giveaway_media([100 + n], months=6, quantity=5, days_left=5)
+
+    def entry(self, n):
+        return {"key": gf.giveaway_key(self.media(n)), "until": (NOW + timedelta(days=5)).isoformat(),
+                "prize": f"p{n}", "countries": [], "channel_id": 100 + n, "access_hash": 7,
+                "msg_id": n, "link": f"https://t.me/x/{n}"}
+
+    def run_post(self, client, st):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp, "s.json")
+            gf.save_state(path, {"posted": {}, "queue": [], **st})
+            a = gf.apply_preset(gf.build_parser().parse_args(
+                ["post", "--to", "@mygroup", "--state", str(path), "--no-discover", "--no-aggregators",
+                 "--min-interval-hours", "3.5", "--manual-gap-hours", "5", "--schedule-ahead", "2"]))
+            asyncio.run(gf.cmd_post(client, a))
+            return gf.load_state(path)
+
+    def near(self, dt, expected):
+        self.assertLess(abs((dt - expected).total_seconds()), 90, f"{dt} != {expected}")
+
+    def test_posts_now_and_keeps_two_scheduled(self):
+        c = self.client()
+        st = self.run_post(c, {"last_post": (NOW - timedelta(hours=4)).isoformat(),
+                               "queue": [self.entry(1), self.entry(2), self.entry(3)]})
+        self.assertEqual([m for m, _ in c.forwards], [1, 2, 3])
+        self.assertIsNone(c.forwards[0][1])                       # пора — сразу
+        self.near(c.forwards[1][1], NOW + timedelta(hours=3.5))   # дальше — отложенные с шагом 3,5 ч
+        self.near(c.forwards[2][1], NOW + timedelta(hours=7))
+        self.assertEqual(len(st["scheduled"]), 2)
+        self.assertIn(self.entry(1)["key"], st["posted"])
+
+    def test_nothing_to_do_when_two_already_scheduled(self):
+        sched = [types.Message(id=i, peer_id=types.PeerChannel(900), date=NOW + timedelta(hours=h),
+                               message="", media=self.media(i)) for i, h in ((1, 2), (2, 5.5))]
+        st_sched = [{**self.entry(i), "at": (NOW + timedelta(hours=h)).isoformat()} for i, h in ((1, 2), (2, 5.5))]
+        c = self.client(sched=sched)
+        st = self.run_post(c, {"scheduled": st_sched, "queue": [self.entry(3)]})
+        self.assertEqual(c.forwards, [])
+        self.assertEqual(len(st["scheduled"]), 2)
+
+    def test_manual_post_reschedules_bot_posts(self):
+        manual = types.Message(id=50, peer_id=types.PeerChannel(900), date=NOW - timedelta(hours=1),
+                               message="мой пост")
+        sched = [types.Message(id=77, peer_id=types.PeerChannel(900), date=NOW + timedelta(hours=1),
+                               message="", media=self.media(1))]
+        st_sched = [{**self.entry(1), "at": (NOW + timedelta(hours=1)).isoformat()}]
+        c = self.client(history=[manual], sched=sched)
+        self.run_post(c, {"scheduled": st_sched, "last_post": (NOW - timedelta(hours=3)).isoformat(),
+                          "queue": [self.entry(2)]})
+        self.assertEqual(c.deleted, [77])                         # стоял в паузе после вашего поста
+        self.assertEqual(c.forwards[0][0], 1)
+        self.near(c.forwards[0][1], NOW + timedelta(hours=4))     # перенесён на 5 ч после вашего поста
+        self.near(c.forwards[1][1], NOW + timedelta(hours=7.5))
+
+    def test_published_scheduled_post_counts_as_posted(self):
+        st_sched = [{**self.entry(1), "at": (NOW - timedelta(hours=1)).isoformat()}]  # уже вышел
+        c = self.client()
+        st = self.run_post(c, {"scheduled": st_sched, "post_times": [(NOW - timedelta(hours=1)).isoformat()],
+                               "queue": [self.entry(1), self.entry(2), self.entry(3)]})
+        self.assertIn(self.entry(1)["key"], st["posted"])
+        self.assertEqual([m for m, _ in c.forwards], [2, 3])     # вышедший не повторяется
+        self.near(c.forwards[0][1], NOW + timedelta(hours=2.5))   # через 3,5 ч после вышедшего
