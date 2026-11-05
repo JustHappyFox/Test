@@ -14,6 +14,10 @@ on:
         description: "Только пополнить запас розыгрышей, ничего не публикуя"
         type: boolean
         default: false
+      post_now:
+        description: "Опубликовать розыгрыш из запаса сейчас, вне очереди (ссылка t.me/…)"
+        type: string
+        default: ""
 
 concurrency:
   group: repost
@@ -78,7 +82,7 @@ jobs:
           --count 1 --min-hours-left 3 --min-interval-hours 3.5 --manual-gap-hours 5 --schedule-ahead 0 --reserve 10
           --careful --max-channels 1000 --search-pages 2 --source-limit 500
           --channels-file .state/sources.txt --save-sources .state/sources.txt
-          --state .state/posted.json ${{ inputs.refill && '--refill' || '' }}
+          --state .state/posted.json ${{ inputs.refill && '--refill' || '' }} ${{ inputs.post_now && format('--post-now {0}', inputs.post_now) || '' }}
 
       - name: Сохранить состояние
         if: always() && steps.check.outputs.ready == 'true'

@@ -922,6 +922,23 @@ async def cmd_post_scheduled(client: TelegramClient, args: argparse.Namespace) -
     our_ids: list[int] = list(st.get("our_ids") or [])
     queue: list[dict[str, Any]] = list(st["queue"])
 
+    if getattr(args, "post_now", None):  # вне очереди: опубликовать конкретный розыгрыш из запаса сейчас
+        entry = next((e for e in queue if e["link"].rstrip("/") == args.post_now.rstrip("/")), None)
+        if entry is None:
+            log.warning("Розыгрыша %s нет в запасе — нечего публиковать вне очереди", args.post_now)
+            return
+        fwd = await client.forward_messages(
+            target, entry["msg_id"], from_peer=types.InputPeerChannel(entry["channel_id"], entry["access_hash"]))
+        if getattr(fwd, "id", None) is not None:
+            our_ids.append(fwd.id)  # свой пост — не принимать за ручной
+        posted[entry["key"]] = entry["until"]
+        queue.remove(entry)
+        # расписание (last_post / post_times) не трогаем: пост вне очереди
+        st.update(posted=posted, queue=queue, our_ids=our_ids[-100:])
+        save_state(state_path, st)
+        log.info("✅ Вне очереди: %s | %s", entry["prize"], entry["link"])
+        return
+
     # что сейчас реально стоит в отложенных канала
     live: dict[str, Any] = {}
     for m in await client.get_messages(target, scheduled=True, limit=100):
@@ -1289,6 +1306,8 @@ def build_parser() -> argparse.ArgumentParser:
                     help="не пересылать розыгрыши, до конца которых меньше N часов (3)")
     ps.add_argument("--search-cooldown-hours", type=float, default=2.0, metavar="Ч",
                     help="если поиск ничего не дал, следующий — не раньше чем через Ч часов (2)")
+    ps.add_argument("--post-now", metavar="ССЫЛКА",
+                    help="опубликовать этот розыгрыш из запаса сейчас, вне очереди (расписание не сдвигается)")
     ps.add_argument("--reserve", type=int, default=10, metavar="N",
                     help="сколько подходящих розыгрышей набирать в запас за один поиск (10); "
                          "новый поиск — только когда запас кончится")

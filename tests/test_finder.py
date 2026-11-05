@@ -918,3 +918,25 @@ class DueSlackTests(PostWhenDueTests):
         last = NOW - timedelta(hours=3.5) + timedelta(minutes=4)   # до срока ещё 4 минуты
         st = self.run_post(c, {"last_post": last.isoformat(), "queue": [self.entry(1)]})
         self.assertEqual(c.forwards, [(1, None)])                  # опубликовано сразу, не отложено
+
+
+class PostNowTests(PostWhenDueTests):
+    test_not_due_just_refreshes = None
+    test_due_posts_exactly_one = None
+    test_manual_post_blocks_when_due = None
+
+    def test_post_now_out_of_turn_keeps_schedule(self):
+        c = self.client()
+        last = (NOW - timedelta(hours=1)).isoformat()            # по расписанию ещё рано
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp, "s.json")
+            gf.save_state(path, {"posted": {}, "last_post": last, "queue": [self.entry(1), self.entry(2)]})
+            a = gf.apply_preset(gf.build_parser().parse_args(
+                ["post", "--to", "@mygroup", "--state", str(path), "--min-interval-hours", "3.5",
+                 "--schedule-ahead", "0", "--post-now", "https://t.me/x/2"]))
+            asyncio.run(gf.cmd_post(c, a))
+            st = gf.load_state(path)
+        self.assertEqual(c.forwards, [(2, None)])                # опубликован именно указанный
+        self.assertEqual(st["last_post"], last)                  # расписание не сдвинулось
+        self.assertEqual([e["msg_id"] for e in st["queue"]], [1])
+        self.assertIn(1001, st["our_ids"])                       # свой пост запомнен — не «ручной»
