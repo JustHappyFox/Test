@@ -1,0 +1,54 @@
+name: Проверка веб-страниц t.me
+
+# Служебная проверка: как публичная веб-страница t.me показывает пост-розыгрыш.
+# Запуск только вручную.
+on:
+  workflow_dispatch:
+    inputs:
+      post:
+        description: "Пост вида канал/номер"
+        type: string
+        default: "otdel34/382"
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      POST: ${{ inputs.post }}
+    steps:
+      - name: Скачать страницы и показать разметку поста
+        run: |
+          python3 - <<'EOF'
+          import os, re, urllib.request
+          post = os.environ["POST"].strip().strip("/")
+          chan, num = post.split("/")
+          urls = [
+              f"https://t.me/s/{chan}/{num}",
+              f"https://t.me/{chan}/{num}?embed=1&mode=tme",
+              f"https://t.me/{chan}/{num}",
+          ]
+          for url in urls:
+              req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+              try:
+                  html = urllib.request.urlopen(req, timeout=20).read().decode("utf-8", "replace")
+              except Exception as e:
+                  print("=====", url, "ERROR", e); continue
+              print("=====", url, "bytes:", len(html))
+              for m in re.finditer(r'<meta (?:property|name)="(og:title|og:description|twitter:description)" content="([^"]*)"', html):
+                  print("META", m.group(1), "=", m.group(2)[:300])
+              classes = sorted({c for cl in re.findall(r'class="([^"]+)"', html) for c in cl.split()
+                                if re.search(r"giveaway|not_supported|unsupported|media|prize", c)})
+              print("CLASSES:", classes)
+              i = html.find(f'data-post="{post}"')
+              if i < 0:
+                  i = html.find("tgme_widget_message_bubble")
+              if i >= 0:
+                  block = html[i:i + 6000]
+                  block = re.sub(r'style="[^"]*"', "", block)
+                  block = re.sub(r"\s+", " ", block)
+                  print("BLOCK:", block[:4000])
+          EOF
