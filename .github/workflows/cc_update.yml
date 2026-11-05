@@ -19,7 +19,7 @@ permissions:
 jobs:
   update:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 300
     env:
       CRAWLS: ${{ inputs.crawls }}
     steps:
@@ -43,13 +43,20 @@ jobs:
             )
           fi
           echo "Снимки: ${CRAWLS:-по умолчанию}"
-          python tools/cc_telegram.py --merge --out state/cc_usernames.txt ${CRAWLS:+--crawl $CRAWLS}
-          wc -l state/cc_usernames.txt
+          python tools/cc_telegram.py --out /tmp/crawl_names.txt ${CRAWLS:+--crawl $CRAWLS}
       - name: Сохранить в репозиторий
+        # Новые имена дописываются в общий список, а отдельно — в state/cc_new_usernames.txt
+        # (их потом проверяет cc_scan.yml с source=state/cc_new_usernames.txt и merge).
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add state/cc_usernames.txt
-          if git diff --cached --quiet; then echo "Список не изменился"; exit 0; fi
-          git commit -m "Update the Common Crawl channel list ($(wc -l < state/cc_usernames.txt) usernames)"
-          git push
+          for attempt in 1 2 3 4 5; do
+            git fetch -q origin main && git reset -q --hard origin/main
+            python tools/cc_telegram.py --out state/cc_usernames.txt --merge-from /tmp/crawl_names.txt --new-out state/cc_new_usernames.txt
+            git add state/cc_usernames.txt state/cc_new_usernames.txt
+            if git diff --cached --quiet; then echo "Список не изменился"; exit 0; fi
+            git commit -qm "Update the Common Crawl channel list ($(wc -l < state/cc_usernames.txt) usernames, $(wc -l < state/cc_new_usernames.txt) new)"
+            git push -q origin HEAD:main && exit 0
+            sleep $((attempt * 5))
+          done
+          exit 1

@@ -122,7 +122,26 @@ def main() -> None:
     ap.add_argument("--max-blocks", type=int, default=0, help="взять не больше N блоков (равномерно по всему t.me); 0 — все")
     ap.add_argument("--merge", action="store_true",
                     help="добавить к уже собранным именам в --out (снимки почти не пересекаются — ничего не теряем)")
+    ap.add_argument("--merge-from", metavar="FILE",
+                    help="не скачивать, а дописать в --out имена из FILE, которых там ещё нет")
+    ap.add_argument("--new-out", metavar="FILE", help="с --merge-from: куда записать только новые имена (для веб-проверки)")
     args = ap.parse_args()
+
+    if args.merge_from:
+        base = Path(args.out)
+        old = base.read_text(encoding="utf-8").splitlines() if base.is_file() else []
+        have = {ln.strip().lstrip("@").lower() for ln in old if ln.strip()}
+        new = []
+        for ln in Path(args.merge_from).read_text(encoding="utf-8").splitlines():
+            n = ln.strip().lstrip("@")
+            if n and n.lower() not in have:
+                have.add(n.lower())
+                new.append("@" + n)
+        base.write_text("".join(x + "\n" for x in old + new if x.strip()), encoding="utf-8")
+        if args.new_out:
+            Path(args.new_out).write_text("".join(x + "\n" for x in new), encoding="utf-8")
+        print(f"Добавлено новых имён: {len(new)}, всего в {args.out}: {len(have)}")
+        return
 
     t0 = time.time()
     names: set[str] = set()
