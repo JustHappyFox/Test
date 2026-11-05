@@ -46,11 +46,17 @@ from telethon import TelegramClient, errors, events, functions, types, utils
 log = logging.getLogger("giveaway_finder")
 
 DEFAULT_KEYWORDS = [
+    # русские
     "розыгрыш", "розыгрыши", "розыгрыш premium", "розыгрыш звезд",
-    "giveaway", "giveaways", "premium giveaway", "stars giveaway",
     "раздача", "конкурс", "халява", "бесплатный премиум",
+    # международные: в иностранных каналах тоже бывают розыгрыши «для всех стран»
+    "giveaway", "giveaways", "premium giveaway", "stars giveaway", "telegram premium giveaway",
+    "free telegram premium", "free stars", "telegram stars giveaway", "gift giveaway", "airdrop giveaway",
+    "sorteo", "sorteio", "çekiliş", "розіграш", "قرعه کشی", "مسابقه", "سحب",
 ]
-DEFAULT_HASHTAGS = ["розыгрыш", "giveaway", "конкурс", "раздача", "розыгрыши", "giveaways"]
+DEFAULT_HASHTAGS = ["розыгрыш", "giveaway", "конкурс", "раздача", "розыгрыши", "giveaways",
+                    "telegrampremium", "premiumgiveaway", "starsgiveaway", "freepremium", "freestars",
+                    "airdrop", "sorteo", "sorteio", "cekilis", "розіграш"]
 
 # Публичные каналы-агрегаторы, которые пересылают официальные розыгрыши (найдены через веб-поиск
 # и TGStat). Их надёжность не важна: в результат попадают только настоящие messageMediaGiveaway,
