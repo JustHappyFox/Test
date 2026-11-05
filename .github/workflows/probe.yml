@@ -33,6 +33,10 @@ on:
         description: "Каналы через пробел — посчитать у каждого модули-розыгрыши за 31 день"
         type: string
         default: ""
+      cc:
+        description: "Common Crawl: «снимок блоков выборка», напр. «CC-MAIN-2026-43 300 3000» (пусто — пропустить)"
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -49,13 +53,51 @@ jobs:
       DOC_URL: ${{ inputs.doc_url }}
       GREP: ${{ inputs.grep }}
       RANK: ${{ inputs.rank }}
+      CC: ${{ inputs.cc }}
     steps:
       - uses: actions/checkout@v4
-        if: inputs.rank != ''
+        if: inputs.rank != '' || inputs.cc != ''
       - uses: actions/setup-python@v5
-        if: inputs.rank != ''
+        if: inputs.rank != '' || inputs.cc != ''
         with:
           python-version: "3.12"
+      - name: Каналы из Common Crawl и доля каналов с модулями-розыгрышами
+        if: inputs.cc != ''
+        run: |
+          pip install -q aiohttp
+          set -- $CC
+          python tools/cc_telegram.py --crawl "$1" --max-blocks "${2:-300}" --out cc_usernames.txt
+          SAMPLE="${3:-3000}" python - <<'EOF'
+          import asyncio, os, sys, time
+          from datetime import datetime, timedelta, timezone
+          sys.path.insert(0, ".")
+          import tg_web_preview as wp
+
+          names = [l.strip().lstrip("@") for l in open("cc_usernames.txt", encoding="utf-8") if l.strip()]
+          sample = names[: int(os.environ["SAMPLE"])]
+          since = datetime.now(timezone.utc) - timedelta(days=31)
+
+          async def main():
+              w = wp.WebPreview(parallel=8)
+              t0 = time.time()
+              res = await asyncio.gather(*(w.candidates(u, since, max_pages=3) for u in sample))
+              await w.close()
+              web = [r for r in res if r is not None]
+              hits = sorted(((len(r), u) for u, r in zip(sample, res) if r), reverse=True)
+              print(f"Выборка {len(sample)} из {len(names)} имён: веб-страница есть у {len(web)}, "
+                    f"с модулями-кандидатами за 31 день — {len(hits)}; страниц {w.pages}, 429: {w.limited}, "
+                    f"{time.time() - t0:.0f} с")
+              for n, u in hits[:60]:
+                  print(f"  @{u}: {n}")
+
+          asyncio.run(main())
+          EOF
+      - uses: actions/upload-artifact@v4
+        if: inputs.cc != ''
+        with:
+          name: cc-usernames
+          path: cc_usernames.txt
+          retention-days: 7
       - name: Оценить каналы-кандидаты в агрегаторы
         if: inputs.rank != ''
         run: |
