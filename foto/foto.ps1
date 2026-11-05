@@ -131,7 +131,10 @@ public class PhoneFile {
     public string DevicePath = "";   // путь устройства в оболочке (два одинаковых телефона различаются по нему)
     public string Folder = "";       // путь в телефоне: «Внутренний общий накопитель\DCIM\Camera»
     public string Name = "";         // имя с расширением
-    public DateTime Date = DateTime.MinValue;   // «Изменён» по телефону; MinValue - неизвестно
+    public DateTime Date = DateTime.MinValue;   // по какой дате раскладывать (выбор в окне); MinValue - неизвестно
+    public DateTime Modified = DateTime.MinValue;   // «Изменён» по телефону (как в Проводнике)
+    public DateTime Taken = DateTime.MinValue;      // дата съёмки (из имени файла или свойства «Дата съёмки»)
+    public string TakenFrom = "";                   // имя, свойство
     public long Size;
     public string Kind = "";         // фото, скрин, видео
     public string Source { get { return Device + ": " + Folder; } }
@@ -145,6 +148,7 @@ public class PhoneDevice {
 public class ScanResult {
     public string Error;
     public readonly List<string> Devices = new List<string>();      // найденные телефоны
+    public readonly List<string> DeviceInfo = new List<string>();   // для отчёта: имя и номер устройства
     public readonly List<string> Sources = new List<string>();      // папки с фото («Redmi 8A: ...\DCIM\Camera»)
     public readonly List<PhoneFile> Files = new List<PhoneFile>();
 }
@@ -215,24 +219,57 @@ public static class PhoneShell {
         return n;
     }
 
-    // «Изменён» (как в Проводнике); нет - из свойств файла, нет и их - по имени (IMG_20260821_143012.jpg)
-    static DateTime Date(object item, string name) {
+    // раскладывать по дате съёмки (как в галерее телефона), иначе - по «Изменён» (как в Проводнике)
+    public static bool ByTaken;
+
+    static DateTime Local(object d) {
+        if (!(d is DateTime) || ((DateTime)d).Year <= 1990) return DateTime.MinValue;
+        DateTime t = (DateTime)d;
+        return t.Kind == DateTimeKind.Utc ? t.ToLocalTime() : t;
+    }
+
+    // «Изменён» (как в Проводнике); нет - из свойств файла
+    static DateTime Modified(object item) {
         try {
-            object d = Prop(item, "ModifyDate");
-            if (d is DateTime && ((DateTime)d).Year > 1990) return (DateTime)d;
+            DateTime t = Local(Prop(item, "ModifyDate"));
+            if (t != DateTime.MinValue) return t;
         } catch { }
-        foreach (string k in new string[] { "System.DateModified", "System.Photo.DateTaken", "System.DateCreated" }) {
-            object d = Ext(item, k);
-            if (d is DateTime && ((DateTime)d).Year > 1990) return ((DateTime)d).Kind == DateTimeKind.Utc ? ((DateTime)d).ToLocalTime() : (DateTime)d;
+        return Local(Ext(item, "System.DateModified"));
+    }
+
+    // дата съёмки: из имени (IMG_20261103_154512.jpg, Screenshot_2026-11-03-15-45-12-345_...png, IMG-20261103-WA0001.jpg);
+    // в имени даты нет (iPhone: IMG_0001) - свойство «Дата съёмки» (у видео - «Дата записи»)
+    static DateTime Taken(object item, string name, out string from) {
+        from = "имя";
+        DateTime t = NameDate(name);
+        if (t != DateTime.MinValue) return t;
+        from = "свойство";
+        foreach (string k in new string[] { "System.Photo.DateTaken", "System.Media.DateEncoded" }) {
+            t = Local(Ext(item, k));
+            if (t != DateTime.MinValue) return t;
         }
-        return NameDate(name);
+        from = "";
+        return DateTime.MinValue;
     }
 
     public static DateTime NameDate(string name) {
-        Match m = Regex.Match(name, @"(20\d{6})[_-]?(\d{6})");
-        DateTime t;
-        if (m.Success && DateTime.TryParseExact(m.Groups[1].Value + m.Groups[2].Value, "yyyyMMddHHmmss", null, System.Globalization.DateTimeStyles.None, out t)) return t;
-        return DateTime.MinValue;
+        Match m = Regex.Match(name ?? "", @"(?<!\d)(20\d\d)[-_.]?(\d\d)[-_.]?(\d\d)(?:[-_ .T]?(\d\d)[-_.]?(\d\d)[-_.]?(\d\d))?(?!\d)");
+        if (!m.Success) return DateTime.MinValue;
+        try {
+            DateTime d = new DateTime(int.Parse(m.Groups[1].Value), int.Parse(m.Groups[2].Value), int.Parse(m.Groups[3].Value));
+            if (d > DateTime.Today.AddDays(2)) return DateTime.MinValue;
+            if (m.Groups[4].Success && m.Groups[4].Value.Length > 0) {
+                int h = int.Parse(m.Groups[4].Value), mi = int.Parse(m.Groups[5].Value), se = int.Parse(m.Groups[6].Value);
+                if (h < 24 && mi < 60 && se < 60) d = d.AddHours(h).AddMinutes(mi).AddSeconds(se);
+            }
+            return d;
+        } catch { return DateTime.MinValue; }
+    }
+
+    // по какой дате раскладывать: выбранная, нет её - другая
+    public static void UseDate(PhoneFile f) {
+        DateTime a = ByTaken ? f.Taken : f.Modified, b = ByTaken ? f.Modified : f.Taken;
+        f.Date = a != DateTime.MinValue ? a : b;
     }
 
     static object Named(List<object> items, string name) {
@@ -348,6 +385,7 @@ public static class PhoneShell {
             foreach (object dev in devs) {
                 string devName = Str(dev, "Name"), devPath = Str(dev, "Path");
                 r.Devices.Add(devName);
+                r.DeviceInfo.Add(devName + " - номер устройства " + DeviceId(devPath, devName));
                 if (progress != null) progress("Телефон «" + devName + "»: ищу папки с фото...");
                 foreach (KeyValuePair<string, object> f in PhotoFolders(dev)) {
                     int n = 0;
@@ -363,7 +401,9 @@ public static class PhoneShell {
                         p.Folder = f.Key;
                         p.Name = name;
                         p.Kind = kind;
-                        p.Date = Date(it, name);
+                        p.Modified = Modified(it);
+                        p.Taken = Taken(it, name, out p.TakenFrom);
+                        UseDate(p);
                         try { p.Size = Convert.ToInt64(Prop(it, "Size")); } catch { p.Size = 0; }
                         r.Files.Add(p);
                         n++;
@@ -453,7 +493,7 @@ public static class PhoneShell {
                 string got = WaitNew(staging, before, f);
                 if (got == null) { r.Failed.Add(f); continue; }
                 try {
-                    string placed = Place(got, f.Date, root, r);
+                    string placed = Place(got, f.Date, f.Modified, root, r);
                     r.Done.Add(f);
                     if (placed != null) r.Placed.Add(placed);
                 } catch { r.Failed.Add(f); }
@@ -499,6 +539,67 @@ public static class PhoneShell {
         try { Call(item, "InvokeVerb", "delete"); } catch { }
     }
 
+    // отчёт: что программа видит на телефоне - папки, сколько файлов, по каким дням (без имён файлов)
+    public static string Report(ScanResult r) {
+        StringBuilder sb = new StringBuilder();
+        sb.Append("Отчёт программы «Фото с телефона» ").Append(DateTime.Now.ToString("dd.MM.yyyy HH:mm")).Append(" (имён файлов здесь нет)\r\n");
+        sb.Append("Раскладывать по: ").Append(ByTaken ? "дате съёмки" : "«Изменён»").Append("\r\n");
+        foreach (string d in r.DeviceInfo) sb.Append("Телефон: ").Append(d).Append("\r\n");
+        if (r.Error != null) sb.Append("Ошибка: ").Append(r.Error).Append("\r\n");
+        foreach (string src in r.Sources) {
+            int n = 0, mod = 0, byName = 0, byProp = 0, diff = 0;
+            Dictionary<string, int> kinds = new Dictionary<string, int>(), ext = new Dictionary<string, int>();
+            Dictionary<DateTime, int> dm = new Dictionary<DateTime, int>(), dt = new Dictionary<DateTime, int>();
+            Dictionary<string, int> pairs = new Dictionary<string, int>();
+            foreach (PhoneFile f in r.Files) {
+                if (f.Source != src) continue;
+                n++;
+                Count(kinds, f.Kind);
+                Count(ext, Path.GetExtension(f.Name).ToLowerInvariant());
+                if (f.Modified != DateTime.MinValue) { mod++; Count(dm, f.Modified.Date); }
+                if (f.TakenFrom == "имя") byName++;
+                if (f.TakenFrom == "свойство") byProp++;
+                if (f.Taken != DateTime.MinValue) Count(dt, f.Taken.Date);
+                if (f.Modified != DateTime.MinValue && f.Taken != DateTime.MinValue && f.Modified.Date != f.Taken.Date) {
+                    diff++;
+                    Count(pairs, "снято " + f.Taken.ToString("dd.MM.yyyy") + " -> «Изменён» " + f.Modified.ToString("dd.MM.yyyy"));
+                }
+            }
+            sb.Append("\r\n").Append(src).Append(": файлов ").Append(n).Append(" (").Append(Join(kinds)).Append("; ").Append(Join(ext)).Append(")\r\n");
+            sb.Append("  «Изменён» известен у ").Append(mod).Append("; дата съёмки - из имени у ").Append(byName).Append(", из свойства у ").Append(byProp)
+              .Append("; дни разные у ").Append(diff).Append("\r\n");
+            sb.Append("  по «Изменён»: ").Append(Days(dm)).Append("\r\n");
+            sb.Append("  по дате съёмки: ").Append(Days(dt)).Append("\r\n");
+            if (pairs.Count > 0) {
+                List<string> l = new List<string>();
+                foreach (KeyValuePair<string, int> kv in pairs) l.Add(kv.Key + ": " + kv.Value);
+                l.Sort();
+                if (l.Count > 15) l.RemoveRange(15, l.Count - 15);
+                sb.Append("  разные дни: ").Append(string.Join("; ", l.ToArray())).Append("\r\n");
+            }
+        }
+        return sb.ToString();
+    }
+
+    static void Count<T>(Dictionary<T, int> d, T k) { int v; d.TryGetValue(k, out v); d[k] = v + 1; }
+
+    static string Join(Dictionary<string, int> d) {
+        List<string> l = new List<string>();
+        foreach (KeyValuePair<string, int> kv in d) l.Add((kv.Key.Length > 0 ? kv.Key : "без расширения") + " " + kv.Value);
+        return string.Join(", ", l.ToArray());
+    }
+
+    // последние 40 дней, где есть файлы: «04.11.2026 - 25»
+    static string Days(Dictionary<DateTime, int> d) {
+        List<DateTime> k = new List<DateTime>(d.Keys);
+        k.Sort();
+        k.Reverse();
+        List<string> l = new List<string>();
+        for (int i = 0; i < k.Count && i < 40; i++) l.Add(k[i].ToString("dd.MM.yyyy") + " - " + d[k[i]]);
+        if (k.Count > 40) l.Add("... ещё дней " + (k.Count - 40));
+        return l.Count == 0 ? "нет" : string.Join(", ", l.ToArray());
+    }
+
     public static string Mb(long size) { return size <= 0 ? "?" : (size / 1048576.0).ToString(size < 10485760 ? "0.0" : "0") + " МБ"; }
 
     public static string Staging(string root) {
@@ -512,9 +613,10 @@ public static class PhoneShell {
 
     static void TryDeleteDir(string d) { try { if (Directory.GetFileSystemEntries(d).Length == 0) Directory.Delete(d); } catch { } }
 
-    // пришедший файл - в папку дня; дата «Изменён» - как на телефоне. Возвращает путь (null - такой же файл уже был)
-    static string Place(string got, DateTime date, string root, MoveResult r) {
-        if (date != DateTime.MinValue) { try { File.SetLastWriteTime(got, date); } catch { } }
+    // пришедший файл - в папку дня date; дата «Изменён» - как на телефоне. Возвращает путь (null - такой же файл уже был)
+    static string Place(string got, DateTime date, DateTime modified, string root, MoveResult r) {
+        DateTime m = modified != DateTime.MinValue ? modified : date;
+        if (m != DateTime.MinValue) { try { File.SetLastWriteTime(got, m); } catch { } }
         string dir = DayFolder(root, date);
         Directory.CreateDirectory(dir);
         string name = Path.GetFileName(got), dst = Path.Combine(dir, name);
@@ -548,7 +650,7 @@ public static class PhoneShell {
         int n = 0;
         MoveResult r = new MoveResult();
         foreach (string f in Directory.GetFiles(s)) {
-            try { Place(f, File.GetLastWriteTime(f), root, r); n++; } catch { }
+            try { DateTime t = File.GetLastWriteTime(f); Place(f, t, t, root, r); n++; } catch { }
         }
         TryDeleteDir(s);
         return n;
@@ -747,7 +849,7 @@ public class PhonesDialog : Form {
     readonly List<PhoneDevice> connected;
     readonly ListView list = new ListView();
     readonly CheckBox auto = new CheckBox();
-    bool filling;
+    bool filling, ready;
 
     public PhonesDialog(List<KnownPhone> phones, List<PhoneDevice> connected, string here) {
         this.phones = phones;
@@ -781,7 +883,14 @@ public class PhonesDialog : Form {
         list.Columns.Add("Сейчас", 110);
         list.Columns.Add("Последний перенос", 150);
         list.Columns.Add("Номер устройства", 200);
-        list.ItemChecked += delegate(object s, ItemCheckedEventArgs e) { if (!filling) ((KnownPhone)e.Item.Tag).On = e.Item.Checked; };
+        // Windows, создавая список, сама «отмечает» галочки строк - до показа окна это не нажатия; у строки «Список пуст» телефона нет
+        list.ItemChecked += delegate(object s, ItemCheckedEventArgs e) {
+            if (filling || !ready) return;
+            KnownPhone k = e.Item.Tag as KnownPhone;
+            if (k != null) k.On = e.Item.Checked;
+            else if (e.Item.Checked) { ListViewItem it = e.Item; BeginInvoke((MethodInvoker)delegate { filling = true; try { it.Checked = false; } finally { filling = false; } }); }
+        };
+        Shown += delegate { ready = true; };
         list.DoubleClick += delegate { Edit(); };
         Button add = Btn("Добавить подключённый…", true), edit = Btn("Настроить…", false), del = Btn("Убрать из списка", false), done = Btn("Готово", false);
         add.SetBounds(16, 424, 230, 36);
@@ -895,6 +1004,14 @@ public class PhonesDialog : Form {
         Fill();
     }
 
+    // для проверки: отметить строку, как мышью
+    public void CheckRow(int i, bool on) { if (i < list.Items.Count) list.Items[i].Checked = on; }
+    public string Rows() {
+        StringBuilder sb = new StringBuilder();
+        foreach (ListViewItem it in list.Items) sb.Append(it.Checked ? "[x] " : "[ ] ").Append(it.Text).Append("; ");
+        return sb.ToString();
+    }
+
     // для проверки без окон
     public void AddFirst(string name, string imei, string period, bool photo, bool screens, bool video) {
         List<PhoneDevice> l = NotInList();
@@ -1000,6 +1117,8 @@ public class FotoForm : Form {
     readonly MonthCalendar cal = new MonthCalendar();
     readonly DateTimePicker from = new DateTimePicker(), to = new DateTimePicker();
     readonly CheckBox kPhoto = new CheckBox(), kScreens = new CheckBox(), kVideo = new CheckBox();   // что переносить вручную
+    readonly RadioButton byMod = new RadioButton(), byTaken = new RadioButton();   // по какой дате раскладывать
+    readonly Label dateNote = new Label();
     readonly CheckedListBox sources = new CheckedListBox();
     readonly ListView days = new ListView();
     readonly Label phoneText = new Label(), status = new Label(), chosen = new Label(), autoText = new Label();
@@ -1074,11 +1193,25 @@ public class FotoForm : Form {
         left.Width = 300;
         left.BackColor = Back;
         Label lc = new Label();
-        lc.Text = "Какие дни (по дате «Изменён»)";
+        lc.Text = "Какие дни";
         lc.Font = Bold;
         lc.AutoSize = true;
-        lc.Location = new Point(16, 12);
-        cal.Location = new Point(16, 40);
+        lc.Location = new Point(16, 10);
+        // какая дата: «Изменён» (как в Проводнике) или дата съёмки (как в галерее телефона) - бывают разные
+        byMod.Text = "по дате «Изменён» (как в Проводнике)";
+        byTaken.Text = "по дате съёмки (как в галерее)";
+        foreach (RadioButton rb in new RadioButton[] { byMod, byTaken }) { rb.AutoSize = true; rb.Font = Small; }
+        byMod.Location = new Point(16, 32);
+        byTaken.Location = new Point(16, 52);
+        PhoneShell.ByTaken = Setting("Дата", "изменён") == "съёмка";
+        byTaken.Checked = PhoneShell.ByTaken;
+        byMod.Checked = !PhoneShell.ByTaken;
+        byTaken.CheckedChanged += delegate { DateMode(byTaken.Checked); };
+        dateNote.Font = Small;
+        dateNote.ForeColor = Color.FromArgb(190, 105, 0);
+        dateNote.Location = new Point(16, 74);
+        dateNote.Size = new Size(275, 30);
+        cal.Location = new Point(16, 106);
         cal.CalendarDimensions = new Size(1, 2);
         cal.MaxSelectionCount = 3660;
         cal.ShowToday = true;
@@ -1102,9 +1235,12 @@ public class FotoForm : Form {
         Label how = new Label();
         how.Font = Small;
         how.ForeColor = Hint;
-        how.Text = "Щелчок по числу - один день. Период: щелчок по первому дню и Shift+щелчок по последнему (или «с ... по ...»). " +
-            "Отдельные дни - галочками в списке справа. Жирным - дни, за которые на телефоне есть фото.";
+        how.Text = "Щелчок по числу - один день. Период: щелчок по первому дню, Shift+щелчок по последнему (или «с ... по ...»). " +
+            "Жирным - дни с фото; отдельные дни - галочками справа.";
         left.Controls.Add(lc);
+        left.Controls.Add(byMod);
+        left.Controls.Add(byTaken);
+        left.Controls.Add(dateNote);
         left.Controls.Add(cal);
         left.Controls.Add(lf);
         left.Controls.Add(from);
@@ -1443,6 +1579,18 @@ public class FotoForm : Form {
         } else { phoneText.Text = "Телефон не найден"; phoneText.ForeColor = Bad; }
         if (r.Error != null) Status(r.Error, Bad);
         else Status("Выберите дни в календаре (или галочками в списке) и нажмите «Перенести с телефона».", Hint);
+        // отчёт рядом с программой: что видно на телефоне (папки, сколько файлов, по каким дням; без имён файлов)
+        try { File.WriteAllText(Path.Combine(here, "otchet.txt"), PhoneShell.Report(r), new UTF8Encoding(true)); } catch { }
+        Rebuild();
+        FromPickers();
+    }
+
+    // раскладывать по «Изменён» или по дате съёмки: дни пересчитываются
+    void DateMode(bool taken) {
+        PhoneShell.ByTaken = taken;
+        settings["Дата"] = taken ? "съёмка" : "изменён";
+        SaveSettings();
+        foreach (PhoneFile f in files) PhoneShell.UseDate(f);
         Rebuild();
         FromPickers();
     }
@@ -1493,6 +1641,11 @@ public class FotoForm : Form {
         foreach (string x in Setting("Без папок", "").Split('|')) if (x.Length > 0 && !shown.Contains(x) && !off.Contains(x)) off.Add(x);
         string offText = string.Join("|", off.ToArray());
         if (offText != Setting("Без папок", "")) { settings["Без папок"] = offText; SaveSettings(); }
+        // у скольких файлов «Изменён» и дата съёмки - разные дни (галерея или облако перезаписали файл)
+        int diff = 0;
+        foreach (PhoneFile f in Shown2())
+            if (f.Modified != NoDate && f.Taken != NoDate && f.Modified.Date != f.Taken.Date) diff++;
+        dateNote.Text = diff == 0 ? "" : "У " + diff + " файлов дата съёмки и «Изменён» - разные дни";
         List<DateTime> l = DayList();
         List<DateTime> bold = new List<DateTime>();
         foreach (DateTime d in l) if (d != NoDate) bold.Add(d);
@@ -1819,6 +1972,7 @@ public class FotoForm : Form {
         return sb.ToString();
     }
     public void ShowPhones() { BeginInvoke((MethodInvoker)delegate { OpenPhones(); }); }
+    public void ByTaken(bool on) { if (on) byTaken.Checked = true; else byMod.Checked = true; }
     public void Kinds(bool photo, bool screens, bool video) { kPhoto.Checked = photo; kScreens.Checked = screens; kVideo.Checked = video; }
     public string Dump() {
         StringBuilder sb = new StringBuilder();
