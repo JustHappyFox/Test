@@ -291,6 +291,14 @@ class GiveawayFinder:
         self.giveaways: dict[str, Giveaway] = {}
         self.refs: dict[int, ChannelRef] = {}           # кэш инфо о каналах
         self.stopped_reason: str | None = None
+        # Поиск «до первой находки»: want(g) — подходит ли розыгрыш, want_count — сколько нужно
+        self.want: Any = None
+        self.want_count = 0
+        self.wanted = 0
+
+    @property
+    def found_enough(self) -> bool:
+        return bool(self.want_count) and self.wanted >= self.want_count
 
     async def pause(self) -> None:
         """Случайная пауза между запросами — чтобы не долбить API с ровным интервалом."""
@@ -460,6 +468,8 @@ class GiveawayFinder:
                 winners_are_visible=bool(media.winners_are_visible),
             )
             self.giveaways[key] = g
+            if self.want is not None and self.want(g):
+                self.wanted += 1
             log.info("  🎁 найден розыгрыш: %s | до %s | страны: %s | %s", g.prize_text(),
                      g.until_date.astimezone().strftime("%Y-%m-%d %H:%M"),
                      ",".join(g.countries) or "все",
@@ -489,7 +499,7 @@ class GiveawayFinder:
 
     async def crawl(self) -> None:
         try:
-            while self.queue and len(self.scanned) < self.args.max_channels:
+            while self.queue and len(self.scanned) < self.args.max_channels and not self.found_enough:
                 item, depth = self.queue.popleft()
                 ent = await self.resolve(item)
                 if ent is None:
@@ -708,24 +718,35 @@ def describe_sources(args: argparse.Namespace) -> str:
             f"Источники: " + "; ".join(parts))
 
 
-async def run_finder(client: TelegramClient, args: argparse.Namespace) -> "GiveawayFinder":
+async def run_finder(client: TelegramClient, args: argparse.Namespace,
+                     want: Any = None, want_count: int = 0) -> "GiveawayFinder":
+    """want/want_count: искать только до want_count подходящих розыгрышей. Тогда сначала
+    обходим известные каналы (свой список, агрегаторы) и только если там не нашлось —
+    ищем новые каналы по словам и хэштегам."""
     finder = GiveawayFinder(client, args)
+    finder.want, finder.want_count = want, want_count
     log.info(describe_sources(args))
     try:
         await finder.add_seeds()
         if args.dialogs:
             await finder.add_dialogs()
-        if not args.no_discover:
-            await finder.discover_keywords(args.keywords or DEFAULT_KEYWORDS)
-            await finder.discover_hashtags(args.hashtags or DEFAULT_HASHTAGS)
-        for q in args.post_search or []:
-            await finder.discover_post_query(q)
+        if want_count and finder.queue:
+            await finder.crawl()
+        if not finder.found_enough:
+            if not args.no_discover:
+                await finder.discover_keywords(args.keywords or DEFAULT_KEYWORDS)
+                await finder.discover_hashtags(args.hashtags or DEFAULT_HASHTAGS)
+            for q in args.post_search or []:
+                await finder.discover_post_query(q)
     except errors.FloodWaitError as e:
         log.warning("Поиск каналов прерван: лимит запросов на %d с. Перехожу к обходу.", e.seconds)
-    if not finder.queue:
+    if not finder.queue and not finder.scanned:
         sys.exit("Нечего сканировать: укажите -c/--channels-file, --dialogs или не отключайте поиск.")
 
-    await finder.crawl()
+    if not finder.found_enough:
+        await finder.crawl()
+    if finder.found_enough:
+        log.info("Нашёл %d подходящий розыгрыш — дальше не ищу", finder.wanted)
     if args.check:
         log.info("Проверяю возможность участия (%d розыгрышей)...", len(finder.giveaways))
         await finder.check_eligibility()
@@ -915,9 +936,15 @@ async def cmd_post_scheduled(client: TelegramClient, args: argparse.Namespace) -
             if scanned:
                 break
             scanned = True
-            log.info("Подходящих в очереди нет — ищу новые розыгрыши")
-            finder = await run_finder(client, args)
+            log.info("Подходящих в очереди нет — ищу один новый розыгрыш")
             known = {e["key"] for e in queue}
+            want_at = next_at
+
+            def want(g: Giveaway, known=known, want_at=want_at) -> bool:
+                return (bool(filter_giveaways([g], args)) and g.key not in posted
+                        and g.key not in scheduled and g.key not in known
+                        and g.until_date - want_at >= min_left)
+            finder = await run_finder(client, args, want=want, want_count=1)
             for g in filter_giveaways(finder.giveaways.values(), args):
                 if g.key in posted or g.key in scheduled or g.key in known or g.until_date - now < min_left:
                     continue

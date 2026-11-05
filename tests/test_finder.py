@@ -643,3 +643,21 @@ class ScheduledPostTests(unittest.TestCase):
         self.assertIn(self.entry(1)["key"], st["posted"])
         self.assertEqual([m for m, _ in c.forwards], [2, 3])     # вышедший не повторяется
         self.near(c.forwards[0][1], NOW + timedelta(hours=2.5))   # через 3,5 ч после вышедшего
+
+
+class EarlyStopTests(unittest.TestCase):
+    def test_stops_after_first_suitable(self):
+        chans = [channel(i, f"c{i}") for i in (1, 2, 3)]
+        history = {1: [message(1, 1, giveaway_media([1], stars=500, quantity=5))],   # мелкий — не подходит
+                   2: [message(2, 1, giveaway_media([2], stars=20000, quantity=50))],  # подходит
+                   3: [message(3, 1, giveaway_media([3], months=6, quantity=10))]}
+        client = FakeClient(chans, history)
+        a = gf.apply_preset(gf.build_parser().parse_args(
+            ["scan", "--no-discover", "--no-aggregators", "--depth", "0", "--min-stars", "10000",
+             "--min-premium", "5", "-c", "@c1", "-c", "@c2", "-c", "@c3"]))
+
+        def want(g):
+            return bool(gf.filter_giveaways([g], a))
+        f = asyncio.run(gf.run_finder(client, a, want=want, want_count=1))
+        self.assertEqual(client.scanned, [1, 2])  # третий канал уже не читали
+        self.assertTrue(f.found_enough)
