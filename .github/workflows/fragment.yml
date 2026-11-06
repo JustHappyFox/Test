@@ -1,0 +1,30 @@
+name: Fragment — видны ли розыгрыши в блокчейне TON
+
+# Проверка идеи 06.11: Fragment продаёт Premium для розыгрышей за TON, платежи публичные.
+# Смотрим комментарии к платежам. Аккаунт Telegram и секреты не используются.
+on:
+  workflow_dispatch:
+    inputs:
+      address:
+        description: "Адреса кошельков Fragment через пробел (пусто — найти по имени)"
+        type: string
+        default: ""
+      pages:
+        description: "Сколько страниц по 100 транзакций"
+        type: string
+        default: "10"
+
+permissions: {}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      ADDR: ${{ inputs.address }}
+      PAGES: ${{ inputs.pages }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: python3 tools/fragment_check.py --pages "$PAGES" ${ADDR:+--address $ADDR}
