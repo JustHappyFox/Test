@@ -211,6 +211,18 @@ class LaunchMessageTests(unittest.TestCase):
             self.assertEqual(w.texted, 0 if kept else 1)
             self.assertEqual(w.og_unknown, 1 if post_page == "" else 0)
 
+    def test_second_tier_stub_with_own_picture_is_dropped(self):
+        # рекламный пост-заглушка: текста на странице поста нет, но картинка — своя, а не аватарка канала
+        text = '<div class="tgme_widget_message_text js-message_text">x</div>'
+        feed = ('<meta property="og:image" content="https://cdn/avatar.jpg"><meta property="og:description" content="Канал">'
+                "<section>" + real_post(41, text) + GIVEAWAY + "</section>")
+        for img, kept in (("https://cdn/ad_photo.jpg", False), ("https://cdn/avatar.jpg", True)):
+            post = f'<meta property="og:image" content="{img}"><meta property="og:description" content="">'
+            pages = {"https://t.me/s/rzavayuui": feed, "https://t.me/rzavayuui/43": post}
+            w, got = self._run(None, strict=True, pages=pages)
+            self.assertEqual(got, [43] if kept else [], img)
+            self.assertEqual(w.imaged, 0 if kept else 1)
+
     def test_launch_on_the_next_page(self):
         # заглушка — самый старый пост на загруженных страницах: «запуск» ищем на следующей странице
         text = '<div class="tgme_widget_message_text js-message_text">x</div>'

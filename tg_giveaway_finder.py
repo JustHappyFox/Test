@@ -1117,9 +1117,9 @@ async def _run_finder(finder: "GiveawayFinder", client: TelegramClient,
         log.info("Веб-проверка t.me: каналов %d, страниц %d, открыто через API %d, ограничений частоты (429) %d%s",
                  finder.web_checked, finder.web.pages, finder.web_opened, finder.web.limited,
                  " — t.me перестал отвечать, остальное через API" if finder.web.broken else "")
-        if getattr(finder.web, "texted", 0):
-            log.info("Заглушек без «запуска», у которых на странице поста есть текст (не розыгрыш, не открывал): %d",
-                     finder.web.texted)
+        if getattr(finder.web, "texted", 0) or getattr(finder.web, "imaged", 0):
+            log.info("Заглушек без «запуска», у которых на странице поста есть текст / своя картинка "
+                     "(не розыгрыш, не открывал): %d / %d", finder.web.texted, finder.web.imaged)
     if args.check:
         log.info("Проверяю возможность участия (%d розыгрышей)...", len(finder.giveaways))
         await finder.check_eligibility()

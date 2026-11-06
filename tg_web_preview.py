@@ -61,6 +61,17 @@ LAUNCH_GAP_SECONDS = 600
 _OG_DESC_RE = re.compile(r'<meta property="og:description" content="([^"]*)"')
 
 
+_OG_IMAGE_RE = re.compile(r'<meta property="og:image" content="([^"]*)"')
+
+
+def _og_image(html: str | None) -> str | None:
+    """Картинка страницы. У ленты канала и у поста без своих медиа — аватарка канала (тот же адрес).
+    Замер 06.11: у 6 из 6 розыгрышей картинка поста = аватарка; у рекламных постов-заглушек
+    («Импорт авто», «Туры на Бали») — своё фото объявления (5 из 6)."""
+    m = _OG_IMAGE_RE.search(html or "")
+    return m.group(1) if m else None
+
+
 def _og_description(html: str | None) -> str | None:
     if not html:
         return None
@@ -136,6 +147,7 @@ class WebPreview:
         # розыгрыш» — замер 05.11 по сборникам: так у ~5 из 81 розыгрыша. Слабее подтверждения, идут после.
         self.gaps: dict[str, int] = {}
         self.texted = 0  # заглушек второго уровня, у которых на странице поста есть текст (не розыгрыш)
+        self.imaged = 0  # заглушек второго уровня без текста, но со своей картинкой (реклама) — не розыгрыш
         self.og_unknown = 0  # страница поста не загрузилась или без мета-тега — такие заглушки оставляем
         self.post_sem = asyncio.Semaphore(1)  # страницы постов — по одной (06.11: при 3 сразу половина без мета-тегов)
         self.broken = False  # t.me упорно ограничивает — дальше только через API
@@ -193,11 +205,12 @@ class WebPreview:
         username = username.lstrip("@")
         url = self.BASE + username
         seen: list[WebPost] = []
-        chan_desc = None
+        chan_desc = chan_img = None
         for page in range(max_pages):
             html = await self.fetch(url)
             if page == 0:
                 chan_desc = _og_description(html)  # у ленты канала og:description — описание канала
+                chan_img = _og_image(html)  # и og:image — аватарка канала
             if html is None:
                 if page == 0:
                     return None
@@ -230,7 +243,7 @@ class WebPreview:
             gapped = [p for p in hits if not p.forwarded and p.id not in ok_ids
                       and oldest_id <= p.id - 1 and p.id - 1 not in by_id]
             if gapped and gaps:
-                gapped = [p for p in gapped if not await self._has_text(username, p.id, chan_desc)]
+                gapped = [p for p in gapped if not await self._has_text(username, p.id, chan_desc, chan_img)]
             if gapped:
                 self.gaps[username.lower()] = len(gapped)
             checks = 0
@@ -248,10 +261,12 @@ class WebPreview:
             self.newest[username.lower()] = max(dates)
         return sorted({p.id for p in hits}, reverse=True)
 
-    async def _has_text(self, username: str, post_id: int, chan_desc: str | None) -> bool:
-        """У поста есть текст (og:description страницы поста) — значит это не модуль-розыгрыш.
-        Когда виджет поста закрыт, сайт кладёт туда описание канала (с другими пробелами) — это не текст."""
-        text = None
+    async def _has_text(self, username: str, post_id: int, chan_desc: str | None,
+                        chan_img: str | None = None) -> bool:
+        """У поста есть текст или своя картинка (страница поста: og:description / og:image) — значит
+        это не модуль-розыгрыш. Когда виджет поста закрыт, сайт кладёт в og:description описание
+        канала (с другими пробелами) — это не текст. У модуля картинка страницы — аватарка канала."""
+        text = html = None
         for attempt in range(3):
             async with self.post_sem:  # страницы постов — потише: под нагрузкой сайт отдаёт их без мета-тегов
                 html = await self.fetch(f"https://t.me/{username}/{post_id}")
@@ -268,6 +283,10 @@ class WebPreview:
             return " ".join((x or "").split())
         if text and norm(text) != norm(chan_desc):
             self.texted += 1
+            return True
+        img = _og_image(html)
+        if chan_img and img and img != chan_img:  # своя картинка поста (реклама, фото) — не модуль
+            self.imaged += 1
             return True
         return False
 
