@@ -36,7 +36,7 @@ async def get(s, url):
             async with s.get(url, headers=UA, timeout=aiohttp.ClientTimeout(total=30)) as r:
                 STATUS[r.status] = STATUS.get(r.status, 0) + 1
                 if r.status == 200:
-                    return await r.text()
+                    return (await r.read()).decode("utf-8", errors="replace")
                 if r.status == 429:
                     await asyncio.sleep(float(r.headers.get("Retry-After") or 5 * (i + 1)))
                     continue

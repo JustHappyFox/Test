@@ -54,6 +54,19 @@ FORWARD_CHECKS = 5  # сколько пересланных заглушек к�
 # Служебное сообщение «Канал запустил розыгрыш» сайт выводит пустым: только имя канала и время.
 # Прочие служебные («закрепил «…»», «канал создан», «фото изменено») — с текстом или картинкой.
 LAUNCH_GAP_SECONDS = 600
+# Страница поста t.me/<канал>/<N>: в og:description сайт кладёт текст поста, даже если в ленте пост
+# спрятан заглушкой. У модуля-розыгрыша текста нет — там пусто (замер 06.11: 22 из 23 розыгрышей;
+# у одного — описание канала, когда виджет поста закрыт). У прочих заглушек второго уровня текст есть
+# у ~3/4: это видео/фото с защитой, их через Dolli не открываем.
+_OG_DESC_RE = re.compile(r'<meta property="og:description" content="([^"]*)"')
+
+
+def _og_description(html: str | None) -> str | None:
+    if not html:
+        return None
+    import html as htmllib
+    m = _OG_DESC_RE.search(html)
+    return htmllib.unescape(m.group(1)).strip() if m else None
 
 
 def _empty_service(block: str) -> bool:
@@ -120,6 +133,7 @@ class WebPreview:
         # заглушек, перед которыми номер пропущен (сообщение удалено): админы иногда стирают «Канал запустил
         # розыгрыш» — замер 05.11 по сборникам: так у ~5 из 81 розыгрыша. Слабее подтверждения, идут после.
         self.gaps: dict[str, int] = {}
+        self.texted = 0  # заглушек второго уровня, у которых на странице поста есть текст (не розыгрыш)
         self.broken = False  # t.me упорно ограничивает — дальше только через API
 
     async def _session(self) -> Any:
@@ -146,7 +160,8 @@ class WebPreview:
                             return None
                         else:
                             self.pages += 1
-                            return await r.text()
+                            # кодировку не угадываем: битый символ в посте не должен ронять всю страницу
+                            return (await r.read()).decode("utf-8", errors="replace")
                 except Exception as e:  # сеть, таймаут, нет доступа к t.me
                     self.failed += 1
                     log.debug("t.me: %s — %s", url, e)
@@ -174,8 +189,11 @@ class WebPreview:
         username = username.lstrip("@")
         url = self.BASE + username
         seen: list[WebPost] = []
+        chan_desc = None
         for page in range(max_pages):
             html = await self.fetch(url)
+            if page == 0:
+                chan_desc = _og_description(html)  # у ленты канала og:description — описание канала
             if html is None:
                 if page == 0:
                     return None
@@ -207,6 +225,8 @@ class WebPreview:
             ok_ids = {p.id for p in confirmed}
             gapped = [p for p in hits if not p.forwarded and p.id not in ok_ids
                       and oldest_id <= p.id - 1 and p.id - 1 not in by_id]
+            if gapped and gaps:
+                gapped = [p for p in gapped if not await self._has_text(username, p.id, chan_desc)]
             if gapped:
                 self.gaps[username.lower()] = len(gapped)
             checks = 0
@@ -223,6 +243,14 @@ class WebPreview:
         if dates:
             self.newest[username.lower()] = max(dates)
         return sorted({p.id for p in hits}, reverse=True)
+
+    async def _has_text(self, username: str, post_id: int, chan_desc: str | None) -> bool:
+        """У поста есть текст (og:description страницы поста) — значит это не модуль-розыгрыш."""
+        text = _og_description(await self.fetch(f"https://t.me/{username}/{post_id}"))
+        if text and text != chan_desc:
+            self.texted += 1
+            return True
+        return False
 
     async def _has_launch(self, username: str, post_id: int) -> bool:
         """Есть ли «Канал запустил розыгрыш» прямо перед постом post_id (его заглушка — розыгрыш)."""

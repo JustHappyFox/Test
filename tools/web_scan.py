@@ -43,7 +43,8 @@ async def scan(names: list[str], days: int, pages: int, parallel: int, chunk: in
                         gap_only.add(u.lower())
             done = min(i + chunk, len(names))
             print(f"  {done}/{len(names)}: веб-страница у {with_page}, «слепых» {len(w.blind)}, с кандидатами {len(found)} "
-                  f"(с «запуском розыгрыша» {sum(1 for x in found if x[3])}, с пропуском перед заглушкой {len(gap_only)}); "
+                  f"(с «запуском розыгрыша» {sum(1 for x in found if x[3])}, с пропуском перед заглушкой {len(gap_only)}; "
+                  f"отсеяно заглушек с текстом {w.texted}); "
                   f"страниц {w.pages}, 429: {w.limited}, {time.time() - t0:.0f} с", flush=True)
     finally:
         await w.close()

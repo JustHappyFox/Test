@@ -194,6 +194,20 @@ class LaunchMessageTests(unittest.TestCase):
         self.assertEqual(got, [])
         self.assertEqual(w.gaps, {"rzavayuui": 1})
 
+    def test_second_tier_stub_with_text_is_dropped(self):
+        # страница поста t.me/канал/N: у модуля-розыгрыша og:description пустой, у видео с защитой — текст
+        text = '<div class="tgme_widget_message_text js-message_text">x</div>'
+        feed = ('<meta property="og:description" content="Описание канала">'
+                "<section>" + real_post(41, text) + GIVEAWAY + "</section>")
+        def meta(d):
+            return f'<meta property="og:description" content="{d}">'
+        for post_page, kept in ((meta("Цены растут? Зафиксируйте выгоду"), False), (meta(""), True),
+                                (meta("Описание канала"), True), ("", True)):
+            pages = {"https://t.me/s/rzavayuui": feed, "https://t.me/rzavayuui/43": post_page}
+            w, got = self._run(None, strict=True, pages=pages)
+            self.assertEqual(got, [43] if kept else [], post_page)
+            self.assertEqual(w.texted, 0 if kept else 1)
+
     def test_launch_on_the_next_page(self):
         # заглушка — самый старый пост на загруженных страницах: «запуск» ищем на следующей странице
         text = '<div class="tgme_widget_message_text js-message_text">x</div>'
