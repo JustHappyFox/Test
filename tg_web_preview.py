@@ -116,7 +116,8 @@ class WebPreview:
     """Чтение t.me/s/<канал> с ограничением одновременных запросов и паузой при 429."""
 
     BASE = "https://t.me/s/"
-    POST_RETRY_PAUSE = 2.0  # пауза перед повтором страницы поста без мета-тега, с
+    POST_RETRY_PAUSE = 3.0  # пауза перед повтором страницы поста без мета-тега, с
+    POST_PAUSE = 0.3  # пауза после каждой страницы поста, с
 
     def __init__(self, parallel: int = 8, timeout: float = 20, max_limited: int = 30):
         self.parallel = max(1, parallel)
@@ -136,7 +137,7 @@ class WebPreview:
         self.gaps: dict[str, int] = {}
         self.texted = 0  # заглушек второго уровня, у которых на странице поста есть текст (не розыгрыш)
         self.og_unknown = 0  # страница поста не загрузилась или без мета-тега — такие заглушки оставляем
-        self.post_sem = asyncio.Semaphore(3)
+        self.post_sem = asyncio.Semaphore(1)  # страницы постов — по одной (06.11: при 3 сразу половина без мета-тегов)
         self.broken = False  # t.me упорно ограничивает — дальше только через API
 
     async def _session(self) -> Any:
@@ -254,6 +255,7 @@ class WebPreview:
         for attempt in range(3):
             async with self.post_sem:  # страницы постов — потише: под нагрузкой сайт отдаёт их без мета-тегов
                 html = await self.fetch(f"https://t.me/{username}/{post_id}")
+                await asyncio.sleep(self.POST_PAUSE)
             text = _og_description(html)
             if text is not None:
                 break

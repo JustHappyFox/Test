@@ -13,7 +13,7 @@ from telethon.tl import functions, types  # noqa: E402
 import tg_giveaway_finder as gf  # noqa: E402
 import tg_web_preview as wp  # noqa: E402
 
-wp.WebPreview.POST_RETRY_PAUSE = 0  # в тестах не ждём повторов страницы поста
+wp.WebPreview.POST_RETRY_PAUSE = wp.WebPreview.POST_PAUSE = 0  # в тестах не ждём страниц постов
 from test_finder import NOW, FakeClient, args, channel, giveaway_media, message  # noqa: E402
 
 
