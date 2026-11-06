@@ -70,7 +70,21 @@ async def main():
     ap.add_argument("--sample", type=int, default=300)
     ap.add_argument("--days", type=int, default=7)
     ap.add_argument("--parallel", type=int, default=2)
+    ap.add_argument("--ua-test", nargs="*", default=[], help="канал/N: сравнить og:description для двух User-Agent")
     a = ap.parse_args()
+    if a.ua_test:
+        bot = {"User-Agent": "Mozilla/5.0 (compatible; giveaway-finder)"}
+        async with aiohttp.ClientSession() as s:
+            for p in a.ua_test:
+                chan = p.split("/")[0]
+                for name, ua in (("браузер", UA), ("бот", bot)):
+                    async with s.get(f"https://t.me/{p}", headers=ua) as r:
+                        d = OG.search((await r.read()).decode("utf-8", "replace"))
+                    async with s.get(f"https://t.me/s/{chan}", headers=ua) as r:
+                        f = OG.search((await r.read()).decode("utf-8", "replace"))
+                    print(f"{p} [{name}]: пост={d.group(1)[:70]!r} | лента={f.group(1)[:50]!r}" if d and f
+                          else f"{p} [{name}]: пост={d and d.group(1)[:70]!r} | лента={f and f.group(1)[:50]!r}")
+        return
     async with aiohttp.ClientSession() as s:
         print("=== Известные розыгрыши ===")
         stat = {}

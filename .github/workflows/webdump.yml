@@ -41,7 +41,12 @@ jobs:
         if: inputs.og != ''
         env:
           OG: ${{ inputs.og }}
-        run: python tools/og_check.py --posts $POSTS --gap-file state/cc_candidates.txt --sample $OG | tee /tmp/web_dump.txt
+        run: |
+          if [ "$OG" = "ua" ]; then
+            python tools/og_check.py --ua-test $POSTS | tee /tmp/web_dump.txt
+          else
+            python tools/og_check.py --posts $POSTS --gap-file state/cc_candidates.txt --sample $OG | tee /tmp/web_dump.txt
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: web-dump
