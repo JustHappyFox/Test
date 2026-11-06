@@ -1496,6 +1496,18 @@ async def cmd_post_scheduled(client: TelegramClient, args: argparse.Namespace) -
             log.info("🕒 Запланировано на %s UTC: %s | %s", when.strftime("%d.%m %H:%M"), entry["prize"], entry["link"])
         next_at = when + interval
 
+    # раз в сутки — поиск, даже если запас не пуст (владелец 06.11: агрегаторы проверять раз в день)
+    daily = getattr(args, "daily_search_hours", 0) or 0
+    last = st.get("last_search")
+    left = [e for e in queue if e["key"] not in posted and e["key"] not in scheduled
+            and e["key"] not in bad and datetime.fromisoformat(e["until"]) > now]
+    if (daily and not args.refill and scans == 0 and len(left) < args.reserve
+            and (not last or now - datetime.fromisoformat(last) >= timedelta(hours=daily))):
+        log.info("Поиска не было %g ч — проверяю агрегаторы и пополняю запас (в запасе %d из %d)",
+                 daily, len(left), args.reserve)
+        queue = left
+        await search()
+
     if not args.dry_run:
         st.update(posted=posted, queue=queue, scheduled=list(scheduled.values()), bad=bad,
                   post_times=[t.isoformat() for t in post_times][-50:], our_ids=our_ids[-100:],
@@ -1733,6 +1745,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="не пересылать розыгрыши, до конца которых меньше N часов (3)")
     ps.add_argument("--search-cooldown-hours", type=float, default=2.0, metavar="Ч",
                     help="если поиск ничего не дал, следующий — не раньше чем через Ч часов (2)")
+    ps.add_argument("--daily-search-hours", type=float, default=0, metavar="Ч",
+                    help="искать и пополнять запас, если поиска не было Ч часов, даже когда запас не пуст "
+                         "(0 — только когда запас кончился)")
     ps.add_argument("--post-now", metavar="ССЫЛКА",
                     help="опубликовать этот розыгрыш из запаса сейчас, вне очереди (расписание не сдвигается)")
     ps.add_argument("--reserve", type=int, default=10, metavar="N",

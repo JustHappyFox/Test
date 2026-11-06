@@ -81,7 +81,7 @@ jobs:
         run: >
           python tg_giveaway_finder.py post --to TGaGifts
           --countries RU,BY,KZ
-          --count 1 --min-hours-left 3 --min-interval-hours 3.5 --manual-gap-hours 5 --schedule-ahead 0 --reserve 10
+          --count 1 --min-hours-left 3 --min-interval-hours 3.5 --manual-gap-hours 5 --schedule-ahead 0 --reserve 10 --daily-search-hours 24
           --careful --max-channels 1000 --search-pages 2 --source-limit 100
           --web --web-max 6000 --time-limit 30
           --discover-file state/cc_candidates.txt --web-open-max 40 --no-discover

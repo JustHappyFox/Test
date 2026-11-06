@@ -884,7 +884,7 @@ class RefillTests(unittest.TestCase):
 
 
 class SearchCooldownTests(unittest.TestCase):
-    def run_post(self, st_extra):
+    def run_post(self, st_extra, extra_args=(), last_post_hours=4):
         target = channel(900, "mygroup", left=False)
 
         class C(FakeClient):
@@ -901,11 +901,12 @@ class SearchCooldownTests(unittest.TestCase):
         client = C([target, channel(1, "c1")], {})
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp, "s.json")
-            gf.save_state(path, {"posted": {}, "queue": [], "last_post": (NOW - timedelta(hours=4)).isoformat(),
-                                 **st_extra})
+            gf.save_state(path, {"posted": {}, "queue": [],
+                                 "last_post": (NOW - timedelta(hours=last_post_hours)).isoformat(), **st_extra})
             a = gf.apply_preset(gf.build_parser().parse_args(
                 ["post", "--to", "@mygroup", "--state", str(path), "--no-discover", "--no-aggregators",
-                 "--depth", "0", "-c", "@c1", "--min-interval-hours", "3.5", "--schedule-ahead", "0"]))
+                 "--depth", "0", "-c", "@c1", "--min-interval-hours", "3.5", "--schedule-ahead", "0",
+                 *extra_args]))
             asyncio.run(gf.cmd_post(client, a))
             return calls, gf.load_state(path)
 
@@ -917,6 +918,18 @@ class SearchCooldownTests(unittest.TestCase):
         calls, st = self.run_post({"last_search": (NOW - timedelta(hours=3)).isoformat(), "last_search_added": 0})
         self.assertEqual(calls, [1])                      # один поиск; пусто — без повторов
         self.assertEqual(st["last_search_added"], 0)
+
+    def test_daily_search_even_when_not_due(self):
+        # пост ещё рано, но поиска не было больше суток — проверяем агрегаторы и пополняем запас
+        old = {"last_search": (NOW - timedelta(hours=25)).isoformat(), "last_search_added": 3}
+        calls, st = self.run_post(old, ["--daily-search-hours", "24"], last_post_hours=1)
+        self.assertEqual(calls, [1])
+        self.assertNotEqual(st["last_search"], old["last_search"])
+        calls, _ = self.run_post(old, [], last_post_hours=1)          # без опции — как раньше
+        self.assertEqual(calls, [])
+        fresh = {"last_search": (NOW - timedelta(hours=5)).isoformat(), "last_search_added": 3}
+        calls, _ = self.run_post(fresh, ["--daily-search-hours", "24"], last_post_hours=1)
+        self.assertEqual(calls, [])                                    # искали меньше суток назад
 
 
 class DueSlackTests(PostWhenDueTests):
