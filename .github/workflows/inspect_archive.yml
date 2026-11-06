@@ -1,0 +1,81 @@
+name: Разбор подозрительного архива (без запуска)
+
+# Владелец 06.11 попросил безопасно посмотреть архив из hydery-debug/Telegram-Gift-Parser
+# (README ведёт только на него, кода в репозитории нет — похоже на приманку-вредонос).
+# Здесь архив ТОЛЬКО скачивается и разбирается как данные: список файлов, типы, хэши, строки.
+# Ничего не запускается. Одноразовая машина GitHub: секретов нет, токену прав не даём.
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: "Адрес архива"
+        type: string
+        default: "https://raw.githubusercontent.com/hydery-debug/Telegram-Gift-Parser/main/ungrating/Telegram_Parser_Gift_3.2.zip"
+
+permissions: {}
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      URL: ${{ inputs.url }}
+    steps:
+      - name: Скачать и разобрать (без запуска)
+        run: |
+          set -u
+          mkdir -p /tmp/sample && cd /tmp/sample
+          curl -sSL -o sample.bin "$URL"
+          echo "== Архив"; ls -l sample.bin; sha256sum sample.bin; file sample.bin
+          cat > /tmp/inspect.py <<'EOF'
+          import hashlib, os, re, sys, zipfile
+          src, out = sys.argv[1], sys.argv[2]
+          KEYS = re.compile(rb"(https?://[\x21-\x7e]{6,120}|api\.telegram\.org[\x21-\x7e]{0,80}|discord(?:app)?\.com/api/webhooks[\x21-\x7e]{0,80}"
+                            rb"|tdata|\.session|Local State|Login Data|wallet|metamask|exodus|powershell|cmd\.exe|FromBase64String"
+                            rb"|VirtualAlloc|WriteProcessMemory|CreateRemoteThread|pastebin|ngrok|\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b)", re.I)
+          def show(path, data):
+              h = hashlib.sha256(data).hexdigest()
+              kind = ("PE (Windows .exe/.dll)" if data[:2] == b"MZ" else "ELF" if data[:4] == b"\x7fELF"
+                      else "ZIP" if data[:2] == b"PK" else "RAR" if data[:4] == b"Rar!" else "7z" if data[:2] == b"7z"
+                      else "текст" if all(32 <= c < 127 or c in (9, 10, 13) or c >= 128 for c in data[:2000]) else "двоичный")
+              print(f"\n--- {path}: {len(data)} байт, {kind}, sha256 {h}")
+              hits = {}
+              for m in KEYS.finditer(data):
+                  k = m.group(0)[:140]
+                  hits[k] = hits.get(k, 0) + 1
+              for k, n in sorted(hits.items(), key=lambda x: -x[1])[:60]:
+                  print(f"    {n:4d} × {k.decode('latin-1')}")
+              if kind == "текст" and len(data) < 200_000:
+                  print("    ----- начало файла -----")
+                  for line in data.decode("utf-8", "replace").splitlines()[:120]:
+                      print("    |", line[:200])
+          data = open(src, "rb").read()
+          if data[:2] != b"PK":
+              show(src, data); sys.exit(0)
+          z = zipfile.ZipFile(src)
+          print("== Содержимое архива:")
+          for i in z.infolist():
+              print(f"  {i.filename}  {i.file_size} байт  {'ЗАШИФРОВАН' if i.flag_bits & 1 else ''}")
+          for i in z.infolist():
+              if i.is_dir():
+                  continue
+              if i.flag_bits & 1:
+                  print(f"\n--- {i.filename}: зашифрован паролем — внутрь не смотрим"); continue
+              name = os.path.normpath(i.filename).lstrip("/.")  # без выхода из папки
+              blob = z.read(i)
+              show(name, blob)
+              if blob[:2] == b"PK":  # архив в архиве
+                  p = os.path.join(out, name.replace("/", "_"))
+                  open(p, "wb").write(blob)
+                  try:
+                      zz = zipfile.ZipFile(p)
+                      for j in zz.infolist():
+                          if not j.is_dir() and not j.flag_bits & 1:
+                              show(f"{name} → {j.filename}", zz.read(j))
+                          elif j.flag_bits & 1:
+                              print(f"--- {name} → {j.filename}: зашифрован")
+                  except zipfile.BadZipFile:
+                      pass
+          EOF
+          mkdir -p /tmp/sample/out
+          python3 -I /tmp/inspect.py /tmp/sample/sample.bin /tmp/sample/out
