@@ -45,10 +45,20 @@ jobs:
                   hits[k] = hits.get(k, 0) + 1
               for k, n in sorted(hits.items(), key=lambda x: -x[1])[:60]:
                   print(f"    {n:4d} × {k.decode('latin-1')}")
-              if kind == "текст" and len(data) < 200_000:
+              if kind == "текст":
+                  txt = data.decode("utf-8", "replace")
+                  lines = txt.splitlines()
+                  esc = len(re.findall(r"\\\d{1,3}|\\x[0-9a-fA-F]{2}", txt))
+                  print(f"    строк {len(lines)}, самая длинная {max((len(l) for l in lines), default=0)} символов, "
+                        f"экранированных байтов (\\123 / \\x41) {esc}")
+                  words = re.findall(r"[A-Za-z_]{4,}", txt)
+                  common = {}
+                  for w in words:
+                      common[w] = common.get(w, 0) + 1
+                  print("    частые слова:", ", ".join(f"{w}×{n}" for w, n in sorted(common.items(), key=lambda x: -x[1])[:25]))
                   print("    ----- начало файла -----")
-                  for line in data.decode("utf-8", "replace").splitlines()[:120]:
-                      print("    |", line[:200])
+                  for line in lines[:15]:
+                      print("    |", line[:300])
           data = open(src, "rb").read()
           if data[:2] != b"PK":
               show(src, data); sys.exit(0)
