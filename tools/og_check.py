@@ -71,7 +71,21 @@ async def main():
     ap.add_argument("--days", type=int, default=7)
     ap.add_argument("--parallel", type=int, default=2)
     ap.add_argument("--ua-test", nargs="*", default=[], help="канал/N: сравнить og:description для двух User-Agent")
+    ap.add_argument("--debug", nargs="*", default=[], help="каналы: как их видит поиск (заглушки и og каждой)")
     a = ap.parse_args()
+    if a.debug:
+        w = wp.WebPreview(parallel=4)
+        since = datetime.now(timezone.utc) - timedelta(days=a.days)
+        for name in a.debug:
+            ids = await w.candidates(name, since, max_pages=20, strict=True, gaps=False)
+            ids_g = await w.candidates(name, since, max_pages=20, strict=True, gaps=True)
+            print(f"@{name}: без второго уровня {ids}, со вторым (после отсева текста) {ids_g}, "
+                  f"отсеяно всего {w.texted}, второй уровень {w.gaps.get(name.lower())}")
+            for i in ids_g:
+                html = await w.fetch(f"https://t.me/{name}/{i}")
+                print(f"   {i}: og={wp._og_description(html)!r:.90}")
+        await w.close()
+        return
     if a.ua_test:
         bot = {"User-Agent": "Mozilla/5.0 (compatible; giveaway-finder)"}
         async with aiohttp.ClientSession() as s:

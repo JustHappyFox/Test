@@ -42,7 +42,9 @@ jobs:
         env:
           OG: ${{ inputs.og }}
         run: |
-          if [ "$OG" = "ua" ]; then
+          if [ "$OG" = "debug" ]; then
+            python tools/og_check.py --debug $POSTS | tee /tmp/web_dump.txt
+          elif [ "$OG" = "ua" ]; then
             python tools/og_check.py --ua-test $POSTS | tee /tmp/web_dump.txt
           else
             python tools/og_check.py --posts $POSTS --gap-file state/cc_candidates.txt --sample $OG | tee /tmp/web_dump.txt
