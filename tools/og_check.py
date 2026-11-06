@@ -83,7 +83,10 @@ async def main():
                   f"отсеяно всего {w.texted}, второй уровень {w.gaps.get(name.lower())}")
             for i in ids_g:
                 html = await w.fetch(f"https://t.me/{name}/{i}")
-                print(f"   {i}: og={wp._og_description(html)!r:.90}")
+                d = wp._og_description(html)
+                print(f"   {i}: og={d!r:.90}")
+                if d is None:
+                    print("      страница без og:description, начало:", (html or "<пусто>")[:1500].replace("\n", " "))
         await w.close()
         return
     if a.ua_test:
