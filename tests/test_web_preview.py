@@ -121,6 +121,7 @@ LAUNCH = real_post(42, "", cls="text_not_supported_wrap service_message")
 GIVEAWAY = real_post(43, '<div class="message_media_not_supported_wrap"><div class="message_media_not_supported">'
                          '<div class="message_media_not_supported_label">Please open Telegram to view this post</div>'
                          '</div></div>')
+GIVEAWAY_PREMIUM = GIVEAWAY.replace("Please open Telegram to view this post", "This media is not supported in the widget")
 PINNED = real_post(44, '<div class="tgme_widget_message_text js-message_text" dir="auto"><a class="tgme_widget_message_author_name" '
                        'href="https://t.me/rzavayuui"><span dir="auto">рижая</span></a> pinned «<span '
                        'class="tgme_widget_service_strong_text" dir="auto"></span>»</div> ',
@@ -188,10 +189,14 @@ class LaunchMessageTests(unittest.TestCase):
     def test_deleted_launch_message_is_second_tier(self):
         # перед заглушкой номер пропущен — «Канал запустил розыгрыш» удалили; берём, но не считаем подтверждённым
         text = '<div class="tgme_widget_message_text js-message_text">x</div>'
-        html = "<section>" + real_post(41, text) + GIVEAWAY + "</section>"   # 42 нет на странице
+        html = "<section>" + real_post(41, text) + GIVEAWAY_PREMIUM + "</section>"   # 42 нет на странице
         w, got = self._run(html, strict=True)
         self.assertEqual(got, [43])
         self.assertEqual((w.launches, w.gaps), ({}, {"rzavayuui": 1}))
+        # та же заглушка с надписью «Please open Telegram…» (реклама, карусель) — второй уровень не берёт
+        w, got = self._run(html.replace(GIVEAWAY_PREMIUM, GIVEAWAY), strict=True)
+        self.assertEqual(got, [])
+        self.assertEqual(w.label_dropped, 1)
         w, got = self._run(html, strict=True, gaps=False)   # так в поиске: Dolli такие не открывает
         self.assertEqual(got, [])
         self.assertEqual(w.gaps, {"rzavayuui": 1})
@@ -200,7 +205,7 @@ class LaunchMessageTests(unittest.TestCase):
         # страница поста t.me/канал/N: у модуля-розыгрыша og:description пустой, у видео с защитой — текст
         text = '<div class="tgme_widget_message_text js-message_text">x</div>'
         feed = ('<meta property="og:description" content="Описание канала">'
-                "<section>" + real_post(41, text) + GIVEAWAY + "</section>")
+                "<section>" + real_post(41, text) + GIVEAWAY_PREMIUM + "</section>")
         def meta(d):
             return f'<meta property="og:description" content="{d}">'
         for post_page, kept in ((meta("Цены растут? Зафиксируйте выгоду"), False), (meta(""), True),
@@ -215,7 +220,7 @@ class LaunchMessageTests(unittest.TestCase):
         # рекламный пост-заглушка: текста на странице поста нет, но картинка — своя, а не аватарка канала
         text = '<div class="tgme_widget_message_text js-message_text">x</div>'
         feed = ('<meta property="og:image" content="https://cdn/avatar.jpg"><meta property="og:description" content="Канал">'
-                "<section>" + real_post(41, text) + GIVEAWAY + "</section>")
+                "<section>" + real_post(41, text) + GIVEAWAY_PREMIUM + "</section>")
         for img, kept in (("https://cdn/ad_photo.jpg", False), ("https://cdn/avatar.jpg", True)):
             post = f'<meta property="og:image" content="{img}"><meta property="og:description" content="">'
             pages = {"https://t.me/s/rzavayuui": feed, "https://t.me/rzavayuui/43": post}

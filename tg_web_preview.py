@@ -24,6 +24,11 @@ from typing import Any
 log = logging.getLogger("giveaway_finder")
 
 STUB_CLASS = "message_media_not_supported"
+# Надпись заглушки (находка владельца 06.11, DevTools): у модуля-розыгрыша Premium — всегда
+# «This media is not supported in the widget» (17 из 17), у розыгрыша звёзд — «Please open Telegram
+# to view this post» (7 из 7). У рекламы, каруселей, «Канал добавлен в сообщество» и постов с
+# текстом — тоже «Please open…». Второй уровень (без «запуска») берём только с этой надписью.
+WIDGET_LABEL = "This media is not supported in the widget"
 TEXT_CLASS = "tgme_widget_message_text"
 _POST_RE = re.compile(r'data-post="([^"/]+)/(\d+)"')
 _DATE_RE = re.compile(r'<time datetime="([^"]+)"')
@@ -39,7 +44,8 @@ class WebPost:
     stub: bool  # заглушка без текста и без фото/видео — так выглядит модуль-розыгрыш
     forwarded: bool = False
     empty_service: bool = False
-    source: str | None = None  # пересланный пост: «канал/номер» оригинала из ссылки «Forwarded from»  # служебное сообщение без текста — так сайт показывает «Канал запустил розыгрыш»
+    source: str | None = None  # пересланный пост: «канал/номер» оригинала из ссылки «Forwarded from»
+    widget_label: bool = False  # надпись заглушки «This media is not supported in the widget»
 
 
 # Бывают каналы, у которых сайт прячет вообще все посты (одни пустые заглушки). По ним веб-проверка
@@ -110,7 +116,8 @@ def parse_page(html: str) -> list[WebPost] | None:
         posts.append(WebPost(id=int(m.group(2)), date=date, stub=stub,
                              forwarded="tgme_widget_message_forwarded_from" in block,
                              empty_service=_empty_service(block),
-                             source=f"{src.group(1)}/{src.group(2)}" if src else None))
+                             source=f"{src.group(1)}/{src.group(2)}" if src else None,
+                             widget_label=WIDGET_LABEL in block))
     return posts
 
 
@@ -147,6 +154,7 @@ class WebPreview:
         # розыгрыш» — замер 05.11 по сборникам: так у ~5 из 81 розыгрыша. Слабее подтверждения, идут после.
         self.gaps: dict[str, int] = {}
         self.texted = 0  # заглушек второго уровня, у которых на странице поста есть текст (не розыгрыш)
+        self.label_dropped = 0  # заглушек второго уровня с надписью «Please open…» (реклама, карусели и т.п.)
         self.imaged = 0  # заглушек второго уровня без текста, но со своей картинкой (реклама) — не розыгрыш
         self.og_unknown = 0  # страница поста не загрузилась или без мета-тега — такие заглушки оставляем
         self.post_sem = asyncio.Semaphore(1)  # страницы постов — по одной (06.11: при 3 сразу половина без мета-тегов)
@@ -243,6 +251,8 @@ class WebPreview:
             gapped = [p for p in hits if not p.forwarded and p.id not in ok_ids
                       and oldest_id <= p.id - 1 and p.id - 1 not in by_id]
             if gapped and gaps:
+                self.label_dropped += sum(1 for p in gapped if not p.widget_label)
+                gapped = [p for p in gapped if p.widget_label]
                 gapped = [p for p in gapped if not await self._has_text(username, p.id, chan_desc, chan_img)]
             if gapped:
                 self.gaps[username.lower()] = len(gapped)
