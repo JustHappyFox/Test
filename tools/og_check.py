@@ -72,7 +72,20 @@ async def main():
     ap.add_argument("--parallel", type=int, default=2)
     ap.add_argument("--ua-test", nargs="*", default=[], help="канал/N: сравнить og:description для двух User-Agent")
     ap.add_argument("--debug", nargs="*", default=[], help="каналы: как их видит поиск (заглушки и og каждой)")
+    ap.add_argument("--img", nargs="*", default=[], help="канал/N: og:image поста против аватарки канала")
     a = ap.parse_args()
+    if a.img:
+        img = re.compile(r'<meta property="og:image" content="([^"]*)"')
+        async with aiohttp.ClientSession() as s:
+            for p in a.img:
+                chan = p.split("/")[0]
+                post = img.search(await get(s, f"https://t.me/{p}"))
+                page = img.search(await get(s, f"https://t.me/{chan}"))
+                feed = img.search(await get(s, f"https://t.me/s/{chan}"))
+                post, page, feed = (m.group(1) if m else None for m in (post, page, feed))
+                print(f"{p}: пост=канал? {post == page} | пост=лента? {post == feed} | "
+                      f"пост={str(post)[-40:]} | канал={str(page)[-40:]}")
+        return
     if a.debug:
         w = wp.WebPreview(parallel=4)
         since = datetime.now(timezone.utc) - timedelta(days=a.days)

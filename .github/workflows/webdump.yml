@@ -42,7 +42,9 @@ jobs:
         env:
           OG: ${{ inputs.og }}
         run: |
-          if [ "$OG" = "debug" ]; then
+          if [ "$OG" = "img" ]; then
+            python tools/og_check.py --img $POSTS | tee /tmp/web_dump.txt
+          elif [ "$OG" = "debug" ]; then
             python tools/og_check.py --debug $POSTS | tee /tmp/web_dump.txt
           elif [ "$OG" = "ua" ]; then
             python tools/og_check.py --ua-test $POSTS | tee /tmp/web_dump.txt
