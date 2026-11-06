@@ -1,0 +1,68 @@
+name: Поиск новых агрегаторов по «Forwarded from»
+
+# Идея владельца 06.11: агрегатор пересылает чужие розыгрыши, на его веб-странице много заглушек
+# со строкой «Forwarded from <паблик>». Проверяем первую страницу каждого канала из большого списка
+# (5 частей параллельно, на разных машинах), у оригиналов — «Канал запустил розыгрыш».
+# Аккаунт Telegram не используется.
+on:
+  workflow_dispatch:
+    inputs:
+      source:
+        description: "Список имён"
+        type: string
+        default: "state/cc_usernames.txt"
+      min_forwards:
+        description: "Сколько пересланных заглушек на первой странице нужно, чтобы считать кандидатом"
+        type: string
+        default: "3"
+
+permissions:
+  contents: write
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4]
+    env:
+      SOURCE: ${{ inputs.source }}
+      MINF: ${{ inputs.min_forwards }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -q aiohttp
+      - run: python tools/agg_scan.py "$SOURCE" --shard ${{ matrix.shard }} --shards 5 --min-forwards "$MINF" --out /tmp/agg_${{ matrix.shard }}.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agg-${{ matrix.shard }}
+          path: /tmp/agg_${{ matrix.shard }}.txt
+
+  save:
+    needs: scan
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/agg
+      - name: Свести и сохранить
+        run: |
+          cat /tmp/agg/*/agg_*.txt 2>/dev/null | sort -t'#' -k2 -rn > state/agg_candidates.txt || true
+          echo "Кандидатов: $(wc -l < state/agg_candidates.txt)"; head -60 state/agg_candidates.txt
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          for attempt in 1 2 3 4 5; do
+            git fetch -q origin main && git reset -q --soft origin/main
+            git add state/agg_candidates.txt
+            if git diff --cached --quiet; then echo "Без изменений"; exit 0; fi
+            git commit -qm "Aggregator scan: $(wc -l < state/agg_candidates.txt) channels forwarding giveaway-like posts"
+            git push -q origin HEAD:main && exit 0
+            sleep $((attempt * 5))
+          done
+          exit 1
