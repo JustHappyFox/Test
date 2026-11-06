@@ -22,7 +22,11 @@ import tg_web_preview as wp  # noqa: E402
 KNOWN = {"tgagifts"}  # наш канал
 
 
-async def scan(names: list[str], min_fwd: int, parallel: int):
+class Enough(Exception):
+    pass
+
+
+async def scan(names: list[str], min_fwd: int, parallel: int, stop_after: int = 0):
     w = wp.WebPreview(parallel=parallel, max_limited=10 ** 9)
     found = []
     live = 0
@@ -45,11 +49,19 @@ async def scan(names: list[str], min_fwd: int, parallel: int):
                 confirmed += 1
         newest = max((p.date for p in posts if p.date), default=None)
         found.append((name, len(fwd), len(posts), confirmed, newest, sources[:5]))
+        print(f"  НАЙДЕН @{name}: пересланных заглушек {len(fwd)} из {len(posts)}, у оригиналов «запуск» {confirmed} из "
+              f"{min(3, len(sources))}, последний пост {newest}, откуда: {' '.join(sources[:5])}", flush=True)
+        if stop_after and sum(1 for f in found if f[3]) >= stop_after:
+            raise Enough
 
     try:
-        chunk = 1000
+        chunk = 200 if stop_after else 1000
         for i in range(0, len(names), chunk):
-            await asyncio.gather(*(one(n) for n in names[i:i + chunk]))
+            try:
+                await asyncio.gather(*(one(n) for n in names[i:i + chunk]))
+            except Enough:
+                print(f"  набрано {stop_after} подтверждённых — хватит (проверено {i + chunk} имён)")
+                break
             print(f"  {min(i + chunk, len(names))}/{len(names)}: живых {live}, с пересланными заглушками ≥{min_fwd}: "
                   f"{len(found)} (у оригиналов есть «запуск»: {sum(1 for f in found if f[3])}); страниц {w.pages}, "
                   f"429: {w.limited}, {time.time() - t0:.0f} с", flush=True)
@@ -66,11 +78,12 @@ def main():
     ap.add_argument("--shards", type=int, default=1)
     ap.add_argument("--min-forwards", type=int, default=3)
     ap.add_argument("--parallel", type=int, default=8)
+    ap.add_argument("--stop-after", type=int, default=0, help="остановиться, когда найдено N с подтверждённым «запуском»")
     a = ap.parse_args()
     names = [ln.split("#", 1)[0].strip().lstrip("@") for ln in Path(a.names).read_text(encoding="utf-8").splitlines()]
     names = [n for n in names if n and n.lower() not in KNOWN]
     names = names[a.shard::a.shards]
-    live, found = asyncio.run(scan(names, a.min_forwards, a.parallel))
+    live, found = asyncio.run(scan(names, a.min_forwards, a.parallel, a.stop_after))
     found.sort(key=lambda f: (-f[3], -f[1]))
     with open(a.out, "w", encoding="utf-8") as f:
         for name, nf, np_, conf, newest, src in found:

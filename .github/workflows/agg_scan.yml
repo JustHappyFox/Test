@@ -15,6 +15,10 @@ on:
         description: "Сколько пересланных заглушек на первой странице нужно, чтобы считать кандидатом"
         type: string
         default: "3"
+      stop_after:
+        description: "Пробный прогон: остановиться на N подтверждённых (только одна часть; 0 — весь список)"
+        type: string
+        default: "3"
 
 permissions:
   contents: write
@@ -30,14 +34,17 @@ jobs:
     env:
       SOURCE: ${{ inputs.source }}
       MINF: ${{ inputs.min_forwards }}
+      STOP: ${{ inputs.stop_after }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - run: pip install -q aiohttp
-      - run: python tools/agg_scan.py "$SOURCE" --shard ${{ matrix.shard }} --shards 5 --min-forwards "$MINF" --out /tmp/agg_${{ matrix.shard }}.txt
-      - uses: actions/upload-artifact@v4
+      - if: env.STOP == '0' || matrix.shard == 0
+        run: python tools/agg_scan.py "$SOURCE" --shard ${{ matrix.shard }} --shards 5 --min-forwards "$MINF" --stop-after "$STOP" --out /tmp/agg_${{ matrix.shard }}.txt
+      - if: env.STOP == '0' || matrix.shard == 0
+        uses: actions/upload-artifact@v4
         with:
           name: agg-${{ matrix.shard }}
           path: /tmp/agg_${{ matrix.shard }}.txt
