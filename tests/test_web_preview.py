@@ -12,6 +12,8 @@ from telethon.tl import functions, types  # noqa: E402
 
 import tg_giveaway_finder as gf  # noqa: E402
 import tg_web_preview as wp  # noqa: E402
+
+wp.WebPreview.POST_RETRY_PAUSE = 0  # в тестах не ждём повторов страницы поста
 from test_finder import NOW, FakeClient, args, channel, giveaway_media, message  # noqa: E402
 
 
@@ -202,11 +204,12 @@ class LaunchMessageTests(unittest.TestCase):
         def meta(d):
             return f'<meta property="og:description" content="{d}">'
         for post_page, kept in ((meta("Цены растут? Зафиксируйте выгоду"), False), (meta(""), True),
-                                (meta("Описание канала"), True), ("", True)):
+                                (meta("Описание  канала"), True), ("", True)):
             pages = {"https://t.me/s/rzavayuui": feed, "https://t.me/rzavayuui/43": post_page}
             w, got = self._run(None, strict=True, pages=pages)
             self.assertEqual(got, [43] if kept else [], post_page)
             self.assertEqual(w.texted, 0 if kept else 1)
+            self.assertEqual(w.og_unknown, 1 if post_page == "" else 0)
 
     def test_launch_on_the_next_page(self):
         # заглушка — самый старый пост на загруженных страницах: «запуск» ищем на следующей странице

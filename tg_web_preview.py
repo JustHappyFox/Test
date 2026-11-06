@@ -116,6 +116,7 @@ class WebPreview:
     """Чтение t.me/s/<канал> с ограничением одновременных запросов и паузой при 429."""
 
     BASE = "https://t.me/s/"
+    POST_RETRY_PAUSE = 2.0  # пауза перед повтором страницы поста без мета-тега, с
 
     def __init__(self, parallel: int = 8, timeout: float = 20, max_limited: int = 30):
         self.parallel = max(1, parallel)
@@ -134,6 +135,8 @@ class WebPreview:
         # розыгрыш» — замер 05.11 по сборникам: так у ~5 из 81 розыгрыша. Слабее подтверждения, идут после.
         self.gaps: dict[str, int] = {}
         self.texted = 0  # заглушек второго уровня, у которых на странице поста есть текст (не розыгрыш)
+        self.og_unknown = 0  # страница поста не загрузилась или без мета-тега — такие заглушки оставляем
+        self.post_sem = asyncio.Semaphore(3)
         self.broken = False  # t.me упорно ограничивает — дальше только через API
 
     async def _session(self) -> Any:
@@ -245,9 +248,23 @@ class WebPreview:
         return sorted({p.id for p in hits}, reverse=True)
 
     async def _has_text(self, username: str, post_id: int, chan_desc: str | None) -> bool:
-        """У поста есть текст (og:description страницы поста) — значит это не модуль-розыгрыш."""
-        text = _og_description(await self.fetch(f"https://t.me/{username}/{post_id}"))
-        if text and text != chan_desc:
+        """У поста есть текст (og:description страницы поста) — значит это не модуль-розыгрыш.
+        Когда виджет поста закрыт, сайт кладёт туда описание канала (с другими пробелами) — это не текст."""
+        text = None
+        for attempt in range(3):
+            async with self.post_sem:  # страницы постов — потише: под нагрузкой сайт отдаёт их без мета-тегов
+                html = await self.fetch(f"https://t.me/{username}/{post_id}")
+            text = _og_description(html)
+            if text is not None:
+                break
+            await asyncio.sleep(self.POST_RETRY_PAUSE * (attempt + 1))
+        if text is None:
+            self.og_unknown += 1
+            return False
+
+        def norm(x: str | None) -> str:
+            return " ".join((x or "").split())
+        if text and norm(text) != norm(chan_desc):
             self.texted += 1
             return True
         return False
