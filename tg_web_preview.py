@@ -162,13 +162,15 @@ class WebPreview:
         return None
 
     async def candidates(self, username: str, since: datetime, max_pages: int = 20,
-                         strict: bool = False) -> list[int] | None:
+                         strict: bool = False, gaps: bool = True) -> list[int] | None:
         """id постов-заглушек не старше since. None — веб-страницы нет, проверять через API.
         strict — для каналов большого списка: только подтверждённые розыгрыши. Своя заглушка
         подтверждена, если прямо перед ней стоит пустое служебное «Канал запустил розыгрыш» (без него
         это обычно репост истории или скрытое видео); если это сообщение не попало на загруженные
         страницы — дочитываем страницу. Пересланная заглушка подтверждена, если такое сообщение есть
-        у оригинала (ссылка «Forwarded from»). Число подтверждённых — в self.launches."""
+        у оригинала (ссылка «Forwarded from»). Число подтверждённых — в self.launches.
+        gaps=False — заглушки с пропущенным номером перед ними (второй уровень) не возвращать, только
+        считать в self.gaps: в поиске 06.11 Dolli открыла 31 такой канал — розыгрышей 0."""
         username = username.lstrip("@")
         url = self.BASE + username
         seen: list[WebPost] = []
@@ -214,7 +216,7 @@ class WebPreview:
                 checks += 1
                 if await self._origin_launched(p.source):
                     confirmed.append(p)
-            hits = confirmed + gapped
+            hits = confirmed + (gapped if gaps else [])
         if confirmed:
             self.launches[username.lower()] = len(confirmed)
         dates = [p.date for p in hits if p.date]

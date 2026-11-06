@@ -654,13 +654,16 @@ class GiveawayFinder:
         return self.now - timedelta(days=self.args.days)
 
     def web_check(self, username: str, strict: bool = False) -> asyncio.Future:
-        """strict — для каналов большого списка: только заглушки с «Канал запустил розыгрыш» перед ними,
+        """strict — для каналов большого списка: только заглушки с «Канал запустил розыгрыш» перед ними
+        (без второго уровня с пропущенным номером: 0 розыгрышей из 31 открытого канала),
         и только за последние --discover-days дней (владелец: пост старше 7 дней скорее всего истёк)."""
         since = self.web_since
         if strict:
             since = max(since, self.now - timedelta(days=getattr(self.args, "discover_days", None) or 7))
+            return asyncio.ensure_future(self.web.candidates(
+                username, since, getattr(self.args, "web_pages", None) or 20, strict=True, gaps=False))
         return asyncio.ensure_future(
-            self.web.candidates(username, since, getattr(self.args, "web_pages", None) or 20, strict=strict))
+            self.web.candidates(username, since, getattr(self.args, "web_pages", None) or 20))
 
     async def batch_refs(self, first: int) -> None:
         """@username для веб-проверки: один запрос сразу на 100 каналов из очереди (их id — из розыгрышей)."""

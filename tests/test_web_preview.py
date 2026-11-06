@@ -131,7 +131,7 @@ class LaunchMessageTests(unittest.TestCase):
         self.assertEqual([(p.id, p.stub, p.empty_service) for p in posts],
                          [(42, False, True), (43, True, False), (44, False, False)])
 
-    def _run(self, html, strict, pages=None, max_pages=20):
+    def _run(self, html, strict, pages=None, max_pages=20, gaps=True):
         w = wp.WebPreview()
         asked = []
 
@@ -144,7 +144,7 @@ class LaunchMessageTests(unittest.TestCase):
         w.asked = asked
         from datetime import datetime, timezone
         return w, asyncio.run(w.candidates("rzavayuui", datetime(2026, 10, 1, tzinfo=timezone.utc),
-                                           max_pages=max_pages, strict=strict))
+                                           max_pages=max_pages, strict=strict, gaps=gaps))
 
     def test_strict_needs_launch_message(self):
         text = real_post(41, '<div class="tgme_widget_message_text js-message_text">Новость</div>')
@@ -190,6 +190,9 @@ class LaunchMessageTests(unittest.TestCase):
         w, got = self._run(html, strict=True)
         self.assertEqual(got, [43])
         self.assertEqual((w.launches, w.gaps), ({}, {"rzavayuui": 1}))
+        w, got = self._run(html, strict=True, gaps=False)   # так в поиске: Dolli такие не открывает
+        self.assertEqual(got, [])
+        self.assertEqual(w.gaps, {"rzavayuui": 1})
 
     def test_launch_on_the_next_page(self):
         # заглушка — самый старый пост на загруженных страницах: «запуск» ищем на следующей странице
@@ -253,7 +256,7 @@ class FakeWeb:
         self.stubs = stubs  # username -> [id] или None (нет веб-страницы)
         self.asked = []
 
-    async def candidates(self, username, since, max_pages=20, strict=False):
+    async def candidates(self, username, since, max_pages=20, strict=False, gaps=True):
         self.asked.append(username)
         return self.stubs.get(username, [])
 
