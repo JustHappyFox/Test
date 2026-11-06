@@ -660,8 +660,9 @@ class GiveawayFinder:
         since = self.web_since
         if strict:
             since = max(since, self.now - timedelta(days=getattr(self.args, "discover_days", None) or 7))
+            gaps = bool(getattr(self.args, "discover_gaps", False))  # --discover-gaps: партия второго уровня
             return asyncio.ensure_future(self.web.candidates(
-                username, since, getattr(self.args, "web_pages", None) or 20, strict=True, gaps=False))
+                username, since, getattr(self.args, "web_pages", None) or 20, strict=True, gaps=gaps))
         return asyncio.ensure_future(
             self.web.candidates(username, since, getattr(self.args, "web_pages", None) or 20))
 
@@ -1697,6 +1698,9 @@ def add_scan_args(s: argparse.ArgumentParser) -> None:
     lim.add_argument("--discover-offset", type=int, default=0, help="с какой строки списка начать (0)")
     lim.add_argument("--discover-days", type=int, default=7,
                      help="каналы большого списка: смотреть только посты не старше N дней (7)")
+    lim.add_argument("--discover-gaps", action="store_true",
+                     help="каналы большого списка: открывать и заглушки без «Канал запустил розыгрыш» "
+                          "(пропущен номер перед ними) — партиями по --web-open-max")
     lim.add_argument("--web-open-max", type=int, default=80,
                      help="сколько каналов большого списка можно открыть через API за запуск (80)")
     lim.add_argument("--time-limit", type=float, default=0, metavar="МИН",

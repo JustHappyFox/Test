@@ -258,6 +258,7 @@ class FakeWeb:
 
     async def candidates(self, username, since, max_pages=20, strict=False, gaps=True):
         self.asked.append(username)
+        self.flags = getattr(self, "flags", []) + [(username, strict, gaps)]
         return self.stubs.get(username, [])
 
     async def close(self):
@@ -354,6 +355,14 @@ class WebCrawlTests(unittest.TestCase):
         self.assertEqual(len(f_.giveaways), 1)
         self.assertEqual(f_.discover_consumed, 3)            # cc0, cc1, cc2; cc3 упёрся в лимит
         self.assertTrue(f_.discover_paused)
+
+        # каналы списка — строго и без второго уровня; партия --discover-gaps — со вторым уровнем
+        self.assertIn(("chan1", True, False), f_.web.flags)
+        fg = gf.GiveawayFinder(WebClient(list(chans.values()), history),
+                               args(discover_file=f.name, discover_offset=0, web_open_max=1, discover_gaps=True))
+        fg.web = FakeWeb({"chan1": [7]})
+        asyncio.run(self._seed_and_crawl(fg))
+        self.assertIn(("chan1", True, True), fg.web.flags)
 
         # следующий поиск начинает с cc3
         client2 = WebClient(list(chans.values()), history)

@@ -20,6 +20,10 @@ on:
         description: "Опубликовать розыгрыш из запаса сейчас, вне очереди (ссылка t.me/…)"
         type: string
         default: ""
+      gaps:
+        description: "Партия: открыть через Dolli N новых каналов без «Канал запустил розыгрыш» (пусто — нет)"
+        type: string
+        default: ""
 
 concurrency:
   group: repost
@@ -86,6 +90,7 @@ jobs:
           --web --web-max 6000 --time-limit 30
           --discover-file state/cc_candidates.txt --web-open-max 40 --no-discover
           --state .state/posted.json ${{ inputs.refill && '--refill' || '' }} ${{ inputs.post_now && format('--post-now {0}', inputs.post_now) || '' }}
+          ${{ inputs.gaps && format('--refill --discover-gaps --web-open-max {0}', inputs.gaps) || '' }}
 
       - name: Сохранить состояние
         if: always() && steps.check.outputs.ready == 'true'
