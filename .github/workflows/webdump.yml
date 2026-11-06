@@ -1,0 +1,38 @@
+name: Код поста на сайте t.me
+
+# Служебная проверка (идея владельца 06.11): выкачать полный код модуля-розыгрыша на сайте t.me
+# и сравнить с другими «заглушками». Аккаунт Telegram не используется. Запуск только вручную.
+on:
+  workflow_dispatch:
+    inputs:
+      posts:
+        description: "Розыгрыши: канал/номер через пробел"
+        type: string
+        default: "rzavayuui/43 korchaginnn/28886 otdel34/382 DuckyBBL/2151"
+      stubs:
+        description: "Каналы, где заглушки — не розыгрыши (уже открыты Dolli)"
+        type: string
+        default: "samara dva_majors today_smr fontankaspb"
+
+permissions:
+  contents: read
+
+jobs:
+  dump:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      POSTS: ${{ inputs.posts }}
+      STUBS: ${{ inputs.stubs }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install aiohttp
+      - name: Выкачать код
+        run: python tools/web_dump.py --posts $POSTS --stubs $STUBS | tee /tmp/web_dump.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web-dump
+          path: /tmp/web_dump.txt
