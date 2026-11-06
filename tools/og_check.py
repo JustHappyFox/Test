@@ -27,17 +27,22 @@ UA = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, 
 OG = re.compile(r'<meta property="og:description" content="([^"]*)"')
 
 
+STATUS: dict = {}
+
+
 async def get(s, url):
-    for i in range(3):
+    for i in range(5):
         try:
             async with s.get(url, headers=UA, timeout=aiohttp.ClientTimeout(total=30)) as r:
+                STATUS[r.status] = STATUS.get(r.status, 0) + 1
                 if r.status == 200:
                     return await r.text()
                 if r.status == 429:
-                    await asyncio.sleep(5 * (i + 1))
+                    await asyncio.sleep(float(r.headers.get("Retry-After") or 5 * (i + 1)))
                     continue
                 return ""
-        except Exception:
+        except Exception as e:
+            STATUS[type(e).__name__] = STATUS.get(type(e).__name__, 0) + 1
             await asyncio.sleep(2 * (i + 1))
     return ""
 
@@ -50,7 +55,7 @@ async def og(s, url):
 async def classify(s, chan, num, chan_desc):
     d = await og(s, f"https://t.me/{chan}/{num}")
     if d is None:
-        return "нет страницы", d
+        return "нет страницы", d  # страница не загрузилась или в ней нет og:description
     if not d:
         return "пусто", d
     if chan_desc is not None and d == chan_desc:
@@ -64,6 +69,7 @@ async def main():
     ap.add_argument("--gap-file")
     ap.add_argument("--sample", type=int, default=300)
     ap.add_argument("--days", type=int, default=7)
+    ap.add_argument("--parallel", type=int, default=2)
     a = ap.parse_args()
     async with aiohttp.ClientSession() as s:
         print("=== Известные розыгрыши ===")
@@ -86,7 +92,7 @@ async def main():
         names = names[:a.sample]
         w = wp.WebPreview(parallel=8)
         since = datetime.now(timezone.utc) - timedelta(days=a.days)
-        sem = asyncio.Semaphore(8)
+        sem = asyncio.Semaphore(a.parallel)
         chan_stat = {"все с текстом": 0, "есть без текста": 0, "нет заглушек сейчас": 0, "нет страницы": 0}
         stub_stat = {}
         keep = []
@@ -119,6 +125,7 @@ async def main():
         await w.close()
         print(f"\n=== Каналы второго уровня: {len(names)} ===")
         print("Заглушки:", stub_stat)
+        print("Ответы сайта:", STATUS)
         print("Каналы:", chan_stat)
         print("Остаются для Dolli (есть заглушка без текста):")
         for k in keep:
