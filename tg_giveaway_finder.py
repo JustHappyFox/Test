@@ -94,6 +94,30 @@ PRESETS = {
 }
 
 
+def parse_post_hours(value: str | None) -> tuple[int, int] | None:
+    """'7-22' -> (7, 22): публиковать с 07:00 до 22:00 по местному времени (22:00 уже нельзя)."""
+    if not value:
+        return None
+    a, b = (int(x) for x in str(value).split("-", 1))
+    if not 0 <= a < b <= 24:
+        raise ValueError(f"--post-hours: нужно «начало-конец», например 7-22, а не {value!r}")
+    return a, b
+
+
+def in_post_window(t: datetime, window: tuple[int, int] | None, tz_hours: float = 3.0) -> datetime:
+    """Ближайший момент не раньше t внутри окна публикаций (по местному времени UTC+tz_hours).
+    Внутри окна — сам t; ночью — начало окна (утром того же или следующего дня)."""
+    if not window:
+        return t
+    start, end = window
+    tz = timezone(timedelta(hours=tz_hours))
+    loc = t.astimezone(tz)
+    if start <= loc.hour < end:
+        return t
+    day = loc.date() if loc.hour < start else loc.date() + timedelta(days=1)
+    return datetime(day.year, day.month, day.day, start, tzinfo=tz).astimezone(timezone.utc)
+
+
 def parse_range(value: str | float | tuple | None) -> tuple[float, float] | None:
     """'5' -> (5, 5), '5-15' -> (5, 15). Пауза выбирается случайно в этом диапазоне."""
     if value is None or isinstance(value, tuple):
@@ -1356,6 +1380,9 @@ async def cmd_post_scheduled(client: TelegramClient, args: argparse.Namespace) -
         times.append(datetime.fromisoformat(st["last_post"]))
     last_bot = max(times, default=None)
     next_at = max([now] + ([last_bot + interval] if last_bot else []) + ([manual + gap] if manual and gap else []))
+    window = parse_post_hours(getattr(args, "post_hours", None))
+    tz_hours = getattr(args, "tz_offset", 3.0)
+    next_at = in_post_window(next_at, window, tz_hours)  # ночью не публикуем — переносим на утро
 
     def fits(e: dict[str, Any], when: datetime) -> bool:
         return (e["key"] not in posted and e["key"] not in scheduled and e["key"] not in bad
@@ -1370,7 +1397,9 @@ async def cmd_post_scheduled(client: TelegramClient, args: argparse.Namespace) -
             return len(scheduled) < args.schedule_ahead
         # 0 — публиковать один пост, только когда подошло время (раз в 3,5 ч / 5 ч после ваших постов)
         # допуск 10 минут: запуски по расписанию приходят неточно, пропускать из-за пары минут нельзя
-        return last_published is None and next_at <= now + timedelta(minutes=10)
+        # (но не раньше начала окна публикаций: в 06:55 людей не будим)
+        return (last_published is None and next_at <= now + timedelta(minutes=10)
+                and in_post_window(now, window, tz_hours) == now)
 
     async def search() -> None:
         """Перебор каналов: набираем в запас до --reserve подходящих розыгрышей."""
@@ -1495,7 +1524,7 @@ async def cmd_post_scheduled(client: TelegramClient, args: argparse.Namespace) -
             scheduled[entry["key"]] = {**entry, "at": when.isoformat()}
             post_times.append(when)
             log.info("🕒 Запланировано на %s UTC: %s | %s", when.strftime("%d.%m %H:%M"), entry["prize"], entry["link"])
-        next_at = when + interval
+        next_at = in_post_window(when + interval, window, tz_hours)
 
     # раз в сутки — поиск, даже если запас не пуст (владелец 06.11: агрегаторы проверять раз в день)
     daily = getattr(args, "daily_search_hours", 0) or 0
@@ -1749,6 +1778,10 @@ def build_parser() -> argparse.ArgumentParser:
                     help="не пересылать розыгрыши, до конца которых меньше N часов (3)")
     ps.add_argument("--search-cooldown-hours", type=float, default=2.0, metavar="Ч",
                     help="если поиск ничего не дал, следующий — не раньше чем через Ч часов (2)")
+    ps.add_argument("--post-hours", metavar="С-ДО",
+                    help="публиковать только в эти часы по местному времени, например 7-22 (ночью людей не будим)")
+    ps.add_argument("--tz-offset", type=float, default=3.0, metavar="Ч",
+                    help="местное время для --post-hours: смещение от UTC в часах (3 — Минск/Москва)")
     ps.add_argument("--daily-search-hours", type=float, default=0, metavar="Ч",
                     help="искать и пополнять запас, если поиска не было Ч часов, даже когда запас не пуст "
                          "(0 — только когда запас кончился)")

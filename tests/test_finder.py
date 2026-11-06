@@ -742,6 +742,37 @@ class PostWhenDueTests(ScheduledPostTests):
     test_manual_post_reschedules_bot_posts = None
     test_published_scheduled_post_counts_as_posted = None
 
+    def run_at_local_hour(self, hour):
+        """Пост пора публиковать; местное время (через --tz-offset) — hour:xx. Окно 7-22."""
+        c = self.client()
+        offset = (hour - NOW.hour) % 24
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp, "s.json")
+            gf.save_state(path, {"posted": {}, "queue": [self.entry(1)],
+                                 "last_post": (NOW - timedelta(hours=4)).isoformat()})
+            a = gf.apply_preset(gf.build_parser().parse_args(
+                ["post", "--to", "@mygroup", "--state", str(path), "--no-discover", "--no-aggregators",
+                 "--min-interval-hours", "3.5", "--schedule-ahead", "0",
+                 "--post-hours", "7-22", "--tz-offset", str(offset)]))
+            asyncio.run(gf.cmd_post(client=c, args=a))
+        return c
+
+    def test_no_posts_at_night(self):
+        self.assertEqual(self.run_at_local_hour(3).forwards, [])        # 03:xx — ночь, ждём 07:00
+        self.assertEqual(self.run_at_local_hour(22).forwards, [])       # 22:xx — уже нельзя
+        self.assertEqual(self.run_at_local_hour(12).forwards, [(1, None)])  # днём — публикуем
+
+    def test_post_window_shift(self):
+        tz = timezone(timedelta(hours=3))
+        night = datetime(2026, 11, 6, 23, 30, tzinfo=tz)
+        early = datetime(2026, 11, 7, 5, 0, tzinfo=tz)
+        day = datetime(2026, 11, 7, 12, 0, tzinfo=tz)
+        morning = datetime(2026, 11, 7, 7, 0, tzinfo=tz)
+        self.assertEqual(gf.in_post_window(night, (7, 22)), morning)
+        self.assertEqual(gf.in_post_window(early, (7, 22)), morning)
+        self.assertEqual(gf.in_post_window(day, (7, 22)), day)
+        self.assertEqual(gf.in_post_window(night, None), night)
+
     def test_manual_post_blocks_when_due(self):
         manual = types.Message(id=50, peer_id=types.PeerChannel(900), date=NOW - timedelta(hours=2),
                                message="мой пост")
