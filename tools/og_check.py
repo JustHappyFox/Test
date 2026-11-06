@@ -73,7 +73,41 @@ async def main():
     ap.add_argument("--ua-test", nargs="*", default=[], help="канал/N: сравнить og:description для двух User-Agent")
     ap.add_argument("--debug", nargs="*", default=[], help="каналы: как их видит поиск (заглушки и og каждой)")
     ap.add_argument("--img", nargs="*", default=[], help="канал/N: og:image поста против аватарки канала")
+    ap.add_argument("--labels", nargs="*", default=[], help="канал/N: надпись заглушки в ленте")
+    ap.add_argument("--labels-gap", action="store_true", help="надписи заглушек у каналов второго уровня из --gap-file")
     a = ap.parse_args()
+    lab_re = re.compile(r'message_media_not_supported_label">([^<]+)<')
+
+    def label_of(html, post):
+        for part in (html or "").split('tgme_widget_message_wrap')[1:]:
+            if f'data-post="{post}"' in part:
+                m = lab_re.search(part)
+                return m.group(1).strip() if m else "(нет заглушки)"
+        return "(нет поста на странице)"
+    if a.labels:
+        async with aiohttp.ClientSession() as s:
+            for p in a.labels:
+                chan, num = p.split("/")
+                html = await get(s, f"https://t.me/s/{chan}?before={int(num) + 1}")
+                print(f"{p}: {label_of(html, p)}")
+        return
+    if a.labels_gap:
+        names = [ln.split()[0].lstrip("@") for ln in open(a.gap_file, encoding="utf-8")
+                 if ln.split() and ln.split()[-1] == "0"]
+        w = wp.WebPreview(parallel=4)
+        since = datetime.now(timezone.utc) - timedelta(days=a.days)
+        stat = {}
+        async with aiohttp.ClientSession() as s:
+            for name in names:
+                ids = await w.candidates(name, since, max_pages=20, strict=True, gaps=True)
+                for i in ids or []:
+                    html = await get(s, f"https://t.me/s/{name}?before={i + 1}")
+                    lab = label_of(html, f"{name}/{i}")
+                    stat[lab] = stat.get(lab, 0) + 1
+                    print(f"  https://t.me/{name}/{i}: {lab}")
+        await w.close()
+        print("Итог по надписям:", stat)
+        return
     if a.img:
         img = re.compile(r'<meta property="og:image" content="([^"]*)"')
         async with aiohttp.ClientSession() as s:
