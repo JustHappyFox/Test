@@ -370,6 +370,8 @@ class GiveawayFinder:
         # Каналы, которые уже находили: {@username: [id, access_hash]} — без повторного поиска по имени
         self.peer_cache: dict[str, list[int]] = dict(getattr(args, "peer_cache", None) or {})
         self.names_blocked = False  # Telegram временно запретил поиск по имени (FloodWait на ResolveUsername)
+        self.search_blocked = False  # и поиск из строки поиска (FloodWait на contacts.search)
+        self.searched = 0  # каналов, найденных через contacts.search
 
     @property
     def found_enough(self) -> bool:
@@ -421,8 +423,8 @@ class GiveawayFinder:
             cached = self.peer_cache.get((self.username_of(item) or "").lower())
             if cached:  # канал уже находили раньше — поиск по имени (строго ограничен) не нужен
                 return types.InputPeerChannel(int(cached[0]), int(cached[1]))
-            if self.names_blocked:
-                return None  # Telegram временно ограничил поиск по имени — не дёргаем его
+            if self.names_blocked:  # поиск по имени ограничен — пробуем поиск из строки поиска приложения
+                return await self.search_channel(self.username_of(item) or str(item))
         try:
             if isinstance(item, (int, str)):
                 ent = await self.client.get_entity(types.PeerChannel(item) if isinstance(item, int) else str(item))
@@ -436,13 +438,41 @@ class GiveawayFinder:
         except errors.FloodWaitError as e:
             if isinstance(item, str):
                 self.names_blocked = True
-                log.warning("Telegram ограничил поиск каналов по имени на %d мин — в этом запуске "
-                            "проверяю только уже знакомые каналы", e.seconds // 60)
-                return None
+                log.warning("Telegram ограничил поиск каналов по имени на %d мин — дальше ищу через строку "
+                            "поиска приложения (contacts.search)", e.seconds // 60)
+                return await self.search_channel(self.username_of(item) or str(item))
             raise
         except (ValueError, TypeError, errors.RPCError) as e:
             log.debug("Не удалось получить %r: %s", item, e)
             return None
+
+    async def search_channel(self, uname: str) -> Any | None:
+        """Канал через поиск из строки поиска приложения (contacts.search). У него свой лимит: проверено
+        06.11 — работает, пока ResolveUsername под FloodWait, и отдаёт канал с полным ключом доступа.
+        Берём только точное совпадение имени. После его FloodWait в этом запуске больше не ищем."""
+        uname = (uname or "").lstrip("@")
+        if not uname or self.search_blocked:
+            return None
+        try:
+            r = await self.client(functions.contacts.SearchRequest(q=uname, limit=10))
+        except errors.FloodWaitError as e:
+            self.search_blocked = True
+            log.warning("Telegram ограничил и поиск из строки поиска на %d мин — дальше только знакомые каналы",
+                        e.seconds // 60)
+            return None
+        except Exception as e:  # noqa: BLE001 — любой отказ: просто не нашли
+            log.debug("contacts.search %r: %s", uname, e)
+            return None
+        for ch in getattr(r, "chats", []) or []:
+            names = {(getattr(ch, "username", None) or "").lower()}
+            names |= {(getattr(u, "username", "") or "").lower() for u in (getattr(ch, "usernames", None) or [])}
+            if (isinstance(ch, types.Channel) and uname.lower() in names and ch.access_hash
+                    and not getattr(ch, "min", False)):
+                self.searched += 1
+                self.refs[ch.id] = to_ref(ch)
+                self.remember_peer(ch)
+                return ch
+        return None
 
     # ---------- источники ----------
 
@@ -791,7 +821,7 @@ class GiveawayFinder:
         if web_only:
             limit = getattr(self.args, "web_open_max", None) or 80
             known = key in self.peer_cache  # уже находили — поиск по имени не нужен и лимит не тратит
-            if not known and (self.discover_opened >= limit or self.names_blocked):
+            if not known and (self.discover_opened >= limit or (self.names_blocked and self.search_blocked)):
                 self.discover_paused = True
                 self.web_seen.discard(key)  # этот и следующие каналы списка — в следующий поиск
                 log.info("Большой список: %d новых каналов найдено по имени — это предел на один поиск "
@@ -1118,6 +1148,9 @@ async def _run_finder(finder: "GiveawayFinder", client: TelegramClient,
         log.info("Веб-проверка t.me: каналов %d, страниц %d, открыто через API %d, ограничений частоты (429) %d%s",
                  finder.web_checked, finder.web.pages, finder.web_opened, finder.web.limited,
                  " — t.me перестал отвечать, остальное через API" if finder.web.broken else "")
+        if finder.searched or finder.search_blocked:
+            log.info("Каналов найдено через строку поиска приложения (contacts.search): %d%s", finder.searched,
+                     " — потом Telegram ограничил и её" if finder.search_blocked else "")
         if getattr(finder.web, "texted", 0) or getattr(finder.web, "imaged", 0):
             log.info("Заглушек без «запуска», у которых на странице поста есть текст / своя картинка "
                      "(не розыгрыш, не открывал): %d / %d", finder.web.texted, finder.web.imaged)

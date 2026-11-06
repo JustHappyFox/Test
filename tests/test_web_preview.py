@@ -547,6 +547,52 @@ class NameLookupLimitTests(unittest.TestCase):
         self.assertTrue(f.names_blocked)
         self.assertEqual(client.opened, [(80, [3])])    # знакомый канал проверили без поиска по имени
 
+    def test_search_bar_fallback_when_name_lookup_is_limited(self):
+        # 06.11: contacts.search (строка поиска приложения) работает, пока ResolveUsername под FloodWait
+        from telethon import errors
+        new1, new2, other = channel(81, "newchan1"), channel(82, "newchan2"), channel(83, "newchan1_fan")
+
+        class Limited(WebClient):
+            searches = []
+            search_flood_after = 99
+
+            async def get_entity(self, x):
+                if isinstance(x, str):
+                    raise errors.FloodWaitError(request=None, capture=21767)
+                return await super().get_entity(x)
+
+            async def __call__(self, req):
+                if isinstance(req, functions.contacts.SearchRequest):
+                    Limited.searches.append(req.q)
+                    if len(Limited.searches) > Limited.search_flood_after:
+                        raise errors.FloodWaitError(request=None, capture=600)
+                    found = [c for c in (other, new1, new2) if req.q.lower() in c.username.lower()]
+                    return types.contacts.Found(my_results=[], results=[], chats=found, users=[])
+                return await super().__call__(req)
+
+        g = giveaway_media([81], stars=1000, quantity=5)
+        client = Limited([new1, new2, other], {81: [message(81, 5, g)], 82: [message(82, 6)]})
+        f = gf.GiveawayFinder(client, args())
+        f.web = FakeWeb({"newchan1": [5], "newchan2": [6]})
+        for name in ("@newchan1", "@newchan2"):
+            f.enqueue(gf.WebOnly(name), 1)
+        asyncio.run(f.crawl())
+        self.assertTrue(f.names_blocked)
+        self.assertEqual(sorted(client.opened), [(81, [5]), (82, [6])])  # оба нашли через строку поиска
+        self.assertEqual(f.searched, 2)
+        self.assertEqual(len(f.giveaways), 1)
+        self.assertIn("newchan1", f.peer_cache)                          # запомнили — второй раз не ищем
+
+        # строку поиска тоже ограничили — дальше только знакомые каналы
+        Limited.searches, Limited.search_flood_after = [], 0
+        f2 = gf.GiveawayFinder(Limited([new1, new2, other], {}), args())
+        f2.web = FakeWeb({"newchan1": [5], "newchan2": [6]})
+        for name in ("@newchan1", "@newchan2"):
+            f2.enqueue(gf.WebOnly(name), 1)
+        asyncio.run(f2.crawl())
+        self.assertTrue(f2.search_blocked)
+        self.assertEqual(len(Limited.searches), 1)
+
 
 class ClosedGiveawayTests(unittest.TestCase):
     """05.11 вышел розыгрыш, где 3-й канал-участник закрытый — вступить в такой розыгрыш нельзя."""
