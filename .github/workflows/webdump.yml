@@ -42,7 +42,9 @@ jobs:
         env:
           OG: ${{ inputs.og }}
         run: |
-          if [ "$OG" = "labels" ]; then
+          if [ "$OG" = "js" ]; then
+            python tools/js_paths.py | tee /tmp/web_dump.txt
+          elif [ "$OG" = "labels" ]; then
             python tools/og_check.py --labels $POSTS | tee /tmp/web_dump.txt
             python tools/og_check.py --labels-gap --gap-file state/cc_candidates.txt | tee -a /tmp/web_dump.txt
           elif [ "$OG" = "img" ]; then
