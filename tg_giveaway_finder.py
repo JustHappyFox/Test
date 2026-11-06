@@ -79,6 +79,7 @@ DEFAULT_AGGREGATORS = [
     "@Permio_ir",            # 6, персидский
     "@premium_accounfree",   # 5, персидский
     "@rozygryshi_zvyozd",    # 2
+    "@StarsGiveawayHub",     # владелец нашёл через Google 06.11: 55 постов за 31 день, 49 модулей (пересланных)
 ]
 
 # Значения по умолчанию для обычного и осторожного (--careful) режимов.
