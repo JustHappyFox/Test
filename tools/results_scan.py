@@ -75,6 +75,9 @@ async def main():
     ap.add_argument("--pages", type=int, default=3)
     ap.add_argument("--stop-after", type=int, default=10)
     ap.add_argument("--parallel", type=int, default=8)
+    ap.add_argument("--shard", type=int, default=0)
+    ap.add_argument("--shards", type=int, default=1)
+    ap.add_argument("--out", help="записать каналы-организаторы: «@канал  # итогов дата 1»")
     a = ap.parse_args()
     names = []
     for f in a.names:
@@ -82,6 +85,7 @@ async def main():
             n = ln.split("#", 1)[0].strip().lstrip("@")
             if n and n not in names:
                 names.append(n)
+    names = names[a.shard::a.shards]
     since = datetime.now(timezone.utc) - timedelta(days=a.days)
     w = wp.WebPreview(parallel=a.parallel, max_limited=10 ** 9)
     found, checked, t0 = [], 0, time.time()
@@ -112,13 +116,19 @@ async def main():
                 print(f"  НАЙДЕН https://t.me/{name}/{pid} — итоги {d:%Y-%m-%d}, розыгрыш был https://t.me/{name}/{rid}",
                       flush=True)
 
-    for i in range(0, len(names), 100):
-        await asyncio.gather(*(one(n) for n in names[i:i + 100]))
+    step = 100 if a.stop_after else 1000
+    for i in range(0, len(names), step):
+        await asyncio.gather(*(one(n) for n in names[i:i + step]))
         print(f"  проверено {checked}/{len(names)}, каналов с итогами за {a.days} дн.: {len(found)}, "
               f"страниц {w.pages}, 429: {w.limited}, {time.time() - t0:.0f} с", flush=True)
-        if len(found) >= a.stop_after:
+        if a.stop_after and len(found) >= a.stop_after:
             break
     await w.close()
+    if a.out:
+        with open(a.out, "w", encoding="utf-8") as f:
+            for name, hits in found:
+                newest = max((h[2] for h in hits if h[2]), default=None)
+                f.write(f"@{name}  # {len(hits)} {newest.strftime('%Y-%m-%d') if newest else '?'} 1\n")
     print(f"Итог: каналов {checked}, с итогами розыгрыша за {a.days} дн.: {len(found)}")
 
 

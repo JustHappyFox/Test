@@ -1,0 +1,81 @@
+name: Каналы, где розыгрыш недавно закончился (итоги)
+
+# Идея владельца 07.11: искать каналы, где розыгрыш завершился за последние дни, и проверять их.
+# Итоги Telegram публикует в канале сам; на сайте это пустая заглушка-ответ на пост-розыгрыш
+# (tools/results_scan.py). Найденные каналы-организаторы добавляются в большой список
+# state/cc_candidates.txt — поиск проверяет его каждый раз. Аккаунт Telegram не используется.
+on:
+  workflow_dispatch:
+    inputs:
+      source:
+        description: "Список имён"
+        type: string
+        default: "state/cc_usernames.txt"
+      days:
+        description: "За сколько дней искать итоги"
+        type: string
+        default: "14"
+
+permissions:
+  contents: write
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4]
+    env:
+      SOURCE: ${{ inputs.source }}
+      DAYS: ${{ inputs.days }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -q aiohttp
+      - run: python tools/results_scan.py "$SOURCE" --days "$DAYS" --stop-after 0 --shard ${{ matrix.shard }} --shards 5 --out /tmp/res_${{ matrix.shard }}.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: res-${{ matrix.shard }}
+          path: /tmp/res_${{ matrix.shard }}.txt
+
+  save:
+    needs: scan
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/res
+      - name: Добавить организаторов в большой список
+        run: |
+          cat /tmp/res/*/res_*.txt 2>/dev/null | sort -u > /tmp/organizers.txt || true
+          echo "Каналов с итогами: $(wc -l < /tmp/organizers.txt)"; cat /tmp/organizers.txt
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          for attempt in 1 2 3 4 5; do
+            git fetch -q origin main && git reset -q --hard origin/main
+            cp /tmp/organizers.txt state/results_organizers.txt
+            python3 - <<'EOF'
+          from pathlib import Path
+          cand = Path("state/cc_candidates.txt")
+          lines = cand.read_text(encoding="utf-8").splitlines() if cand.is_file() else []
+          have = {ln.split("#", 1)[0].strip().lstrip("@").lower() for ln in lines if ln.strip()}
+          new = [ln for ln in Path("/tmp/organizers.txt").read_text(encoding="utf-8").splitlines()
+                 if ln.strip() and ln.split("#", 1)[0].strip().lstrip("@").lower() not in have]
+          # организаторы с недавними итогами — в начало списка: их поиск проверяет первыми
+          cand.write_text("".join(x + "\n" for x in new + lines), encoding="utf-8")
+          print(f"В большой список добавлено организаторов: {len(new)}, всего строк: {len(new) + len(lines)}")
+          EOF
+            git add state/cc_candidates.txt state/results_organizers.txt
+            if git diff --cached --quiet; then echo "Без изменений"; exit 0; fi
+            git commit -qm "Results scan: $(wc -l < state/results_organizers.txt) channels with recent giveaway results"
+            git push -q origin HEAD:main && exit 0
+            sleep $((attempt * 5))
+          done
+          exit 1
