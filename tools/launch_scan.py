@@ -39,6 +39,10 @@ async def main():
     ap.add_argument("--shards", type=int, default=1)
     ap.add_argument("--stop-after", type=int, default=2)
     ap.add_argument("--parallel", type=int, default=8)
+    ap.add_argument("--pages", type=int, default=15,
+                    help="страниц на канал, по ~20 постов (15): у активных каналов «запуск» бывает глубже 5 страниц")
+    ap.add_argument("--out", help="найденные каналы — в формате большого списка (@канал  # N дата N)")
+    ap.add_argument("--live-out", help="имена с веб-страницей (живые каналы) — для следующих проходов")
     a = ap.parse_args()
     known = known_names()
     names = [ln.split("#", 1)[0].strip().lstrip("@") for ln in Path(a.names).read_text(encoding="utf-8").splitlines()]
@@ -46,13 +50,15 @@ async def main():
     print(f"Имён {len(names)} (известные {len(known)} пропущены)", flush=True)
     since = datetime.now(timezone.utc) - timedelta(days=a.days)
     w = wp.WebPreview(parallel=a.parallel, max_limited=10 ** 9)
-    found, t0 = [], time.time()
+    found, live, t0 = [], [], time.time()
 
     async def one(name):
         try:
-            ids = await w.candidates(name, since, max_pages=5, strict=True, gaps=False)
+            ids = await w.candidates(name, since, max_pages=a.pages, strict=True, gaps=False)
         except Exception:
             return
+        if ids is not None:
+            live.append(name)
         if ids and w.launches.get(name.lower()):
             found.append((name, ids))
             for i in ids:
@@ -68,7 +74,17 @@ async def main():
         if a.stop_after and len(found) >= a.stop_after:
             break
     await w.close()
-    print(f"Итог: новых каналов с «Канал запустил розыгрыш» за {a.days} дн.: {len(found)}")
+    print(f"Итог: новых каналов с «Канал запустил розыгрыш» за {a.days} дн.: {len(found)}; "
+          f"живых каналов {len(live)} из {len(names)}")
+    if a.out:
+        lines = []
+        for name, ids in found:
+            n = w.launches.get(name.lower(), len(ids))
+            newest = w.newest.get(name.lower())
+            lines.append(f"@{name}  # {n} {newest.date().isoformat() if newest else ''} {n}")
+        Path(a.out).write_text("".join(x + "\n" for x in lines), encoding="utf-8")
+    if a.live_out:
+        Path(a.live_out).write_text("".join(f"@{x}\n" for x in live), encoding="utf-8")
 
 
 if __name__ == "__main__":

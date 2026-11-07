@@ -2,8 +2,13 @@ name: Новые розыгрыши по «Канал запустил розы�
 
 # Владелец 07.11: найти в общем списке новые каналы, где перед заглушкой стоит служебное
 # «Канал запустил розыгрыш» (реклама такого сообщения от Telegram получить не может).
-# 5 частей параллельно; каждая останавливается на первых находках. Аккаунт Telegram не используется.
+# Найденные каналы сразу добавляются в начало state/cc_candidates.txt — бот открывает их в каждом поиске
+# (раньше находки оставались только в логе: @NoHuClub — 7 розыгрышей за 7 дней — бот не знал).
+# По расписанию раз в 6 часов проходит все живые каналы (state/live_usernames.txt) за 1 день;
+# ручной запуск по полному списку заодно обновляет список живых. Аккаунт Telegram не используется.
 on:
+  schedule:
+    - cron: "27 */6 * * *"
   workflow_dispatch:
     inputs:
       days:
@@ -13,14 +18,18 @@ on:
       stop_after:
         description: "Сколько новых каналов найти в каждой части (0 — пройти всё)"
         type: string
-        default: "1"
+        default: "0"
       source:
         description: "Список имён"
         type: string
         default: "state/cc_usernames.txt"
 
 permissions:
-  contents: read
+  contents: write
+
+concurrency:
+  group: launch-scan
+  cancel-in-progress: false
 
 jobs:
   scan:
@@ -29,11 +38,73 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3, 4]
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+    env:
+      SOURCE: ${{ inputs.source }}
+      DAYS: ${{ inputs.days || '1' }}
+      STOP: ${{ inputs.stop_after || '0' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - run: pip install -q -r requirements.txt
-      - run: python tools/launch_scan.py "${{ inputs.source }}" --days "${{ inputs.days }}" --stop-after "${{ inputs.stop_after }}" --shard ${{ matrix.shard }} --shards 5
+      - name: Пройти часть списка
+        run: |
+          SRC="${SOURCE:-state/live_usernames.txt}"
+          [ -f "$SRC" ] || SRC=state/cc_usernames.txt
+          echo "Список: $SRC, дней: $DAYS"
+          mkdir -p /tmp/out
+          python tools/launch_scan.py "$SRC" --days "$DAYS" --stop-after "$STOP" \
+            --shard ${{ matrix.shard }} --shards 10 \
+            --out /tmp/out/found_${{ matrix.shard }}.txt --live-out /tmp/out/live_${{ matrix.shard }}.txt
+          [ "$SRC" = state/cc_usernames.txt ] || rm -f /tmp/out/live_${{ matrix.shard }}.txt
+        shell: bash
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: launch-${{ matrix.shard }}
+          path: /tmp/out/
+          if-no-files-found: ignore
+
+  save:
+    needs: scan
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/res
+      - name: Добавить найденные каналы в большой список
+        run: |
+          cat /tmp/res/*/found_*.txt 2>/dev/null | sort -u > /tmp/found.txt || true
+          echo "Новых каналов с «запуском»: $(wc -l < /tmp/found.txt)"; cat /tmp/found.txt
+          live_parts=$(ls /tmp/res/*/live_*.txt 2>/dev/null | wc -l)
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          for attempt in 1 2 3 4 5; do
+            git fetch -q origin main && git reset -q --hard origin/main
+            if [ "$live_parts" = 10 ]; then
+              cat /tmp/res/*/live_*.txt | sort -u > state/live_usernames.txt
+              echo "Живых каналов: $(wc -l < state/live_usernames.txt)"
+            fi
+            python3 - <<'EOF'
+          from pathlib import Path
+          cand = Path("state/cc_candidates.txt")
+          lines = cand.read_text(encoding="utf-8").splitlines() if cand.is_file() else []
+          have = {ln.split("#", 1)[0].strip().lstrip("@").lower() for ln in lines if ln.strip()}
+          new = [ln for ln in Path("/tmp/found.txt").read_text(encoding="utf-8").splitlines()
+                 if ln.strip() and ln.split("#", 1)[0].strip().lstrip("@").lower() not in have]
+          # свежие «запуски» — в начало списка: поиск бота проверяет их первыми
+          cand.write_text("".join(x + "\n" for x in new + lines), encoding="utf-8")
+          print(f"В большой список добавлено: {len(new)}, всего строк: {len(new) + len(lines)}")
+          EOF
+            git add state/cc_candidates.txt
+            [ -f state/live_usernames.txt ] && git add state/live_usernames.txt
+            if git diff --cached --quiet; then echo "Без изменений"; exit 0; fi
+            git commit -qm "Launch scan: $(wc -l < /tmp/found.txt) new channels with a giveaway launch"
+            git push -q origin HEAD:main && exit 0
+            sleep $((attempt * 5))
+          done
+          exit 1
