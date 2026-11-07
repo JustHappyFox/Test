@@ -1,0 +1,35 @@
+name: Новые розыгрыши по «Канал запустил розыгрыш»
+
+# Владелец 07.11: найти в общем списке новые каналы, где перед заглушкой стоит служебное
+# «Канал запустил розыгрыш» (реклама такого сообщения от Telegram получить не может).
+# 5 частей параллельно; каждая останавливается на первых находках. Аккаунт Telegram не используется.
+on:
+  workflow_dispatch:
+    inputs:
+      days:
+        description: "За сколько дней"
+        type: string
+        default: "7"
+      stop_after:
+        description: "Сколько новых каналов найти в каждой части"
+        type: string
+        default: "1"
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -q -r requirements.txt
+      - run: python tools/launch_scan.py state/cc_usernames.txt --days "${{ inputs.days }}" --stop-after "${{ inputs.stop_after }}" --shard ${{ matrix.shard }} --shards 5
