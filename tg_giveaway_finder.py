@@ -1587,12 +1587,20 @@ async def cmd_post_scheduled(client: TelegramClient, args: argparse.Namespace) -
     last = st.get("last_search")
     left = [e for e in queue if e["key"] not in posted and e["key"] not in scheduled
             and e["key"] not in bad and datetime.fromisoformat(e["until"]) > now]
-    if (daily and not args.refill and scans == 0 and len(left) < args.reserve
-            and (not last or now - datetime.fromisoformat(last) >= timedelta(hours=daily))):
-        log.info("Поиска не было %g ч — проверяю агрегаторы и пополняю запас (в запасе %d из %d)",
-                 daily, len(left), args.reserve)
-        queue = left
-        await search()
+    since_last = now - datetime.fromisoformat(last) if last else None
+    low = getattr(args, "refill_below", 0) or 0
+    low_every = timedelta(hours=getattr(args, "refill_every_hours", 3) or 3)
+    if not args.refill and scans == 0 and len(left) < args.reserve:
+        if daily and (since_last is None or since_last >= timedelta(hours=daily)):
+            log.info("Поиска не было %g ч — проверяю агрегаторы и пополняю запас (в запасе %d из %d)",
+                     daily, len(left), args.reserve)
+            queue = left
+            await search()
+        elif low and len(left) < low and (since_last is None or since_last >= low_every):
+            # владелец 07.11: «надо уже искать, а не в последний момент» — ищем, пока запас ещё есть
+            log.info("В запасе осталось %d (меньше %d) — ищу заранее", len(left), low)
+            queue = left
+            await search()
 
     if not args.dry_run:
         st.update(posted=posted, queue=queue, scheduled=list(scheduled.values()), bad=bad,
@@ -1840,6 +1848,10 @@ def build_parser() -> argparse.ArgumentParser:
                     help="публиковать только в эти часы по местному времени, например 7-22 (ночью людей не будим)")
     ps.add_argument("--tz-offset", type=float, default=3.0, metavar="Ч",
                     help="местное время для --post-hours: смещение от UTC в часах (3 — Минск/Москва)")
+    ps.add_argument("--refill-below", type=int, default=0, metavar="N",
+                    help="искать заранее, когда в запасе меньше N (0 — нет)")
+    ps.add_argument("--refill-every-hours", type=float, default=3, metavar="Ч",
+                    help="при малом запасе искать не чаще раза в Ч часов (3)")
     ps.add_argument("--daily-search-hours", type=float, default=0, metavar="Ч",
                     help="искать и пополнять запас, если поиска не было Ч часов, даже когда запас не пуст "
                          "(0 — только когда запас кончился)")

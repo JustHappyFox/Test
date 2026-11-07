@@ -962,6 +962,15 @@ class SearchCooldownTests(unittest.TestCase):
         calls, _ = self.run_post(fresh, ["--daily-search-hours", "24"], last_post_hours=1)
         self.assertEqual(calls, [])                                    # искали меньше суток назад
 
+    def test_search_early_when_reserve_is_low(self):
+        # запас пуст (меньше 4), поиск был 5 ч назад — ищем заранее, не дожидаясь суток
+        st = {"last_search": (NOW - timedelta(hours=5)).isoformat(), "last_search_added": 3}
+        calls, _ = self.run_post(st, ["--daily-search-hours", "24", "--refill-below", "4"], last_post_hours=1)
+        self.assertEqual(calls, [1])
+        recent = {"last_search": (NOW - timedelta(hours=1)).isoformat(), "last_search_added": 3}
+        calls, _ = self.run_post(recent, ["--daily-search-hours", "24", "--refill-below", "4"], last_post_hours=1)
+        self.assertEqual(calls, [])                                    # искали час назад — не чаще раза в 3 ч
+
 
 class DueSlackTests(PostWhenDueTests):
     """Запуск чуть раньше срока (в пределах 10 минут) должен публиковать, а не пропускать."""
