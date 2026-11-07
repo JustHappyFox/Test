@@ -1,0 +1,60 @@
+name: Каналы из истории агрегаторов
+
+# Владелец 07.11: собрать из всей истории агрегаторов каналы, которые уже проводили розыгрыши (организаторы
+# и спонсоры), и добавить в списки для проверки. Читает историю через Dolli (обычное чтение постов, без поиска
+# по имени), пишет state/agg_organizers.txt. Сами каналы дальше проверяются только по вебу (launch_scan.yml).
+# Группа repost — чтобы не работать одновременно с заданием публикаций (одна сессия Dolli).
+on:
+  workflow_dispatch:
+    inputs:
+      cap:
+        description: "Не больше N постов на агрегатор"
+        type: string
+        default: "5000"
+
+concurrency:
+  group: repost
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    env:
+      TG_API_ID: ${{ secrets.TG_API_ID }}
+      TG_API_HASH: ${{ secrets.TG_API_HASH }}
+      TG_STRING_SESSION: ${{ secrets.TG_STRING_SESSION }}
+      TG_TRANSPORT: tcp
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Запомненные каналы из учёта бота (только чтение)
+        uses: actions/cache/restore@v4
+        with:
+          path: .state
+          key: repost-state-${{ github.run_id }}
+          restore-keys: repost-state-
+      - name: Прочитать историю агрегаторов
+        run: python tools/agg_history.py --cap "${{ inputs.cap }}" --out state/agg_organizers.txt
+      - name: Сохранить список
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          cp state/agg_organizers.txt /tmp/agg_organizers.txt
+          for attempt in 1 2 3 4 5; do
+            git fetch -q origin main && git reset -q --hard origin/main
+            cp /tmp/agg_organizers.txt state/agg_organizers.txt
+            git add state/agg_organizers.txt
+            if git diff --cached --quiet; then echo "Без изменений"; exit 0; fi
+            git commit -qm "Aggregator history: $(wc -l < state/agg_organizers.txt) channels that ran giveaways"
+            git push -q origin HEAD:main && exit 0
+            sleep $((attempt * 5))
+          done
+          exit 1

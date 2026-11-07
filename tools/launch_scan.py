@@ -39,8 +39,8 @@ async def main():
     ap.add_argument("--shards", type=int, default=1)
     ap.add_argument("--stop-after", type=int, default=2)
     ap.add_argument("--parallel", type=int, default=8)
-    ap.add_argument("--pages", type=int, default=15,
-                    help="страниц на канал, по ~20 постов (15): у активных каналов «запуск» бывает глубже 5 страниц")
+    ap.add_argument("--pages", type=int, default=20,
+                    help="страниц на канал, по ~20 постов (20 — как в поиске бота): у активных каналов «запуск» бывает глубже 5 страниц")
     ap.add_argument("--out", help="найденные каналы — в формате большого списка (@канал  # N дата N)")
     ap.add_argument("--live-out", help="имена с веб-страницей (живые каналы) — для следующих проходов")
     a = ap.parse_args()

@@ -4,8 +4,9 @@ name: Новые розыгрыши по «Канал запустил розы�
 # «Канал запустил розыгрыш» (реклама такого сообщения от Telegram получить не может).
 # Найденные каналы сразу добавляются в начало state/cc_candidates.txt — бот открывает их в каждом поиске
 # (раньше находки оставались только в логе: @NoHuClub — 7 розыгрышей за 7 дней — бот не знал).
-# По расписанию раз в 6 часов проходит все живые каналы (state/live_usernames.txt) за 1 день;
-# ручной запуск по полному списку заодно обновляет список живых. Аккаунт Telegram не используется.
+# По расписанию раз в 6 часов проходит все живые каналы (state/live_usernames.txt) и каналы из истории
+# агрегаторов (state/agg_organizers.txt) за 7 дней, до 20 страниц на канал (владелец 07.11: «за 7 дней, а не
+# последние сообщения»); ручной запуск по полному списку заодно обновляет список живых. Аккаунт не используется.
 on:
   schedule:
     - cron: "27 */6 * * *"
@@ -41,7 +42,7 @@ jobs:
         shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
     env:
       SOURCE: ${{ inputs.source }}
-      DAYS: ${{ inputs.days || '1' }}
+      DAYS: ${{ inputs.days || '7' }}
       STOP: ${{ inputs.stop_after || '0' }}
     steps:
       - uses: actions/checkout@v4
@@ -51,8 +52,15 @@ jobs:
       - run: pip install -q -r requirements.txt
       - name: Пройти часть списка
         run: |
-          SRC="${SOURCE:-state/live_usernames.txt}"
-          [ -f "$SRC" ] || SRC=state/cc_usernames.txt
+          SRC="$SOURCE"
+          if [ -z "$SRC" ]; then
+            if [ -f state/live_usernames.txt ]; then
+              cat state/agg_organizers.txt state/live_usernames.txt 2>/dev/null > /tmp/names.txt
+              SRC=/tmp/names.txt
+            else
+              SRC=state/cc_usernames.txt
+            fi
+          fi
           echo "Список: $SRC, дней: $DAYS"
           mkdir -p /tmp/out
           python tools/launch_scan.py "$SRC" --days "$DAYS" --stop-after "$STOP" \
