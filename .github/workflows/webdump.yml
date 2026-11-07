@@ -42,7 +42,9 @@ jobs:
         env:
           OG: ${{ inputs.og }}
         run: |
-          if [ "$OG" = "results" ]; then
+          if [ "$OG" = "extra" ]; then
+            python tools/extra_names.py both --pages 3 --out /tmp/extra_names.txt | tee /tmp/web_dump.txt
+          elif [ "$OG" = "results" ]; then
             printf '@rzavayuui\n@energyplusmedia\n' > /tmp/known.txt
             python tools/results_scan.py /tmp/known.txt state/sources.txt state/cc_candidates.txt state/gh_usernames.txt --days 14 --stop-after 12 | tee /tmp/web_dump.txt
           elif [ "$OG" = "js" ]; then
