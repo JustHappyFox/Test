@@ -1007,6 +1007,61 @@ class PostNowTests(PostWhenDueTests):
         self.assertIn(1001, st["our_ids"])                       # свой пост запомнен — не «ручной»
 
 
+class OtherCountriesFallbackTests(unittest.TestCase):
+    """Владелец 07.11: «если ничего не найдёт, пусть использует розыгрыши и для других стран»."""
+
+    def run_post(self, st_extra, fallback=True, history=None):
+        target = channel(900, "mygroup", left=False)
+        ua = giveaway_media([1], stars=1000, quantity=5, days_left=3, countries_iso2=["UA"])
+        history = {1: [message(1, 11, ua)]} if history is None else history
+
+        class C(FakeClient):
+            async def get_messages(self, ent, scheduled=False, limit=None, ids=None):
+                if ids:
+                    return [m for m in history.get(ent.channel_id, []) if m.id in ids]
+                return []
+
+            async def forward_messages(self, to, mid, from_peer=None, schedule=None):
+                sent.append((from_peer.channel_id, mid))
+                return types.Message(id=800, peer_id=types.PeerChannel(900), date=NOW, message="")
+
+        sent = []
+        client = C([target, channel(1, "c1"), channel(2, "c2")], history)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp, "s.json")
+            gf.save_state(path, {"posted": {}, "queue": [], "last_post": (NOW - timedelta(hours=4)).isoformat(),
+                                 **st_extra})
+            a = gf.apply_preset(gf.build_parser().parse_args(
+                ["post", "--to", "@mygroup", "--state", str(path), "--no-discover", "--no-aggregators",
+                 "--depth", "0", "-c", "@c1", "--countries", "RU,BY,KZ", "--min-interval-hours", "3.5",
+                 "--schedule-ahead", "0", *(["--fallback-other-countries"] if fallback else [])]))
+            asyncio.run(gf.cmd_post(client, a))
+            return sent, gf.load_state(path), ua
+
+    def test_posts_other_country_when_nothing_else(self):
+        sent, st, ua = self.run_post({})
+        self.assertEqual(sent, [(1, 11)])
+        self.assertIn(gf.giveaway_key(ua), st["posted"])
+        self.assertEqual(st["backup"], [])
+
+    def test_without_option_other_countries_are_skipped(self):
+        sent, st, _ = self.run_post({}, fallback=False)
+        self.assertEqual(sent, [])
+        self.assertEqual(st["backup"], [])
+
+    def test_own_countries_first(self):
+        ru = giveaway_media([2], months=3, quantity=3, days_left=5, countries_iso2=["RU"])
+        ua = giveaway_media([1], stars=1000, quantity=5, days_left=1, countries_iso2=["UA"])  # кончится раньше
+        ru_e = {"key": gf.giveaway_key(ru), "until": (NOW + timedelta(days=5)).isoformat(), "prize": "ru",
+                "countries": ["RU"], "channel_id": 2, "access_hash": 7, "msg_id": 22, "link": "https://t.me/c2/22"}
+        ua_e = {"key": gf.giveaway_key(ua), "until": (NOW + timedelta(days=1)).isoformat(), "prize": "ua",
+                "countries": ["UA"], "channel_id": 1, "access_hash": 7, "msg_id": 11, "link": "https://t.me/c1/11"}
+        history = {1: [message(1, 11, ua)], 2: [message(2, 22, ru)]}
+        sent, st, _ = self.run_post({"queue": [ru_e], "backup": [ua_e]}, history=history)
+        self.assertEqual(sent, [(2, 22)])                       # свой — первым, хоть и кончится позже
+        self.assertEqual([e["msg_id"] for e in st["backup"]], [11])
+
+
 class BlocklistTests(unittest.TestCase):
     def test_load_blocklist(self):
         with tempfile.TemporaryDirectory() as tmp:

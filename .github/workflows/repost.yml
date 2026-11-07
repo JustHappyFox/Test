@@ -84,7 +84,7 @@ jobs:
         if: steps.check.outputs.ready == 'true'
         run: >
           python tg_giveaway_finder.py post --to TGaGifts
-          --countries RU,BY,KZ
+          --countries RU,BY,KZ --fallback-other-countries
           --count 1 --min-hours-left 3 --min-interval-hours 3.5 --manual-gap-hours 5 --schedule-ahead 0 --reserve 10 --daily-search-hours 24 --refill-below 4 --refill-every-hours 3 --post-hours 7-22 --tz-offset 3
           --careful --max-channels 1000 --search-pages 2 --source-limit 100
           --web --web-max 6000 --time-limit 30
