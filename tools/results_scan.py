@@ -23,17 +23,37 @@ POST = re.compile(r'data-post="([^"/]+)/(\d+)"')
 DATE = re.compile(r'<time datetime="([^"]+)"')
 
 
+OWN_CONTENT = re.compile(r"js-message_text|tgme_widget_message_photo|tgme_widget_message_video|media_supported_cont|"
+                         r"tgme_widget_message_document|tgme_widget_message_poll|tgme_widget_message_sticker")
+
+
 def results_in(html: str):
+    """Итоги розыгрыша: пустая заглушка (без своего текста, фото, видео), которая отвечает на пост с пустой
+    цитатой. 07.11 владелец проверил: ответы-посты с фото/видео и текстом (profitbase/2190, ecoplatform/2742)
+    — не итоги; пустые заглушки-ответы (betinjabet/730, rzavayuui/39, energyplusmedia/2122) — итоги."""
     out = []
     for blk in html.split('class="tgme_widget_message_wrap')[1:]:
-        if wp.STUB_CLASS not in blk or "tgme_widget_message_reply" not in blk:
+        if "tgme_widget_message_reply" not in blk:
             continue
         r, rt, p, d = REPLY.search(blk), REPLY_TEXT.search(blk), POST.search(blk), DATE.search(blk)
         if not (r and rt and p) or re.sub(r"<[^>]+>|\s", "", rt.group(1)):
             continue  # ответ на пост с текстом — не итоги розыгрыша
-        own = blk.split("</a>", 1)  # собственного текста у поста тоже нет (кроме цитаты ответа)
+        own = re.sub(r'<a class="tgme_widget_message_reply.*?</a>', "", blk, count=1, flags=re.S)
+        own = own.split("tgme_widget_message_footer", 1)[0]
+        if "message_media_not_supported_wrap" not in own or OWN_CONTENT.search(own):
+            continue  # у поста свой текст/фото/видео — обычный ответ, не итоги
         out.append((int(p.group(2)), int(r.group(2)), datetime.fromisoformat(d.group(1)) if d else None))
     return out
+
+
+def target_is_module(html: str, post_id: int) -> bool:
+    """Исходный пост (на который отвечают итоги) — тоже пустая заглушка без текста и медиа."""
+    for blk in (html or "").split('class="tgme_widget_message_wrap')[1:]:
+        p = POST.search(blk)
+        if p and int(p.group(2)) == post_id:
+            body = blk.split("tgme_widget_message_footer", 1)[0]
+            return "message_media_not_supported_wrap" in body and not OWN_CONTENT.search(body)
+    return False
 
 
 async def main():
@@ -63,7 +83,12 @@ async def main():
             posts = wp.parse_page(html) if html else None
             if not posts:
                 break
-            hits += [h for h in results_in(html) if h[2] is None or h[2] >= since]
+            for h in results_in(html):
+                if h[2] is not None and h[2] < since:
+                    continue
+                target = await w.fetch(f"{w.BASE}{name}?before={h[1] + 1}")
+                if target_is_module(target, h[1]):
+                    hits.append(h)
             oldest = min(posts, key=lambda p: p.id)
             if (oldest.date and oldest.date < since) or oldest.id <= 1:
                 break
