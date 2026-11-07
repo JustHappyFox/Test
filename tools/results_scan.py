@@ -46,13 +46,25 @@ def results_in(html: str):
     return out
 
 
-def target_is_module(html: str, post_id: int) -> bool:
-    """Исходный пост (на который отвечают итоги) — тоже пустая заглушка без текста и медиа."""
+MIN_GIVEAWAY = timedelta(hours=1)
+
+
+def target_is_module(html: str, post_id: int, results_date: datetime | None = None) -> bool:
+    """Исходный пост (на который отвечают итоги) — тоже пустая заглушка без текста и медиа, сам ни на что
+    не отвечает, и между ним и итогами прошёл хотя бы час. 07.11: у новостного @nikvesti пустые заглушки
+    отвечали друг на друга цепочкой через минуту (84912 → 84913 → 84915) — это не розыгрыши."""
     for blk in (html or "").split('class="tgme_widget_message_wrap')[1:]:
         p = POST.search(blk)
         if p and int(p.group(2)) == post_id:
             body = blk.split("tgme_widget_message_footer", 1)[0]
-            return "message_media_not_supported_wrap" in body and not OWN_CONTENT.search(body)
+            if "message_media_not_supported_wrap" not in body or OWN_CONTENT.search(body):
+                return False
+            if "tgme_widget_message_reply" in body:
+                return False
+            d = DATE.search(blk)
+            if results_date and d and results_date - datetime.fromisoformat(d.group(1)) < MIN_GIVEAWAY:
+                return False
+            return True
     return False
 
 
@@ -87,7 +99,7 @@ async def main():
                 if h[2] is not None and h[2] < since:
                     continue
                 target = await w.fetch(f"{w.BASE}{name}?before={h[1] + 1}")
-                if target_is_module(target, h[1]):
+                if target_is_module(target, h[1], h[2]):
                     hits.append(h)
             oldest = min(posts, key=lambda p: p.id)
             if (oldest.date and oldest.date < since) or oldest.id <= 1:
