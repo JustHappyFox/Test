@@ -1062,6 +1062,47 @@ class OtherCountriesFallbackTests(unittest.TestCase):
         self.assertEqual([e["msg_id"] for e in st["backup"]], [11])
 
 
+class OnePerChannelTests(PostWhenDueTests):
+    """Владелец 07.11: от одного канала — один розыгрыш; из двух — где больше приза на канал-участник."""
+    test_not_due_just_refreshes = None
+    test_due_posts_exactly_one = None
+    test_manual_post_blocks_when_due = None
+    test_no_posts_at_night = None
+    test_post_window_shift = None
+
+    @staticmethod
+    def e(cid, mid, chans, stars=500, qty=1, days=10):
+        until = NOW + timedelta(days=days)
+        key = f"{','.join(str(c) for c in sorted(chans))}|{int(until.timestamp())}|{qty}|0|{stars}"
+        return {"key": key, "until": until.isoformat(), "prize": f"{stars}", "countries": [], "channel_id": cid,
+                "access_hash": 7, "msg_id": mid, "link": f"https://t.me/c{cid}/{mid}"}
+
+    def test_keeps_simplest_of_same_channel(self):
+        five = self.e(1, 761, [1, 2, 3, 4, 5])
+        eight = self.e(1, 768, [1, 2, 3, 4, 5, 6, 7, 8], days=20)
+        other = self.e(9, 5, [9])
+        bad = {}
+        out = gf.one_per_channel([eight, five, other], set(), bad)
+        self.assertEqual(sorted(x["msg_id"] for x in out), [5, 761])  # 500 ⭐ на 5 каналов лучше, чем на 8
+        self.assertIn(eight["key"], bad)
+        big = self.e(1, 770, [1, 2, 3, 4, 5, 6, 7, 8], stars=8000)     # 1000 ⭐ на канал — жирнее
+        self.assertEqual([x["msg_id"] for x in gf.one_per_channel([five, big], set(), {})], [770])
+        prem = {**self.e(1, 771, [1]), "key": self.e(1, 771, [1])["key"].replace("|1|0|500", "|3|3|0")}
+        self.assertEqual(gf.prize_per_channel(prem), 3000)            # 3 × Premium 3 мес. ≈ 3000 ⭐
+
+    def test_channel_already_posted_is_skipped(self):
+        posted_media = giveaway_media([101, 555], stars=500, quantity=1, days_left=10)
+        fwd = types.Message(id=50, peer_id=types.PeerChannel(900), date=NOW - timedelta(hours=6), message="",
+                            media=posted_media,
+                            fwd_from=types.MessageFwdHeader(date=NOW, from_id=types.PeerChannel(101), channel_post=7))
+        c = self.client(history=[fwd])
+        st = self.run_post(c, {"last_post": (NOW - timedelta(hours=6)).isoformat(), "our_ids": [50],
+                               "queue": [self.entry(1), self.entry(2)]})
+        self.assertEqual(c.forwards, [(2, None)])                 # от канала 101 у нас уже идёт розыгрыш
+        self.assertIn(self.entry(1)["key"], st["bad"])
+        self.assertEqual(st["posted_src"][self.entry(2)["key"]], 102)
+
+
 class BlocklistTests(unittest.TestCase):
     def test_load_blocklist(self):
         with tempfile.TemporaryDirectory() as tmp:

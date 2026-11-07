@@ -1247,10 +1247,12 @@ def is_manual_post(m: Any) -> bool:
 
 
 async def inspect_target(client: TelegramClient, target: Any, st: dict[str, Any],
-                         limit: int = 100) -> tuple[datetime | None, dict[str, str]]:
+                         limit: int = 100, sources: dict[str, int] | None = None
+                         ) -> tuple[datetime | None, dict[str, str]]:
     """Смотрит последние посты канала:
     * время последнего поста, опубликованного НЕ ботом (вручную, любого);
-    * розыгрыши, которые уже есть в канале (кем бы ни были опубликованы), — чтобы не дублировать.
+    * розыгрыши, которые уже есть в канале (кем бы ни были опубликованы), — чтобы не дублировать;
+      в sources — из какого канала каждый переслан (ключ розыгрыша → id канала).
     Свои посты бот узнаёт по сохранённым id и времени публикации."""
     our_ids = set(st.get("our_ids") or [])
     our_times = [datetime.fromisoformat(t) for t in (st.get("post_times") or [])]
@@ -1262,6 +1264,9 @@ async def inspect_target(client: TelegramClient, target: Any, st: dict[str, Any]
         media = getattr(m, "media", None)
         if isinstance(media, types.MessageMediaGiveaway) and media.until_date:
             in_channel[giveaway_key(media)] = media.until_date.isoformat()
+            src = getattr(getattr(m, "fwd_from", None), "from_id", None)
+            if sources is not None and isinstance(src, types.PeerChannel):
+                sources[giveaway_key(media)] = src.channel_id
         if manual is None and m.id not in our_ids and is_manual_post(m) \
                 and not any(abs((m.date - t).total_seconds()) <= 120 for t in our_times):
             manual = m.date
@@ -1270,6 +1275,48 @@ async def inspect_target(client: TelegramClient, target: Any, st: dict[str, Any]
 
 def queue_order(e: dict[str, Any]) -> tuple:
     return (e["until"], bool(e.get("countries")))  # раньше кончится — раньше публикуем; при равенстве «для всех стран»
+
+
+# Цена Premium в звёздах (подарок за звёзды): чтобы сравнивать розыгрыши Premium и звёзд одной мерой
+PREMIUM_IN_STARS = {3: 1000, 6: 1500, 12: 2500}
+
+
+def key_channels(key: str) -> int:
+    chans = key.split("|", 1)[0]
+    return len(chans.split(",")) if chans else 1
+
+
+def prize_per_channel(e: dict[str, Any]) -> float:
+    """Сколько приза (в звёздах) приходится на один канал, на который надо подписаться."""
+    try:
+        _, _, qty, months, stars = e["key"].split("|")
+        qty, months, stars = int(qty), int(months), int(stars)
+    except (KeyError, ValueError):
+        return 0.0
+    value = stars if stars else qty * PREMIUM_IN_STARS.get(months, round(months * 1000 / 3))
+    return value / max(key_channels(e["key"]), 1)
+
+
+def one_per_channel(entries: list[dict[str, Any]], busy: set[int], bad: dict[str, str]) -> list[dict[str, Any]]:
+    """Владелец 07.11: «не надо дублировать розыгрыши с одного канала; если активных 2 — брать самый жирный
+    или самый простой; подписаться на 8 каналов за 500 звёзд — овер требование». От канала-организатора
+    оставляем один розыгрыш: где больше приза на каждый канал-участник (при равенстве — меньше каналов,
+    потом раньше кончится). Если от канала уже идёт опубликованный у нас розыгрыш (busy) — новые не берём.
+    Отброшенные — в bad, чтобы поиск не брал их снова."""
+    keep: dict[Any, dict[str, Any]] = {}
+    rest: list[dict[str, Any]] = []
+    for e in sorted(entries, key=lambda e: (-prize_per_channel(e), key_channels(e["key"]), queue_order(e))):
+        cid = e.get("channel_id")
+        if cid is None:
+            rest.append(e)
+            continue
+        if cid in busy or cid in keep:
+            why = "у нас уже опубликован его розыгрыш" if cid in busy else f"оставляю {keep[cid]['link']}"
+            log.info("Не беру %s: второй розыгрыш того же канала (%s)", e["link"], why)
+            bad[e["key"]] = e["until"]
+            continue
+        keep[cid] = e
+    return sorted(rest + list(keep.values()), key=queue_order)
 
 
 async def giveaway_closed_reason(client: TelegramClient, channel_id: int, access_hash: int | None,
@@ -1365,7 +1412,8 @@ async def cmd_post_scheduled(client: TelegramClient, args: argparse.Namespace) -
     min_left = timedelta(hours=args.min_hours_left)
 
     target = await get_target(client, args, st)
-    manual, in_channel = await inspect_target(client, target, st)
+    sources: dict[str, int] = {k: int(v) for k, v in (st.get("posted_src") or {}).items()}  # розыгрыш → канал
+    manual, in_channel = await inspect_target(client, target, st, sources=sources)
 
     posted = {k: v for k, v in st["posted"].items() if datetime.fromisoformat(v) > now}
     for k, v in in_channel.items():
@@ -1405,12 +1453,22 @@ async def cmd_post_scheduled(client: TelegramClient, args: argparse.Namespace) -
         if getattr(fwd, "id", None) is not None:
             our_ids.append(fwd.id)  # свой пост — не принимать за ручной
         posted[entry["key"]] = entry["until"]
+        sources[entry["key"]] = entry["channel_id"]
         queue.remove(entry)
         # расписание (last_post / post_times) не трогаем: пост вне очереди
-        st.update(posted=posted, queue=queue, our_ids=our_ids[-100:])
+        st.update(posted=posted, queue=queue, our_ids=our_ids[-100:],
+                  posted_src={k: v for k, v in sources.items() if k in posted})
         save_state(state_path, st)
         log.info("✅ Вне очереди: %s | %s", entry["prize"], entry["link"])
         return
+
+    def busy_channels() -> set[int]:
+        """Каналы, чей розыгрыш уже опубликован у нас и ещё идёт."""
+        return {sources[k] for k in posted if k in sources}
+
+    # от одного канала — один розыгрыш (владелец 07.11)
+    queue = one_per_channel(queue, busy_channels(), bad)
+    backup = one_per_channel(backup, busy_channels() | {e.get("channel_id") for e in queue}, bad)
 
     # что сейчас реально стоит в отложенных канала
     live: dict[str, Any] = {}
@@ -1526,8 +1584,14 @@ async def cmd_post_scheduled(client: TelegramClient, args: argparse.Namespace) -
                 else:  # нет публичного поста организатора — больше не берём
                     bad[g.key] = g.until_date.isoformat()
                     skip("закрытый канал")
-        queue.sort(key=queue_order)
-        backup.sort(key=queue_order)
+        # от одного канала — один розыгрыш: где больше приза на канал-участник (владелец 07.11)
+        queue[:] = one_per_channel(queue, busy_channels(), bad)
+        backup[:] = one_per_channel(backup, busy_channels() | {e.get("channel_id") for e in queue}, bad)
+        dup = len(added) + len(added_backup)
+        added = [e for e in added if e in queue]
+        added_backup = [e for e in added_backup if e in backup]
+        if dup - len(added) - len(added_backup):
+            why["второй розыгрыш того же канала"] = dup - len(added) - len(added_backup)
         if added_backup:
             why["другие страны — в запасной список"] = len(added_backup)
         st["last_search"] = now.isoformat()
@@ -1604,6 +1668,7 @@ async def cmd_post_scheduled(client: TelegramClient, args: argparse.Namespace) -
             continue
         if immediate:
             posted[entry["key"]] = entry["until"]
+            sources[entry["key"]] = entry["channel_id"]
             if getattr(fwd, "id", None) is not None:
                 our_ids.append(fwd.id)
             post_times.append(now)
@@ -1639,6 +1704,7 @@ async def cmd_post_scheduled(client: TelegramClient, args: argparse.Namespace) -
               and e["key"] not in bad and datetime.fromisoformat(e["until"]) - now >= min_left]
     if not args.dry_run:
         st.update(posted=posted, queue=queue, scheduled=list(scheduled.values()), bad=bad, backup=backup,
+                  posted_src={k: v for k, v in sources.items() if k in posted},
                   post_times=[t.isoformat() for t in post_times][-50:], our_ids=our_ids[-100:],
                   last_post=(last_published.isoformat() if last_published else st.get("last_post")))
         save_state(state_path, st)
