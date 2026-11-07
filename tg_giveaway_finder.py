@@ -1429,15 +1429,19 @@ async def cmd_post_scheduled(client: TelegramClient, args: argparse.Namespace) -
     # они лежат отдельно и идут в канал, только когда для своих стран публиковать нечего
     fallback = bool(getattr(args, "fallback_other_countries", False))
     backup: list[dict[str, Any]] = list(st.get("backup") or [])
+    # больше --max-giveaway-channels каналов: не публикуем сами, держим отдельно — владелец посмотрит,
+    # «если будет совсем голяк» (07.11); опубликовать такой можно вне очереди (--post-now)
+    over: list[dict[str, Any]] = list(st.get("over_cap") or [])
 
     if getattr(args, "post_now", None):  # вне очереди: опубликовать конкретный розыгрыш из запаса сейчас
         entry = next((e for e in queue if e["link"].rstrip("/") == args.post_now.rstrip("/")), None)
-        if entry is None:
-            entry = next((e for e in backup if e["link"].rstrip("/") == args.post_now.rstrip("/")), None)
-            if entry is not None:
-                backup.remove(entry)
-                st["backup"] = backup
-                queue.append(entry)
+        for name, extra in (("backup", backup), ("over_cap", over)):
+            if entry is None:
+                entry = next((e for e in extra if e["link"].rstrip("/") == args.post_now.rstrip("/")), None)
+                if entry is not None:
+                    extra.remove(entry)
+                    st[name] = extra
+                    queue.append(entry)
         if entry is None:
             log.warning("Розыгрыша %s нет в запасе — нечего публиковать вне очереди", args.post_now)
             return
@@ -1472,10 +1476,11 @@ async def cmd_post_scheduled(client: TelegramClient, args: argparse.Namespace) -
     def within_cap(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if not cap:
             return entries
+        have = {e["key"] for e in over}
         for e in entries:
-            if key_channels(e["key"]) > cap:
-                log.info("Не беру %s: каналов-участников %d, больше %d", e["link"], key_channels(e["key"]), cap)
-                bad[e["key"]] = e["until"]
+            if key_channels(e["key"]) > cap and e["key"] not in have:
+                log.info("В отдельный список %s: каналов-участников %d, больше %d", e["link"], key_channels(e["key"]), cap)
+                over.append(e)
         return [e for e in entries if key_channels(e["key"]) <= cap]
     queue, backup = within_cap(queue), within_cap(backup)
 
@@ -1539,7 +1544,7 @@ async def cmd_post_scheduled(client: TelegramClient, args: argparse.Namespace) -
         """Перебор каналов: набираем в запас до --reserve подходящих розыгрышей."""
         nonlocal finder
         log.info("Ищу новые розыгрыши перебором каналов (запас до %d)", args.reserve)
-        known = {e["key"] for e in queue} | {e["key"] for e in backup}
+        known = {e["key"] for e in queue} | {e["key"] for e in backup} | {e["key"] for e in over}
         want_at = next_at
 
         def want(g: Giveaway) -> bool:
@@ -1570,7 +1575,7 @@ async def cmd_post_scheduled(client: TelegramClient, args: argparse.Namespace) -
         allowed = parse_countries(getattr(args, "countries", None))
         any_country = argparse.Namespace(**{**vars(args), "countries": None})  # проверка приза без стран
         why: dict[str, int] = {}
-        added, added_backup = [], []
+        added, added_backup, added_over = [], [], []
 
         def skip(reason: str) -> None:
             why[reason] = why.get(reason, 0) + 1
@@ -1582,7 +1587,12 @@ async def cmd_post_scheduled(client: TelegramClient, args: argparse.Namespace) -
             elif set(g.channel_ids) & blocked_ids or {(r.username or "").lower() for r in getattr(g, "channels", [])} & blocked_names:
                 skip("чёрный список")
             elif cap and len(g.channel_ids) > cap:
-                skip(f"больше {cap} каналов")
+                skip(f"больше {cap} каналов — в отдельный список")
+                if len(over) < 20 and g.until_date - now >= min_left and filter_giveaways([g], any_country):
+                    e = await queue_entry(client, g, finder)
+                    if e:
+                        over.append(e)
+                        added_over.append(e)
             elif other and (not fallback or len(backup) >= args.reserve):
                 skip("другие страны")
             elif not filter_giveaways([g], any_country):
@@ -1621,6 +1631,9 @@ async def cmd_post_scheduled(client: TelegramClient, args: argparse.Namespace) -
             log.info("  + в запас: %s | до %s | %s", e["prize"], e["until"][:16], e["link"])
         for e in added_backup:
             log.info("  + запасной (страны: %s): %s | до %s | %s", ",".join(e.get("countries") or []),
+                     e["prize"], e["until"][:16], e["link"])
+        for e in added_over:
+            log.info("  + отдельный список (каналов %d): %s | до %s | %s", key_channels(e["key"]),
                      e["prize"], e["until"][:16], e["link"])
 
     if args.refill:  # только пополнить запас, ничего не публикуя
@@ -1718,16 +1731,23 @@ async def cmd_post_scheduled(client: TelegramClient, args: argparse.Namespace) -
 
     backup = [e for e in backup if e["key"] not in posted and e["key"] not in scheduled
               and e["key"] not in bad and datetime.fromisoformat(e["until"]) - now >= min_left]
+    over = sorted((e for e in over if e["key"] not in posted and e["key"] not in scheduled
+                   and e["key"] not in bad and datetime.fromisoformat(e["until"]) - now >= min_left),
+                  key=queue_order)[:20]
     if not args.dry_run:
         st.update(posted=posted, queue=queue, scheduled=list(scheduled.values()), bad=bad, backup=backup,
+                  over_cap=over,
                   posted_src={k: v for k, v in sources.items() if k in posted},
                   post_times=[t.isoformat() for t in post_times][-50:], our_ids=our_ids[-100:],
                   last_post=(last_published.isoformat() if last_published else st.get("last_post")))
         save_state(state_path, st)
     if args.save_sources and finder is not None:
         save_sources(filter_giveaways(finder.giveaways.values(), args), args.save_sources)
-    log.info("Отложено постов бота: %d, в очереди: %d, запасных (другие страны): %d",
-             len(scheduled), len(queue), len(backup))
+    log.info("Отложено постов бота: %d, в очереди: %d, запасных (другие страны): %d, отдельный список "
+             "(больше %d каналов): %d", len(scheduled), len(queue), len(backup), cap, len(over))
+    for e in over:
+        log.info("  отдельный список: %s | каналов %d | до %s | %s", e["prize"], key_channels(e["key"]),
+                 e["until"][:16], e["link"])
 
 
 async def cmd_post(client: TelegramClient, args: argparse.Namespace) -> None:

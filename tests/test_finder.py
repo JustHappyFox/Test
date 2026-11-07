@@ -1122,7 +1122,8 @@ class MaxChannelsTests(OnePerChannelTests):
             asyncio.run(gf.cmd_post(c, a))
             st = gf.load_state(path)
         self.assertEqual(c.forwards, [(20, None)])
-        self.assertIn(five["key"], st["bad"])
+        self.assertEqual([e["msg_id"] for e in st["over_cap"]], [10])   # не в bad — в отдельный список
+        self.assertNotIn(five["key"], st.get("bad", {}))
 
 
 class BlocklistTests(unittest.TestCase):
