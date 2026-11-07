@@ -1103,6 +1103,28 @@ class OnePerChannelTests(PostWhenDueTests):
         self.assertEqual(st["posted_src"][self.entry(2)["key"]], 102)
 
 
+class MaxChannelsTests(OnePerChannelTests):
+    """Владелец 07.11: «максимум 4 канала — награда маленькая, а требования ппц»."""
+    test_keeps_simplest_of_same_channel = None
+    test_channel_already_posted_is_skipped = None
+
+    def test_more_than_four_channels_dropped(self):
+        five = self.e(1, 10, [1, 2, 3, 4, 5], days=2)        # кончится раньше, но каналов 5
+        four = self.e(2, 20, [2, 6, 7, 8], days=5)
+        c = self.client()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp, "s.json")
+            gf.save_state(path, {"posted": {}, "queue": [five, four],
+                                 "last_post": (NOW - timedelta(hours=4)).isoformat()})
+            a = gf.apply_preset(gf.build_parser().parse_args(
+                ["post", "--to", "@mygroup", "--state", str(path), "--no-discover", "--no-aggregators",
+                 "--min-interval-hours", "3.5", "--schedule-ahead", "0", "--max-giveaway-channels", "4"]))
+            asyncio.run(gf.cmd_post(c, a))
+            st = gf.load_state(path)
+        self.assertEqual(c.forwards, [(20, None)])
+        self.assertIn(five["key"], st["bad"])
+
+
 class BlocklistTests(unittest.TestCase):
     def test_load_blocklist(self):
         with tempfile.TemporaryDirectory() as tmp:

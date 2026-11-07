@@ -1466,6 +1466,19 @@ async def cmd_post_scheduled(client: TelegramClient, args: argparse.Namespace) -
         """Каналы, чей розыгрыш уже опубликован у нас и ещё идёт."""
         return {sources[k] for k in posted if k in sources}
 
+    # не больше N каналов-участников (владелец 07.11: «максимум 4 канала — награда маленькая, а требования ппц»)
+    cap = getattr(args, "max_giveaway_channels", 0) or 0
+
+    def within_cap(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if not cap:
+            return entries
+        for e in entries:
+            if key_channels(e["key"]) > cap:
+                log.info("Не беру %s: каналов-участников %d, больше %d", e["link"], key_channels(e["key"]), cap)
+                bad[e["key"]] = e["until"]
+        return [e for e in entries if key_channels(e["key"]) <= cap]
+    queue, backup = within_cap(queue), within_cap(backup)
+
     # от одного канала — один розыгрыш (владелец 07.11)
     queue = one_per_channel(queue, busy_channels(), bad)
     backup = one_per_channel(backup, busy_channels() | {e.get("channel_id") for e in queue}, bad)
@@ -1532,6 +1545,7 @@ async def cmd_post_scheduled(client: TelegramClient, args: argparse.Namespace) -
         def want(g: Giveaway) -> bool:
             return (bool(filter_giveaways([g], args)) and g.key not in posted
                     and g.key not in scheduled and g.key not in known and g.key not in bad
+                    and not (cap and len(g.channel_ids) > cap)
                     and g.until_date - want_at >= min_left)
         # смена файла большого списка — начинаем его с начала
         list_path = getattr(args, "discover_file", None)
@@ -1567,6 +1581,8 @@ async def cmd_post_scheduled(client: TelegramClient, args: argparse.Namespace) -
                 skip("уже был / в канале")
             elif set(g.channel_ids) & blocked_ids or {(r.username or "").lower() for r in getattr(g, "channels", [])} & blocked_names:
                 skip("чёрный список")
+            elif cap and len(g.channel_ids) > cap:
+                skip(f"больше {cap} каналов")
             elif other and (not fallback or len(backup) >= args.reserve):
                 skip("другие страны")
             elif not filter_giveaways([g], any_country):
@@ -1950,6 +1966,8 @@ def build_parser() -> argparse.ArgumentParser:
                     help="публиковать только в эти часы по местному времени, например 7-22 (ночью людей не будим)")
     ps.add_argument("--tz-offset", type=float, default=3.0, metavar="Ч",
                     help="местное время для --post-hours: смещение от UTC в часах (3 — Минск/Москва)")
+    ps.add_argument("--max-giveaway-channels", type=int, default=0, metavar="N",
+                    help="не брать розыгрыши, где каналов-участников больше N (0 — без ограничения)")
     ps.add_argument("--fallback-other-countries", action="store_true",
                     help="розыгрыши не для --countries хранить отдельно (до --reserve) и публиковать, "
                          "только когда для своих стран публиковать нечего")
