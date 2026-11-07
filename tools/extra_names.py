@@ -16,7 +16,7 @@ import urllib.request
 from pathlib import Path
 
 UA = {"User-Agent": "giveaway-finder-research/1.0 (public channel discovery)"}
-NAME = re.compile(r"^(?:https?://)?(?:www\.)?(?:t|telegram)\.me/(?:s/)?([A-Za-z][A-Za-z0-9_]{3,31})(?:[/?#]|$)", re.I)
+NAME = re.compile(r"^(?:https?://)?(?:www\.)?(?:t|telegram)\.me(?::\d+)?/(?:s/)?([A-Za-z][A-Za-z0-9_]{3,31})(?:[/?#]|$)", re.I)
 SKIP = {"joinchat", "addstickers", "addemoji", "share", "proxy", "socks", "iv", "login", "addlist", "boost",
         "giftcode", "invoice", "setlanguage", "confirmphone", "contact", "addtheme", "bg", "c"}
 
@@ -32,27 +32,33 @@ def get(url, tries=4, timeout=120):
     return ""
 
 
-def wayback(pages: int, start: int, limit: int = 50000, pause: float = 10.0):
-    """Индекс Wayback Machine по t.me/: читаем кусками по --limit адресов с resumeKey (по одному адресу на
-    URL: collapse=urlkey), медленно — archive.org при частых запросах отвечает 503 и закрывает соединение."""
+def wayback(pages: int, start: int, limit: int = 50000, pause: float = 15.0, on_letter=None):
+    """Индекс Wayback Machine по t.me/. Первые сотни тысяч адресов — приглашения «t.me/+…» (они идут первыми
+    по алфавиту), поэтому идём по буквам: t.me/a…, t.me/b…, и берём только страницы каналов
+    (t.me/имя и t.me/s/имя) — фильтр на стороне archive.org. Медленно: при частых запросах 503."""
     names = set()
-    resume = ""
-    for i in range(pages):
-        url = (f"https://web.archive.org/cdx/search/cdx?url=t.me/&matchType=prefix&fl=original&collapse=urlkey"
-               f"&limit={limit}&showResumeKey=true" + (f"&resumeKey={urllib.parse.quote(resume)}" if resume else ""))
-        txt = get(url, tries=6, timeout=300)
-        lines = txt.splitlines()
-        resume = lines[-1].strip() if len(lines) >= 2 and not lines[-2].strip() else ""
-        before = len(names)
-        for ln in lines:
-            m = NAME.match(ln.strip())
-            if m and m.group(1).lower() not in SKIP:
-                names.add(m.group(1))
-        print(f"  кусок {i}: адресов {len(lines)}, новых имён {len(names) - before}, всего {len(names)}, "
-              f"дальше с {resume[:40]!r}", flush=True)
-        if not resume:
-            break
-        time.sleep(pause)
+    letters = "abcdefghijklmnopqrstuvwxyz"[start:]
+    for ch in letters:
+        resume = ""
+        for i in range(pages):
+            url = (f"https://web.archive.org/cdx/search/cdx?url=t.me/{ch}&matchType=prefix&fl=original&collapse=urlkey"
+                   "&filter=" + urllib.parse.quote(r"original:.*t\.me(:\d+)?/(s/)?[A-Za-z][A-Za-z0-9_]{3,31}/?$") +
+                   f"&limit={limit}&showResumeKey=true" + (f"&resumeKey={urllib.parse.quote(resume)}" if resume else ""))
+            txt = get(url, tries=6, timeout=300)
+            lines = txt.splitlines()
+            resume = lines[-1].strip() if len(lines) >= 2 and not lines[-2].strip() else ""
+            before = len(names)
+            for ln in lines:
+                m = NAME.match(ln.strip())
+                if m and m.group(1).lower() not in SKIP:
+                    names.add(m.group(1))
+            print(f"  t.me/{ch}… кусок {i}: адресов {len(lines)}, новых имён {len(names) - before}, всего {len(names)}",
+                  flush=True)
+            time.sleep(pause)
+            if not resume:
+                break
+        if on_letter:
+            on_letter(names)  # промежуточное сохранение: задание могут прервать по времени
     return names
 
 
@@ -84,7 +90,10 @@ def main():
     if a.source in ("wikidata", "both"):
         names |= wikidata()
     if a.source in ("wayback", "both"):
-        names |= wayback(a.pages, a.start)
+        def save_partial(part):
+            new = sorted(n for n in names | part if n.lower() not in known)
+            Path(a.out).write_text("".join(f"@{n}\n" for n in new), encoding="utf-8")
+        names |= wayback(a.pages, a.start, on_letter=save_partial)
     new = sorted(n for n in names if n.lower() not in known)
     Path(a.out).write_text("".join(f"@{n}\n" for n in new), encoding="utf-8")
     print(f"Итог: имён {len(names)}, новых (нет в нашем списке из {len(known)}) — {len(new)} → {a.out}")

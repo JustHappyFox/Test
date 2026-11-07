@@ -1,0 +1,49 @@
+name: Новые каналы из Wayback Machine и Wikidata
+
+# Владелец 07.11: «надо расширить список каналов, не только русские». Медленно (archive.org отвечает 503
+# при частых запросах) читаем индекс Wayback по адресам t.me/<буква>…, берём имена каналов, которых
+# ещё нет в state/cc_usernames.txt, плюс официальные аккаунты из Wikidata. Аккаунт Telegram не нужен.
+on:
+  workflow_dispatch:
+    inputs:
+      pages:
+        description: "Кусков по 50 тыс. адресов на букву"
+        type: string
+        default: "15"
+      start:
+        description: "С какой буквы начать (0 — a)"
+        type: string
+        default: "0"
+
+permissions:
+  contents: write
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Собрать имена
+        run: |
+          timeout 330m python tools/extra_names.py both --pages "${{ inputs.pages }}" --start "${{ inputs.start }}" \
+            --out /tmp/new_names.txt || true
+      - name: Сохранить
+        run: |
+          [ -s /tmp/new_names.txt ] || { echo "Новых имён нет"; exit 0; }
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          for attempt in 1 2 3 4 5; do
+            git fetch -q origin main && git reset -q --hard origin/main
+            touch state/wayback_usernames.txt
+            sort -u -f state/wayback_usernames.txt /tmp/new_names.txt -o state/wayback_usernames.txt
+            git add state/wayback_usernames.txt
+            if git diff --cached --quiet; then echo "Без изменений"; exit 0; fi
+            git commit -qm "New channel names from Wayback Machine and Wikidata: $(wc -l < state/wayback_usernames.txt)"
+            git push -q origin HEAD:main && exit 0
+            sleep $((attempt * 5))
+          done
+          exit 1
