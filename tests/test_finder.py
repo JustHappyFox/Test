@@ -996,3 +996,14 @@ class PostNowTests(PostWhenDueTests):
         self.assertEqual(st["last_post"], last)                  # расписание не сдвинулось
         self.assertEqual([e["msg_id"] for e in st["queue"]], [1])
         self.assertIn(1001, st["our_ids"])                       # свой пост запомнен — не «ручной»
+
+
+class BlocklistTests(unittest.TestCase):
+    def test_load_blocklist(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp, "b.txt")
+            p.write_text("# комментарий\n@CodeNameFan   # причина\n2454948751\n\n", encoding="utf-8")
+            names, ids = gf.load_blocklist(str(p))
+        self.assertEqual(names, {"codenamefan"})
+        self.assertEqual(ids, {2454948751})
+        self.assertEqual(gf.load_blocklist(None), (set(), set()))

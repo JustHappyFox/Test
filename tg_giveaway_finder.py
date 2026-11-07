@@ -97,6 +97,20 @@ PRESETS = {
 }
 
 
+def load_blocklist(path: str | None) -> tuple[set[str], set[int]]:
+    """Чёрный список каналов (state/blocked_channels.txt): @username или id, комментарии после #."""
+    names: set[str] = set()
+    ids: set[int] = set()
+    if path and Path(path).is_file():
+        for ln in Path(path).read_text(encoding="utf-8").splitlines():
+            item = ln.split("#", 1)[0].strip().lstrip("@")
+            if item.isdigit():
+                ids.add(int(item))
+            elif item:
+                names.add(item.lower())
+    return names, ids
+
+
 def parse_post_hours(value: str | None) -> tuple[int, int] | None:
     """'7-22' -> (7, 22): публиковать с 07:00 до 22:00 по местному времени (22:00 уже нельзя)."""
     if not value:
@@ -1477,9 +1491,12 @@ async def cmd_post_scheduled(client: TelegramClient, args: argparse.Namespace) -
 
         def skip(reason: str) -> None:
             why[reason] = why.get(reason, 0) + 1
+        blocked_names, blocked_ids = load_blocklist(getattr(args, "blocklist", None))
         for g in finder.giveaways.values():
             if g.key in posted or g.key in scheduled or g.key in known or g.key in bad:
                 skip("уже был / в канале")
+            elif set(g.channel_ids) & blocked_ids or {(r.username or "").lower() for r in getattr(g, "channels", [])} & blocked_names:
+                skip("чёрный список")
             elif not country_ok(g, allowed):
                 skip("другие страны")
             elif not filter_giveaways([g], args):
@@ -1817,6 +1834,8 @@ def build_parser() -> argparse.ArgumentParser:
                     help="не пересылать розыгрыши, до конца которых меньше N часов (3)")
     ps.add_argument("--search-cooldown-hours", type=float, default=2.0, metavar="Ч",
                     help="если поиск ничего не дал, следующий — не раньше чем через Ч часов (2)")
+    ps.add_argument("--blocklist", default="state/blocked_channels.txt", metavar="ФАЙЛ",
+                    help="чёрный список каналов: их розыгрыши не публикуем (state/blocked_channels.txt)")
     ps.add_argument("--post-hours", metavar="С-ДО",
                     help="публиковать только в эти часы по местному времени, например 7-22 (ночью людей не будим)")
     ps.add_argument("--tz-offset", type=float, default=3.0, metavar="Ч",
