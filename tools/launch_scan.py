@@ -65,7 +65,7 @@ async def main():
         if (i // step) % 25 == 0:
             print(f"  проверено {min(i + step, len(names))}/{len(names)}, новых каналов с запуском: {len(found)}, "
                   f"страниц {w.pages}, 429: {w.limited}, {time.time() - t0:.0f} с", flush=True)
-        if len(found) >= a.stop_after:
+        if a.stop_after and len(found) >= a.stop_after:
             break
     await w.close()
     print(f"Итог: новых каналов с «Канал запустил розыгрыш» за {a.days} дн.: {len(found)}")

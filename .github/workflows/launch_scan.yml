@@ -11,9 +11,13 @@ on:
         type: string
         default: "7"
       stop_after:
-        description: "Сколько новых каналов найти в каждой части"
+        description: "Сколько новых каналов найти в каждой части (0 — пройти всё)"
         type: string
         default: "1"
+      source:
+        description: "Список имён"
+        type: string
+        default: "state/cc_usernames.txt"
 
 permissions:
   contents: read
@@ -32,4 +36,4 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -q -r requirements.txt
-      - run: python tools/launch_scan.py state/cc_usernames.txt --days "${{ inputs.days }}" --stop-after "${{ inputs.stop_after }}" --shard ${{ matrix.shard }} --shards 5
+      - run: python tools/launch_scan.py "${{ inputs.source }}" --days "${{ inputs.days }}" --stop-after "${{ inputs.stop_after }}" --shard ${{ matrix.shard }} --shards 5
