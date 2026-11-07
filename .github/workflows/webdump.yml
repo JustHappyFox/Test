@@ -43,7 +43,7 @@ jobs:
           OG: ${{ inputs.og }}
         run: |
           if [ "$OG" = "extra" ]; then
-            python tools/extra_names.py wayback --pages 12 --out /tmp/extra_names.txt | tee /tmp/web_dump.txt
+            python tools/extra_names.py wayback --pages 2 --out /tmp/extra_names.txt | tee /tmp/web_dump.txt
           elif [ "$OG" = "results" ]; then
             printf '@rzavayuui\n@energyplusmedia\n' > /tmp/known.txt
             python tools/results_scan.py /tmp/known.txt state/sources.txt state/cc_candidates.txt state/gh_usernames.txt --days 14 --stop-after 12 | tee /tmp/web_dump.txt

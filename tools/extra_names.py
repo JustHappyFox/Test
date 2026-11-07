@@ -41,8 +41,9 @@ def wayback(pages: int, start: int, limit: int = 50000, pause: float = 15.0, on_
     for ch in letters:
         resume = ""
         for i in range(pages):
-            url = (f"https://web.archive.org/cdx/search/cdx?url=t.me/{ch}&matchType=prefix&fl=original&collapse=urlkey"
-                   "&filter=" + urllib.parse.quote(r"original:.*t\.me(:\d+)?/(s/)?[A-Za-z][A-Za-z0-9_]{3,31}/?$") +
+            # страницы t.me/s/<канал> — у каждого канала одна (плюс ?before=…), фильтр не нужен:
+            # фильтр на стороне archive.org по всему t.me/ падает с 504
+            url = (f"https://web.archive.org/cdx/search/cdx?url=t.me/s/{ch}&matchType=prefix&fl=original&collapse=urlkey" +
                    f"&limit={limit}&showResumeKey=true" + (f"&resumeKey={urllib.parse.quote(resume)}" if resume else ""))
             txt = get(url, tries=6, timeout=300)
             lines = txt.splitlines()
@@ -52,7 +53,7 @@ def wayback(pages: int, start: int, limit: int = 50000, pause: float = 15.0, on_
                 m = NAME.match(ln.strip())
                 if m and m.group(1).lower() not in SKIP:
                     names.add(m.group(1))
-            print(f"  t.me/{ch}… кусок {i}: адресов {len(lines)}, новых имён {len(names) - before}, всего {len(names)}",
+            print(f"  t.me/s/{ch}… кусок {i}: адресов {len(lines)}, новых имён {len(names) - before}, всего {len(names)}",
                   flush=True)
             time.sleep(pause)
             if not resume:
