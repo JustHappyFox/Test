@@ -32,23 +32,27 @@ def get(url, tries=4, timeout=120):
     return ""
 
 
-def wayback(pages: int, start: int):
+def wayback(pages: int, start: int, limit: int = 50000, pause: float = 10.0):
+    """Индекс Wayback Machine по t.me/: читаем кусками по --limit адресов с resumeKey (по одному адресу на
+    URL: collapse=urlkey), медленно — archive.org при частых запросах отвечает 503 и закрывает соединение."""
     names = set()
-    for host in ("t.me", "telegram.me"):
-        n = get(f"https://web.archive.org/cdx/search/cdx?url={host}/&matchType=prefix&showNumPages=true").strip()
-        total = int(n) if n.isdigit() else 0
-        print(f"Wayback {host}: страниц индекса {total}", flush=True)
-        for p in range(start, min(total, start + pages)):
-            txt = get(f"https://web.archive.org/cdx/search/cdx?url={host}/&matchType=prefix&fl=original"
-                      f"&collapse=urlkey&page={p}")
-            before = len(names)
-            for ln in txt.splitlines():
-                m = NAME.match(ln.strip())
-                if m and m.group(1).lower() not in SKIP:
-                    names.add(m.group(1))
-            print(f"  {host} страница {p}: строк {len(txt.splitlines())}, новых имён {len(names) - before}, всего {len(names)}",
-                  flush=True)
-            time.sleep(3)  # бережём archive.org
+    resume = ""
+    for i in range(pages):
+        url = (f"https://web.archive.org/cdx/search/cdx?url=t.me/&matchType=prefix&fl=original&collapse=urlkey"
+               f"&limit={limit}&showResumeKey=true" + (f"&resumeKey={urllib.parse.quote(resume)}" if resume else ""))
+        txt = get(url, tries=6, timeout=300)
+        lines = txt.splitlines()
+        resume = lines[-1].strip() if len(lines) >= 2 and not lines[-2].strip() else ""
+        before = len(names)
+        for ln in lines:
+            m = NAME.match(ln.strip())
+            if m and m.group(1).lower() not in SKIP:
+                names.add(m.group(1))
+        print(f"  кусок {i}: адресов {len(lines)}, новых имён {len(names) - before}, всего {len(names)}, "
+              f"дальше с {resume[:40]!r}", flush=True)
+        if not resume:
+            break
+        time.sleep(pause)
     return names
 
 
