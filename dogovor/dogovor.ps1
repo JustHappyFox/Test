@@ -23342,17 +23342,21 @@ public class PlombyForm : Form {
         refresh.Click += delegate { Reload(); };
         Button sinceBtn = Ui.Button("Ведёт с номера…", false);
         sinceBtn.Click += delegate { AskSince(); };
+        // дата выдачи партии - на календаре (создали партию позже, чем выдали пломбы, - поправить)
+        Button issuedBtn = Ui.Button("Дата выдачи…", false);
+        issuedBtn.Click += delegate { AskIssued(); };
         Button print = Ui.Button("Распечатать отчёт", true);
         print.Click += delegate { Print(true); };
-        Label hint = Ui.Caption("Из договоров и справок - сами (дата, лицевой, № учёта, место). № задания, причину, снятую пломбу и пломбы не по договору " +
+        Label hint = Ui.Caption("Из договоров и справок - сами (дата, адрес, лицевой, № учёта, место). Причину, снятую пломбу и пломбы не по договору " +
             "впишите в таблицу - сохраняется само. Красные - пропущенные.");
         hint.TextAlign = ContentAlignment.TopLeft;
         SetupGrid();
-        main.Controls.AddRange(new Control[] { title, summary, onlyGaps, showPaper, refresh, sinceBtn, print, hint, grid });
+        main.Controls.AddRange(new Control[] { title, summary, onlyGaps, showPaper, refresh, sinceBtn, issuedBtn, print, hint, grid });
         main.Resize += delegate {
             int w = main.ClientSize.Width - 32;
             title.SetBounds(16, 12, w, 28);
-            summary.SetBounds(16, 42, w, 40);
+            summary.SetBounds(16, 42, Math.Max(100, w - 440), 40);
+            issuedBtn.SetBounds(w - 420, 44, 190, 34);
             hint.SetBounds(16, 84, w - 650, 40);
             onlyGaps.SetBounds(w - 620, 76, 190, 24);
             showPaper.SetBounds(w - 620, 100, 200, 24);
@@ -23591,6 +23595,55 @@ public class PlombyForm : Form {
             Reload();
         }
     }
+
+    // дата выдачи партии - выбрать на календаре (двойной щелчок по числу - сразу)
+    void AskIssued() {
+        if (cur == null) return;
+        using (Form f = new Form()) {
+            f.Text = "Дата выдачи партии " + cur.Title;
+            f.Font = St.Base;
+            f.BackColor = St.Surface;
+            f.FormBorderStyle = FormBorderStyle.FixedDialog;
+            f.StartPosition = FormStartPosition.CenterParent;
+            f.MaximizeBox = f.MinimizeBox = false;
+            f.ShowInTaskbar = false;
+            MonthCalendar cal = new MonthCalendar();
+            cal.MaxSelectionCount = 1;
+            cal.ShowToday = true;
+            DateTime d;
+            if (DateTime.TryParseExact(cur.Issued, "dd.MM.yyyy", CultureInfo.InvariantCulture, DateTimeStyles.None, out d)) cal.SetDate(d);
+            else cal.SetDate(DateTime.Today);
+            cal.Location = new Point(16, 40);
+            Label l = Ui.Caption("Когда выдали пломбы:");
+            l.SetBounds(16, 12, 260, 22);
+            Button ok = Ui.Button("OK", true), cancel = Ui.Button("Отмена", false);
+            ok.DialogResult = DialogResult.OK;
+            cancel.DialogResult = DialogResult.Cancel;
+            f.Controls.AddRange(new Control[] { l, cal, ok, cancel });
+            cal.DoubleClick += delegate { f.DialogResult = DialogResult.OK; };
+            f.Load += delegate {
+                int w = Math.Max(cal.Width + 32, 300);
+                f.ClientSize = new Size(w, cal.Bottom + 60);
+                ok.SetBounds(w - 214, cal.Bottom + 14, 90, 36);
+                cancel.SetBounds(w - 116, cal.Bottom + 14, 100, 36);
+            };
+            f.AcceptButton = ok;
+            f.CancelButton = cancel;
+            St.Dress(f);
+            if (f.ShowDialog(this) != DialogResult.OK) return;
+            SetIssued(cal.SelectionStart.ToString("dd.MM.yyyy"));
+        }
+    }
+
+    // для проверки и из календаря
+    public void SetIssued(string date) {
+        if (cur == null) return;
+        cur.Issued = date;
+        try { cur.Save(); } catch (Exception ex) { MessageBox.Show(this, "Не сохранилось: " + ex.Message, Text); return; }
+        Reload();
+    }
+
+    public void ShowIssued() { BeginInvoke((MethodInvoker)delegate { AskIssued(); }); }
 
     void DeleteBatch() {
         if (cur == null) return;
