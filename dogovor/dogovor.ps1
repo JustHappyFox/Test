@@ -13029,6 +13029,9 @@ public static class BaseShare {
         }
     }
 
+    // папку базы поменяли - открыть заново при следующем лицевом
+    public static void Reset() { lock (gate) { link = null; failed = null; } }
+
     public delegate void Found(Dictionary<string, string> rec, string error);
 
     // найти лицевой в фоне; ответ - в поток окна owner. rec == null и error == null - такого лицевого в базе нет
@@ -13189,6 +13192,74 @@ public class BaseLink {
         return null;
     }
 
+    // Проверка папки базы (окно «База абонентов»): доступна ли, таблица абонентов, индексы, справочник улиц, скорость поиска по
+    // индексу. Отчёт - без данных абонентов (его можно прислать); found - для экрана: что нашлось по проверочному лицевому
+    public static string Check(string folder, string testLs, out bool ok, out string found) {
+        ok = false;
+        found = null;
+        StringBuilder r = new StringBuilder();
+        r.Append("Проверка базы абонентов (программа «Оформление договора») ").Append(DateTime.Now.ToString("dd.MM.yyyy HH:mm")).Append(" - данных абонентов здесь нет\r\n");
+        r.Append("Папка: ").Append(folder).Append("\r\n");
+        try {
+            if (folder.Length == 0) { r.Append("Папка не указана.\r\n"); return r.ToString(); }
+            if (!Directory.Exists(folder)) {
+                r.Append("НЕТ ДОСТУПА к папке: её нет, нет сети или нет прав.\r\n");
+                if (folder.Length >= 2 && folder[1] == ':')
+                    r.Append("Сетевой диск (O: и т.п.) бывает подключён, только пока запущена программа базы: запустите её или укажите сетевой путь " +
+                        "(\\\\сервер\\папка - как в свойствах диска O: в «Этот компьютер»).\r\n");
+                return r.ToString();
+            }
+            r.Append("Таблиц .DBF в папке: ").Append(Places.DbfFiles(folder).Length).Append("\r\n");
+            Dictionary<string, string> settings = new Dictionary<string, string>();
+            settings["БазаПапка"] = folder;
+            Stopwatch sw = Stopwatch.StartNew();
+            BaseLink b = new BaseLink();
+            b.Open(settings);
+            if (!b.Ready) { r.Append("Не открылась: ").Append(b.Error).Append("\r\n"); return r.ToString(); }
+            if (string.Compare(Path.GetFullPath(b.Folder).TrimEnd('\\', '/'), Path.GetFullPath(folder).TrimEnd('\\', '/'), StringComparison.OrdinalIgnoreCase) != 0)
+                r.Append("Внимание: открыта другая папка - ").Append(b.Folder).Append("\r\n");
+            r.Append("Таблица абонентов: ").Append(b.Table).Append(", записей ").Append(b.Base.RecordCount).Append(" (открыта за ").Append(sw.ElapsedMilliseconds).Append(" мс)\r\n");
+            List<string> fields = new List<string>(), lost = new List<string>();
+            foreach (string f in new string[] { "NAB", "FIO", "TEL", "UL", "DOM", "KOR", "KV", "NCH", "TIPCH", "GODPR", "KVP" })
+                (b.Base.Header.FieldIndex(f) >= 0 ? fields : lost).Add(f);
+            r.Append("Поля: ").Append(string.Join(", ", fields.ToArray())).Append(lost.Count > 0 ? "; нет: " + string.Join(", ", lost.ToArray()) : "").Append("\r\n");
+            IndexTag tn = b.Base.TagFor("NAB"), ta = b.Base.TagFor("UL", true), tf = b.Base.TagFor("FIO");
+            r.Append("Индекс по лицевому: ").Append(tn != null ? tn.FileName + ":" + tn.Name + " (" + tn.Expr + ")" : "НЕТ - лицевые по базе не проверить").Append("\r\n");
+            r.Append("Индекс по адресу: ").Append(ta != null ? ta.FileName + ":" + ta.Name + " (" + ta.Expr + ")" : "НЕТ - адреса по базе не проверить").Append("\r\n");
+            r.Append("Индекс по Ф.И.О.: ").Append(tf != null ? tf.FileName + ":" + tf.Name : "нет (не нужен)").Append("\r\n");
+            r.Append("Справочник улиц: ").Append(b.Base.Dir != null ? b.Base.Dir.TableName + " (кодов улиц " + b.Base.Dir.Count + ")" :
+                "НЕ НАЙДЕН - в справке и наряде из базы не подставятся населённый пункт и улица").Append("\r\n");
+            // поиск по индексу: лицевые из разных мест таблицы (сами номера в отчёт не пишутся)
+            bool search = false;
+            if (tn != null) {
+                DbfTable s = b.Base.SpreadSample(6);
+                int hit = 0, n = 0;
+                long ms = 0;
+                for (int i = 0; i < s.Count; i++) {
+                    string nab = b.F(s, i, "NAB");
+                    if (nab.Length == 0) continue;
+                    sw = Stopwatch.StartNew();
+                    if (b.Accounts(nab).Count > 0) hit++;
+                    ms += sw.ElapsedMilliseconds;
+                    n++;
+                }
+                search = n > 0 && hit == n;
+                r.Append("Поиск по лицевому (по индексу): нашлось ").Append(hit).Append(" из ").Append(n).Append(n > 0 ? ", в среднем " + (ms / n) + " мс" : "").Append("\r\n");
+            }
+            if ((testLs ?? "").Trim().Length > 0) {
+                Dictionary<string, string> rec = b.Record(Nab(testLs));
+                found = rec == null ? "Лицевого " + Nab(testLs) + " в базе нет" : "Нашёлся: " + rec["text"];
+                r.Append("Проверочный лицевой: ").Append(rec == null ? "не найден" : "найден").Append("\r\n");
+            }
+            ok = tn != null && search;
+            r.Append(ok ? "ИТОГ: база подключается, лицевые ищутся по индексу" + (ta != null ? ", адреса - тоже" : "") + ". Нажмите «Сохранить»." :
+                "ИТОГ: база открылась, но поиск по индексу не работает - пришлите этот отчёт (otchet_baza.txt рядом с программой).").Append("\r\n");
+        } catch (Exception ex) {
+            r.Append("Ошибка: ").Append(ex.Message).Append("\r\n");
+        }
+        return r.ToString();
+    }
+
     // «аг. Боровляны» -> тип «аг.» и «Боровляны»; «Лесная ул.» -> «ул.» и «Лесная» (тип - как в списках программы)
     public static string[] TypeAndName(string s, bool street) {
         string[] words = (s ?? "").Trim().Split(new char[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
@@ -13265,6 +13336,116 @@ public class BaseLink {
         }
         return found;
     }
+}
+
+// Окно «База абонентов»: папка базы (программы базы, только чтение) - указать, проверить, сохранить. Договор, справка и наряд
+// после сохранения подключаются заново. Отчёт проверки - otchet_baza.txt рядом с программой (без данных абонентов)
+public class BaseSetupForm : Form {
+    readonly string here;
+    readonly Memory memory;
+    readonly TextBox path = Ui.Text(1), ls = Ui.Text(1), result = Ui.Text(14);
+    readonly Button pick, check, save;
+    public bool Changed;
+    bool busy;
+
+    public BaseSetupForm(string here) {
+        this.here = here;
+        memory = Memory.For(Path.Combine(here, "nastroiki.txt"));
+        Load += delegate { St.Dress(this); };
+        Text = "База абонентов - папка программы базы (только чтение)";
+        Font = St.Base;
+        BackColor = St.Surface;
+        StartPosition = FormStartPosition.CenterParent;
+        FormBorderStyle = FormBorderStyle.FixedDialog;
+        MaximizeBox = MinimizeBox = false;
+        ShowInTaskbar = false;
+        ClientSize = new Size(760, 600);
+        Label l1 = Ui.Caption("Папка базы абонентов - где лежит ABONENT.DBF (и её индексы .CDX). Например \\\\fs-dos\\communal\\BASAFOX или O:\\BASAFOX");
+        l1.SetBounds(16, 12, 728, 20);
+        path.SetBounds(16, 34, 600, 26);
+        path.Text = memory.Get("БазаПапка", "");
+        path.HandleCreated += delegate { Ui.Cue(path, Places.Network); };
+        pick = Ui.Button("Выбрать…", false);
+        pick.SetBounds(624, 32, 120, 30);
+        pick.Click += delegate { PickFolder(); };
+        Label l2 = Ui.Caption("Для проверки (не обязательно): лицевой из базы - покажет, что нашлось");
+        l2.SetBounds(16, 70, 500, 20);
+        ls.SetBounds(16, 92, 200, 26);
+        check = Ui.Button("Проверить", false);
+        check.SetBounds(228, 90, 140, 30);
+        check.Click += delegate { RunCheck(); };
+        Label l3 = Ui.Caption("Что нашлось:");
+        l3.SetBounds(16, 130, 300, 20);
+        result.SetBounds(16, 152, 728, 380);
+        result.ReadOnly = true;
+        result.Font = St.Small;
+        result.Text = "Укажите папку и нажмите «Проверить». Диск O: подключается, только пока запущена программа базы - " +
+            "надёжнее сетевой путь (его видно в «Этот компьютер» у диска O:).";
+        save = Ui.Button("Сохранить", true);
+        save.SetBounds(520, 548, 110, 38);
+        save.Click += delegate { Save(); };
+        Button cancel = Ui.Button("Отмена", false);
+        cancel.SetBounds(638, 548, 106, 38);
+        cancel.DialogResult = DialogResult.Cancel;
+        CancelButton = cancel;
+        Controls.AddRange(new Control[] { l1, path, pick, l2, ls, check, l3, result, save, cancel });
+    }
+
+    void PickFolder() {
+        using (FolderBrowserDialog d = new FolderBrowserDialog()) {
+            d.Description = "Папка базы абонентов (где ABONENT.DBF)";
+            d.ShowNewFolderButton = false;
+            try { if (Directory.Exists(path.Text.Trim())) d.SelectedPath = path.Text.Trim(); } catch { }
+            if (d.ShowDialog(this) == DialogResult.OK) { path.Text = d.SelectedPath; RunCheck(); }
+        }
+    }
+
+    // проверка - в фоне (сетевая папка, большая таблица)
+    public void RunCheck() {
+        if (busy) return;
+        busy = true;
+        check.Enabled = save.Enabled = pick.Enabled = false;
+        result.Text = "Проверяю папку " + path.Text.Trim() + "...";
+        string folder = path.Text.Trim(), test = ls.Text.Trim();
+        System.Threading.Thread th = new System.Threading.Thread(delegate() {
+            bool ok;
+            string found;
+            string report = BaseLink.Check(folder, test, out ok, out found);
+            try { File.WriteAllText(Path.Combine(here, "otchet_baza.txt"), report, new UTF8Encoding(true)); } catch { }
+            try {
+                BeginInvoke((MethodInvoker)delegate {
+                    busy = false;
+                    check.Enabled = save.Enabled = pick.Enabled = true;
+                    result.Text = report + (found != null ? "\r\n" + found + "\r\n" : "");
+                    result.ForeColor = ok ? St.Text : St.Bad;
+                    Checked = ok;
+                });
+            } catch { }
+        });
+        th.IsBackground = true;
+        th.Start();
+    }
+
+    public bool Checked;
+
+    // запомнить папку; другая папка - таблица и справочник улиц ищутся заново
+    public void Save() {
+        string p = path.Text.Trim();
+        if (p != memory.Get("БазаПапка", ""))
+            foreach (string k in new string[] { "БазаТаблица", "БазаУлицы", "БазаУлицыКлюч", "БазаСвязи" }) memory.Values.Remove(k);
+        memory.Values["БазаПапка"] = p;
+        memory.Save();
+        BaseShare.Reset();
+        Changed = true;
+        DialogResult = DialogResult.OK;
+        Close();
+    }
+
+    // для проверки
+    public void SetPath(string p) { path.Text = p; }
+    public void SetLs(string l) { ls.Text = l; }
+    public string Result { get { return result.Text; } }
+    public bool Busy { get { return busy; } }
 }
 
 // Оформление договора электроснабжения: форма -> шаблон Word (shablon.docx) -> готовый договор
@@ -13882,6 +14063,10 @@ public class DogovorForm : Form {
         baseLabel.ForeColor = St.NavText;
         baseLabel.BackColor = Color.Transparent;
         baseLabel.Text = "База: подключаю...";
+        // щелчок по надписи о базе - окно «База абонентов» (указать папку, проверить)
+        baseLabel.Cursor = Cursors.Hand;
+        baseLabel.Click += delegate { OpenBaseSetup(); };
+        tip.SetToolTip(baseLabel, "Папка базы абонентов: указать, проверить (щёлкните)");
         nav.Controls.Add(baseLabel);
         nav.Resize += delegate {
             dirs.SetBounds(0, nav.ClientSize.Height - 20 - dirs.Height, nav.Width, dirs.Height);
@@ -14224,6 +14409,27 @@ public class DogovorForm : Form {
 
     // ---------- проверка по базе абонентов ----------
 
+    void OpenBaseSetup() {
+        if (Home != null) { Home.OpenBaseSetup(this); return; }
+        using (BaseSetupForm f = new BaseSetupForm(here)) {
+            f.ShowDialog(this);
+            if (f.Changed) ReconnectBase();
+        }
+    }
+
+    // папку базы поменяли - подключиться заново и перепроверить лицевой и адрес
+    public void ReconnectBase() {
+        baseLink = null;
+        lsChecked = null;
+        lsError = null;
+        baseLabel.Text = "База: подключаю...";
+        baseLabel.ForeColor = St.NavText;
+        StartBase();
+    }
+
+    // для проверки
+    public string BaseText { get { return baseLabel.Text; } }
+
     void Post(MethodInvoker m) {
         try { if (!IsDisposed && IsHandleCreated) BeginInvoke(m); } catch { }
     }
@@ -14250,7 +14456,7 @@ public class DogovorForm : Form {
                         baseLabel.ForeColor = Color.FromArgb(240, 150, 150);
                     }
                 } else {
-                    baseLabel.Text = "База недоступна: " + b.Error + "\nлицевые не проверяются";
+                    baseLabel.Text = "База недоступна: " + b.Error + "\nщёлкните здесь - указать папку базы";
                     baseLabel.ForeColor = Color.FromArgb(240, 150, 150);
                 }
                 Recheck(true, true);
@@ -16042,8 +16248,9 @@ public class StartMenu : Form {
         folders.Location = new Point(34, 608);
         Controls.Add(folders);
         int x = 34 + TextRenderer.MeasureText(folders.Text, St.Base).Width + 4;
-        foreach (string[] l in new string[][] { new string[] { "договоры", "d" }, new string[] { "справки", "s" }, new string[] { "наряды", "n" }, new string[] { "Справочники (списки)", "l" } }) {
-            if (l[1] == "l") x += 24;
+        foreach (string[] l in new string[][] { new string[] { "договоры", "d" }, new string[] { "справки", "s" }, new string[] { "наряды", "n" },
+                new string[] { "База абонентов…", "b" }, new string[] { "Справочники", "l" } }) {
+            if (l[1] == "b") x += 18;
             LinkLabel link = new LinkLabel();
             link.Text = l[0];
             link.Font = St.Base;
@@ -16222,7 +16429,16 @@ public class StartMenu : Form {
         to.Activate();
     }
 
+    // папка базы абонентов: указать, проверить, сохранить - открытый договор подключается заново
+    public void OpenBaseSetup(Form owner) {
+        using (BaseSetupForm f = new BaseSetupForm(here)) {
+            f.ShowDialog(owner ?? this);
+            if (f.Changed && dog != null && !dog.IsDisposed) dog.ReconnectBase();
+        }
+    }
+
     void OpenPlace(string what) {
+        if (what == "b") { OpenBaseSetup(this); return; }
         Memory m = Memory.For(Settings);
         string d = what == "d" ? DogovorForm.Folder(here, m) : what == "s" ? SpravkaForm.Folder(here) : what == "n" ? NaryadForm.Folder(here) : Path.Combine(here, "spravochniki.txt");
         try {
@@ -16661,7 +16877,7 @@ public class SpravkaForm : Form {
         int i = meters.IndexOf(m) + 1;
         if (i < 1 || BaseLink.Nab(DigitsOnly(MV(m, "ls"))) != nab) return;     // ПУ убрали или лицевой уже другой
         string who = meters.Count > 1 ? "ПУ " + i + ": " : "";
-        if (err != null) { Note(who + "база недоступна (" + err + ") - Ф.И.О., адрес и счётчик впишите сами", St.Warn); return; }
+        if (err != null) { Note(who + "база недоступна (" + err + ") - впишите сами; папка базы - в главном меню «База абонентов…»", St.Warn); return; }
         if (rec == null) { Note(who + "лицевого " + nab + " в базе нет - Ф.И.О., адрес и счётчик впишите сами", St.Warn); return; }
         Dictionary<string, string> v = BaseValues(rec);
         string tipch = rec["TIPCH"];
@@ -18231,7 +18447,7 @@ public class NaryadForm : Form {
     // ответ базы - в пустые поля и в подставленные из базы раньше (поправленное руками остаётся)
     void FromBase(string nab, Dictionary<string, string> rec, string err) {
         if (BaseLink.Nab(Digits(V("ls"))) != nab) return;
-        if (err != null) { headSub.Text = "База недоступна (" + err + ") - Ф.И.О. и адрес впишите сами"; headSub.ForeColor = St.Warn; return; }
+        if (err != null) { headSub.Text = "База недоступна (" + err + ") - впишите сами; папка базы - в главном меню «База абонентов…»"; headSub.ForeColor = St.Warn; return; }
         if (rec == null) { headSub.Text = "Лицевого " + nab + " в базе нет - Ф.И.О. и адрес впишите сами"; headSub.ForeColor = St.Warn; return; }
         Dictionary<string, string> v = SpravkaForm.BaseValues(rec);
         v["selsovet"] = rec["ss"];
