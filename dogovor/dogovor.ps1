@@ -10442,6 +10442,27 @@ public class LiveBase {
     public bool NamesNeeded { get { return Header.FieldIndex("FIO") >= 0 && TagFor("FIO") == null; } }
     public bool NamesReady { get { return names != null; } }
 
+    // «Договор»: индекс ФИО программы «Поиск абонента» (indeks_fio.dat в её папке) - только прочитать: ничего не строим и не
+    // записываем (NamesFile не задаётся); новые записи таблицы при поиске дочитываются в память. Ответ - что с индексом
+    // (для окна и отчёта, без данных абонентов); ok - по нему ищем
+    public string AttachNames(string file, out bool ok) {
+        ok = false;
+        if (!File.Exists(file)) return "нет файла " + Path.GetFileName(file) + " - «Поиск» ещё не строил индекс ФИО (откройте «Поиск» и подождите, пока построит)";
+        NameIndex n;
+        try { n = NameIndex.Load(file, Header, FilePath); }
+        catch (Exception ex) { return "не прочитался (" + ex.Message + ") - может, «Поиск» как раз его записывает; попробуйте ещё раз"; }
+        if (n == null) return "не подходит к таблице " + Path.GetFileName(FilePath) + " (другая таблица или «Поиск» другой версии) - откройте «Поиск», он построит заново";
+        int count;
+        using (FileStream fs = OpenTable()) count = NameIndex.RecordCount(fs);
+        if (count < n.Scanned) return "устарел: таблицу абонентов пересобрали - откройте «Поиск», он построит заново";
+        if (count - n.Scanned > 50000) return "недостроен (просмотрено " + n.Scanned + " из " + count + " записей) - откройте «Поиск», он достроит";
+        n.Total = count;
+        lock (namesLock) names = n;
+        ok = true;
+        return n.Count + " ФИО, записей " + n.Scanned + " из " + count + ", собран «Поиском» " + n.Built.ToString("dd.MM.yyyy HH:mm")
+            + (count > n.Scanned ? " (новые " + (count - n.Scanned) + " записей дочитываются при поиске)" : "");
+    }
+
     // Файл индекса при запуске. Возвращает индекс, который надо (до)строить в фоне, или null - готов, строить не надо
     public NameIndex OpenNames() {
         NameIndex n = null;
@@ -13005,8 +13026,8 @@ public class AbonentQuery {
 
 // Главное окно: одна строка поиска. Каждый поиск идёт по индексам прямо в базе - данные всегда свежие.
 
-// База абонентов для справки и наряда (по лицевому - Ф.И.О., адрес, счётчик): одна на всю программу, открывается в фоне при
-// первом лицевом; не открылась - следующая попытка не раньше чем через минуту
+// База абонентов для справки и наряда (по лицевому, Ф.И.О. или № наряда - Ф.И.О., адрес, счётчик): одна на всю программу,
+// открывается в фоне при первом поиске; не открылась - следующая попытка не раньше чем через минуту
 public static class BaseShare {
     static readonly object gate = new object();
     static BaseLink link;
@@ -13029,10 +13050,19 @@ public static class BaseShare {
         }
     }
 
-    // папку базы поменяли - открыть заново при следующем лицевом
-    public static void Reset() { lock (gate) { link = null; failed = null; } }
+    // папку поменяли - открыть заново при следующем поиске
+    public static void Reset() { lock (gate) { link = null; failed = null; } PoiskFolder.Forget(); }
+
+    // папка «Поиска», найденная самой программой, - запомнить (в потоке окна)
+    static void Remember(Memory memory, Dictionary<string, string> settings) {
+        string p;
+        if (!settings.TryGetValue("ПоискПапка", out p) || p == null || p.Length == 0 || memory.Get("ПоискПапка", "") == p) return;
+        memory.Values["ПоискПапка"] = p;
+        memory.Save();
+    }
 
     public delegate void Found(Dictionary<string, string> rec, string error);
+    public delegate void FoundMany(List<Dictionary<string, string>> rows, string note, string error);
 
     // найти лицевой в фоне; ответ - в поток окна owner. rec == null и error == null - такого лицевого в базе нет
     public static void Lookup(Control owner, Memory memory, string nab, Found done) {
@@ -13044,7 +13074,24 @@ public static class BaseShare {
                 BaseLink b = Get(settings, out err);
                 if (b != null) rec = b.Record(nab);
             } catch (Exception ex) { err = ex.Message; }
-            try { if (!owner.IsDisposed && owner.IsHandleCreated) owner.BeginInvoke((MethodInvoker)delegate { done(rec, err); }); } catch { }
+            try { if (!owner.IsDisposed && owner.IsHandleCreated) owner.BeginInvoke((MethodInvoker)delegate { Remember(memory, settings); done(rec, err); }); } catch { }
+        });
+        th.IsBackground = true;
+        th.Start();
+    }
+
+    // найти по лицевому («ls»), Ф.И.О. («fio», индекс ФИО «Поиска») или № наряда («nar», индексы нарядов «Поиска») в фоне
+    public static void Find(Control owner, Memory memory, string kind, string text, FoundMany done) {
+        Dictionary<string, string> settings = new Dictionary<string, string>(memory.Values);
+        System.Threading.Thread th = new System.Threading.Thread(delegate() {
+            List<Dictionary<string, string>> rows = null;
+            string note = null, err;
+            try {
+                BaseLink b = Get(settings, out err);
+                if (b != null) rows = b.Find(kind, text, out note);
+            } catch (Exception ex) { err = ex.Message; }
+            if (rows == null) rows = new List<Dictionary<string, string>>();
+            try { if (!owner.IsDisposed && owner.IsHandleCreated) owner.BeginInvoke((MethodInvoker)delegate { Remember(memory, settings); done(rows, note, err); }); } catch { }
         });
         th.IsBackground = true;
         th.Start();
@@ -13053,22 +13100,37 @@ public static class BaseShare {
 
 // Проверка по базе абонентов (только чтение, тем же движком, что «Поиск абонента»):
 // есть ли уже такой лицевой (копия лицевого ломает базу) и есть ли абоненты по этому адресу.
+// Где база - как у «Поиска»: из его настроек poisk.txt (основная база на диске O: или по сетевому пути); из его папки -
+// индексы Ф.И.О. и нарядов, которые он строит сам. «Договор» в папке «Поиска» и в папке базы ничего не пишет
 public class BaseLink {
     public LiveBase Base;
     public string Folder, Table, Error;
+    public string Poisk = "";               // папка «Поиска» (пусто - не нашлась: база - как раньше, по умолчанию O:\BASAFOX)
+    public bool FromPoisk;                  // папка базы и таблица - из poisk.txt «Поиска»
     public bool Ready { get { return Base != null; } }
     // ищем только по индексам базы (CDX), перебора таблицы нет; нет индекса - проверить нельзя (а не «нет в базе»)
     public bool AccountIndex { get { return Base != null && Base.TagFor("NAB") != null; } }
     public bool AddressIndex { get { return Base != null && Base.TagFor("UL", true) != null; } }
     readonly object sync = new object();
 
-    // открыть базу; запомненное (папка, таблица, справочник улиц) - в settings, найденное заново - туда же
+    // открыть базу; запомненное (папка «Поиска», таблица, справочник улиц) - в settings, найденное заново - туда же
     public void Open(Dictionary<string, string> settings) {
         try {
-            string saved = Get(settings, "БазаПапка");
+            string poisk = Get(settings, "ПоискПапка");
+            if (poisk == "-") poisk = "";                       // проверка указанного: саму не искать
+            else if (!PoiskFolder.Looks(poisk)) {
+                string f = PoiskFolder.Find();
+                poisk = f ?? "";
+                if (f != null) settings["ПоискПапка"] = f;
+            }
+            Poisk = poisk;
+            PoiskFolder pf = poisk.Length > 0 ? new PoiskFolder(poisk) : null;
+            string saved = pf != null && pf.Line(0).Length > 0 ? pf.Line(0) : Get(settings, "БазаПапка");
+            FromPoisk = pf != null && pf.Line(0).Length > 0;
             Folder = Places.FindFolder(saved.Length > 0 ? saved : null);
             if (!Directory.Exists(Folder)) throw new Exception("нет доступа к папке базы " + Folder);
-            Table = Get(settings, "БазаТаблица");
+            Table = pf != null ? pf.Line(1) : "";
+            if (Table.Length == 0 || !File.Exists(Path.Combine(Folder, Table))) Table = Get(settings, "БазаТаблица");
             if (Table.Length == 0 || !File.Exists(Path.Combine(Folder, Table))) {
                 Table = File.Exists(Path.Combine(Folder, "ABONENT.DBF")) ? "ABONENT.DBF" : "";
                 if (Table.Length == 0) {
@@ -13078,7 +13140,7 @@ public class BaseLink {
                 if (Table.Length == 0) throw new Exception("в папке " + Folder + " не найдена таблица абонентов");
             }
             LiveBase b = LiveBase.Open(Path.Combine(Folder, Table));
-            b.Dir = Streets(b, settings);
+            b.Dir = Streets(b, settings, pf);
             settings["БазаПапка"] = Folder;
             settings["БазаТаблица"] = Table;
             if (b.Dir != null) {
@@ -13099,18 +13161,25 @@ public class BaseLink {
         return d.TryGetValue(k, out v) && v != null ? v.Trim() : "";
     }
 
-    // справочник улиц: запомненный или найденный по кодам улиц (как в «Поиске»)
-    StreetDirectory Streets(LiveBase b, Dictionary<string, string> settings) {
-        if (b.Header.FieldIndex("UL") < 0) return null;
-        string table = Get(settings, "БазаУлицы"), key = Get(settings, "БазаУлицыКлюч");
+    static Dictionary<string, string> Links(string line) {
         Dictionary<string, string> links = new Dictionary<string, string>();
-        foreach (string pair in Get(settings, "БазаСвязи").Split(';')) {
+        foreach (string pair in (line ?? "").Split(';')) {
             int eq = pair.IndexOf('=');
             if (eq > 0) links[pair.Substring(0, eq).Trim().ToUpperInvariant()] = pair.Substring(eq + 1).Trim();
         }
-        if (table.Length > 0 && key.Length > 0 && File.Exists(Path.Combine(Folder, table))) {
+        return links;
+    }
+
+    // справочник улиц: как у «Поиска» (его poisk.txt), запомненный или найденный по кодам улиц (как в «Поиске»)
+    StreetDirectory Streets(LiveBase b, Dictionary<string, string> settings, PoiskFolder pf) {
+        if (b.Header.FieldIndex("UL") < 0) return null;
+        List<string[]> tries = new List<string[]>();
+        if (pf != null && pf.Line(3).Length > 0 && pf.Line(4).Length > 0) tries.Add(new string[] { pf.Line(3), pf.Line(4), pf.Line(5) });
+        tries.Add(new string[] { Get(settings, "БазаУлицы"), Get(settings, "БазаУлицыКлюч"), Get(settings, "БазаСвязи") });
+        foreach (string[] t in tries) {
+            if (t[0].Length == 0 || t[1].Length == 0 || !File.Exists(Path.Combine(Folder, t[0]))) continue;
             try {
-                StreetDirectory d = StreetDirectory.Load(Folder, table, key, links);
+                StreetDirectory d = StreetDirectory.Load(Folder, t[0], t[1], Links(t[2]));
                 if (d != null && d.Count > 0) return d;
             } catch { }
         }
@@ -13118,6 +13187,97 @@ public class BaseLink {
         List<string> codes = StreetDirectory.Codes(sample, sample.FieldIndex("UL"));
         if (codes == null) return null;
         return StreetDirectory.Detect(Folder, Table, codes, null);
+    }
+
+    // ---- индекс ФИО и наряды «Поиска» (только чтение; открываются при первом поиске - файлы большие) ----
+
+    bool namesOk;
+    DateTime namesAt = DateTime.MinValue;
+    public string NamesNote = "";
+
+    public bool EnsureNames() {
+        lock (sync) {
+            if (namesOk) return true;
+            if ((DateTime.Now - namesAt).TotalSeconds < 60) return false;    // не вышло - снова не раньше чем через минуту
+            namesAt = DateTime.Now;
+            if (Base.Header.FieldIndex("FIO") < 0) { NamesNote = "в таблице абонентов нет поля FIO"; return false; }
+            if (Base.TagFor("FIO") != null) { namesOk = true; NamesNote = "индекс по Ф.И.О. - в самой базе (" + Base.TagFor("FIO").Name + ")"; return true; }
+            if (Poisk.Length == 0) { NamesNote = "папка программы «Поиск абонента» не найдена - укажите её: главное меню, «База абонентов…»"; return false; }
+            NamesNote = Base.AttachNames(Path.Combine(Poisk, "indeks_fio.dat"), out namesOk);
+            return namesOk;
+        }
+    }
+
+    NaryadLookup naryady;
+    DateTime naryadyAt = DateTime.MinValue;
+
+    public NaryadLookup Naryady() {
+        lock (sync) {
+            if (naryady != null && (naryady.Ready || (DateTime.Now - naryadyAt).TotalSeconds < 60)) return naryady;
+            naryadyAt = DateTime.Now;
+            if (Poisk.Length == 0) {
+                naryady = new NaryadLookup();
+                naryady.Note = "папка программы «Поиск абонента» не найдена - укажите её: главное меню, «База абонентов…»";
+            } else naryady = NaryadLookup.Open(Poisk, Folder);
+            return naryady;
+        }
+    }
+
+    // найти: «ls» - лицевой, «fio» - Ф.И.О. (можно с н.п.: «Иванов Боровляны»), «nar» - № наряда ГодНомер
+    public List<Dictionary<string, string>> Find(string kind, string text, out string note) {
+        note = null;
+        if (kind == "fio") return ByName(text, out note);
+        if (kind == "nar") return ByNaryad(text, out note);
+        List<Dictionary<string, string>> list = new List<Dictionary<string, string>>();
+        string nab = Nab(text);
+        if (nab.Length == 0) { note = "впишите лицевой (9 цифр или 13 с припиской района)"; return list; }
+        Dictionary<string, string> d = Record(nab);
+        if (d != null) list.Add(d);
+        else note = "лицевого " + nab + " в базе нет";
+        return list;
+    }
+
+    public const int FindLimit = 200;
+
+    public List<Dictionary<string, string>> ByName(string text, out string note) {
+        note = null;
+        List<Dictionary<string, string>> list = new List<Dictionary<string, string>>();
+        if (DbfTable.SplitWords(text).Length == 0) { note = "впишите Ф.И.О. или фамилию и имя"; return list; }
+        if (!EnsureNames()) { note = "по Ф.И.О. искать нельзя: индекс ФИО «Поиска» - " + NamesNote; return list; }
+        lock (sync) {
+            SearchResult r = Base.Search(text, SearchMode.Name, null, FindLimit, false);
+            if (r.Error != null) throw new Exception(r.Error);
+            if (r.NoIndex) { note = "по Ф.И.О. не найти: " + (r.How.Length > 0 ? r.How : "нет индекса"); return list; }
+            if (r.Table != null)
+                foreach (int row in r.Rows) if (!r.Added.ContainsKey(row)) list.Add(Rec(r.Table, row));
+            if (r.TooMany) note = "нашлось много - показаны первые " + list.Count + "; допишите имя, отчество или н.п. («Иванов Иван Боровляны»)";
+            else if (list.Count == 0) note = r.Note.Length > 0 ? r.Note : "такого Ф.И.О. в базе нет (ищется полное совпадение слов: фамилия, имя, отчество)";
+        }
+        return list;
+    }
+
+    public List<Dictionary<string, string>> ByNaryad(string text, out string note) {
+        note = null;
+        List<Dictionary<string, string>> list = new List<Dictionary<string, string>>();
+        int year;
+        long number;
+        if (!NaryadLookup.Parse(text, out year, out number)) { note = "№ наряда - полностью, с годом: 202620936 или 2026-20936 (как в «Поиске»)"; return list; }
+        NaryadLookup nl = Naryady();
+        if (!nl.Ready) { note = "наряды недоступны: " + nl.Note; return list; }
+        List<NaryadLookup.Hit> hits = nl.Find(year, number, out note);
+        foreach (NaryadLookup.Hit h in hits) {
+            Dictionary<string, string> d = h.Ls.Length > 0 ? Record(h.Ls) : null;
+            if (d == null) {
+                d = Rec(null, -1);
+                d["missing"] = "1";
+                d["NAB"] = h.Ls;
+                d["text"] = (h.Ls.Length > 0 ? h.Ls : "без лицевого") + " - абонента в базе нет";
+            }
+            d["naryad"] = h.Text;
+            list.Add(d);
+        }
+        if (hits.Count == 0 && note == null) note = "наряда " + year + "-" + number + " нет";
+        return list;
     }
 
     // лицевой в программе 5002123456789: 5002 - приписка района, в базе - 123456789
@@ -13140,14 +13300,20 @@ public class BaseLink {
         StringBuilder sb = new StringBuilder(F(t, row, "NAB"));
         string fio = F(t, row, "FIO");
         if (fio.Length > 0) sb.Append(" - ").Append(fio);
+        string place = Place(t, row);
+        if (place.Length > 0) sb.Append(", ").Append(place);
+        return sb.ToString();
+    }
+
+    // адрес записи: «аг. Боровляны, Лесная ул., д.7 кв.2»
+    string Place(DbfTable t, int row) {
         string ul = F(t, row, "UL"), place = Base.Dir != null && ul.Length > 0 ? Base.Dir.Name(ul) : null;
         List<string> a = new List<string>();
         if (place != null && place.Length > 0) a.Add(place);
         string dom = F(t, row, "DOM"), kor = F(t, row, "KOR"), kv = F(t, row, "KV");
         string house = (dom.Length > 0 ? "д." + dom : "") + (kor.Length > 0 ? " корп." + kor : "") + (kv.Length > 0 ? " кв." + kv : "");
         if (house.Trim().Length > 0) a.Add(house.Trim());
-        if (a.Count > 0) sb.Append(", ").Append(string.Join(", ", a.ToArray()));
-        return sb.ToString();
+        return string.Join(", ", a.ToArray());
     }
 
     // записи с этим лицевым (точное совпадение номера)
@@ -13174,65 +13340,99 @@ public class BaseLink {
             if (r.Error != null) throw new Exception(r.Error);
             if (r.NoIndex) throw new Exception("в базе нет индекса по лицевому счёту");
             if (r.Table == null) return null;
-            foreach (int row in r.Rows) {
-                if (Clean(F(r.Table, row, "NAB")) != Clean(nab)) continue;
-                Dictionary<string, string> d = new Dictionary<string, string>();
-                foreach (string f in new string[] { "NAB", "FIO", "TEL", "UL", "DOM", "KOR", "KV", "NCH", "TIPCH", "GODPR", "KVP" }) d[f] = F(r.Table, row, f);
-                string ul = d["UL"];
-                d["town"] = d["street"] = d["ss"] = "";
-                if (Base.Dir != null && ul.Length > 0) {
-                    d["town"] = Base.Dir.Town(ul) ?? "";
-                    d["street"] = Base.Dir.Street(ul) ?? "";
-                    d["ss"] = Base.Dir.Selsovet(ul) ?? "";
-                }
-                d["text"] = Describe(r.Table, row);
-                return d;
-            }
+            foreach (int row in r.Rows)
+                if (Clean(F(r.Table, row, "NAB")) == Clean(nab)) return Rec(r.Table, row);
         }
         return null;
     }
 
-    // Проверка папки базы (окно «База абонентов»): доступна ли, таблица абонентов, индексы, справочник улиц, скорость поиска по
-    // индексу. Отчёт - без данных абонентов (его можно прислать); found - для экрана: что нашлось по проверочному лицевому
-    public static string Check(string folder, string testLs, out bool ok, out string found) {
+    static readonly string[] RecFields = { "NAB", "FIO", "TEL", "UL", "DOM", "KOR", "KV", "NCH", "TIPCH", "GODPR", "KVP" };
+
+    // поля записи (t == null - пустые); town, street, ss - из справочника улиц; text - одной строкой
+    Dictionary<string, string> Rec(DbfTable t, int row) {
+        Dictionary<string, string> d = new Dictionary<string, string>();
+        foreach (string f in RecFields) d[f] = t == null ? "" : F(t, row, f);
+        d["town"] = d["street"] = d["ss"] = d["text"] = d["naryad"] = d["adres"] = "";
+        if (t == null) return d;
+        string ul = d["UL"];
+        if (Base.Dir != null && ul.Length > 0) {
+            d["town"] = Base.Dir.Town(ul) ?? "";
+            d["street"] = Base.Dir.Street(ul) ?? "";
+            d["ss"] = Base.Dir.Selsovet(ul) ?? "";
+        }
+        d["text"] = Describe(t, row);
+        d["adres"] = Place(t, row);
+        return d;
+    }
+
+    // что вписали: буквы - Ф.И.О.; год и номер через «-» или пробел, или 9 цифр с 20.. - № наряда; иначе - лицевой
+    public static string Guess(string text) {
+        string t = (text ?? "").Trim();
+        foreach (char c in t) if (char.IsLetter(c)) return "fio";
+        if (t.Length > 0 && t.Length <= 6 && NaryadLookup.AllDigits(t)) return "nar";      // номер наряда без года
+        int year;
+        long n;
+        if (NaryadLookup.Parse(t, out year, out n) && (t.IndexOfAny(new char[] { '-', ' ', '/' }) > 0 || !t.StartsWith("0"))) return "nar";
+        return "ls";
+    }
+
+    public static string KindText(string kind) { return kind == "fio" ? "Ф.И.О." : kind == "nar" ? "№ наряда" : "лицевой"; }
+
+    // Проверка (окно «База абонентов»): папка «Поиска» и что в ней (настройки, индексы), основная база по его настройкам -
+    // доступна ли, таблица абонентов, индексы, справочник улиц, скорость поиска по лицевому, Ф.И.О. и наряду.
+    // Отчёт - без данных абонентов (его можно прислать); found - для экрана: что нашлось по проверочному запросу
+    public static string Check(string poisk, string test, out bool ok, out string found) {
         ok = false;
         found = null;
         StringBuilder r = new StringBuilder();
         r.Append("Проверка базы абонентов (программа «Оформление договора») ").Append(DateTime.Now.ToString("dd.MM.yyyy HH:mm")).Append(" - данных абонентов здесь нет\r\n");
-        r.Append("Папка: ").Append(folder).Append("\r\n");
         try {
-            if (folder.Length == 0) { r.Append("Папка не указана.\r\n"); return r.ToString(); }
-            if (!Directory.Exists(folder)) {
-                r.Append("НЕТ ДОСТУПА к папке: её нет, нет сети или нет прав.\r\n");
-                if (folder.Length >= 2 && folder[1] == ':')
-                    r.Append("Сетевой диск (O: и т.п.) бывает подключён, только пока запущена программа базы: запустите её или укажите сетевой путь " +
-                        "(\\\\сервер\\папка - как в свойствах диска O: в «Этот компьютер»).\r\n");
-                return r.ToString();
-            }
-            r.Append("Таблиц .DBF в папке: ").Append(Places.DbfFiles(folder).Length).Append("\r\n");
             Dictionary<string, string> settings = new Dictionary<string, string>();
-            settings["БазаПапка"] = folder;
+            if (poisk.Length == 0) {
+                string f = PoiskFolder.Find();
+                r.Append("Папка «Поиска» не указана - ").Append(f != null ? "нашлась сама: " + f : "сама не нашлась (укажите её: «Выбрать…»)").Append("\r\n");
+                poisk = f ?? "";
+            } else r.Append("Папка «Поиска»: ").Append(poisk).Append("\r\n");
+            PoiskFolder pf = null;
+            if (poisk.Length > 0) {
+                if (!Directory.Exists(poisk)) r.Append("    НЕТ такой папки (или нет доступа)\r\n");
+                else if (!PoiskFolder.Looks(poisk)) r.Append("    это не папка «Поиска»: нет ни poisk.txt, ни indeks_fio.dat, ни prosmotr.ps1\r\n");
+                else {
+                    pf = new PoiskFolder(poisk);
+                    r.Append("    ").Append(pf.Files()).Append("\r\n");
+                    if (pf.HasSettings) r.Append("    из poisk.txt: папка базы ").Append(pf.Line(0)).Append(", таблица ").Append(pf.Line(1).Length > 0 ? pf.Line(1) : "-")
+                        .Append(", справочник улиц ").Append(pf.Line(3).Length > 0 ? pf.Line(3) + " (ключ " + pf.Line(4) + ")" : "-").Append("\r\n");
+                    else r.Append("    poisk.txt нет - «Поиск» здесь ещё не запускали; база - по умолчанию (O:\\BASAFOX или сетевой путь)\r\n");
+                    settings["ПоискПапка"] = poisk;
+                }
+            }
+            if (pf == null) settings["ПоискПапка"] = "-";      // не искать саму: проверяем указанное
             Stopwatch sw = Stopwatch.StartNew();
             BaseLink b = new BaseLink();
             b.Open(settings);
-            if (!b.Ready) { r.Append("Не открылась: ").Append(b.Error).Append("\r\n"); return r.ToString(); }
-            if (string.Compare(Path.GetFullPath(b.Folder).TrimEnd('\\', '/'), Path.GetFullPath(folder).TrimEnd('\\', '/'), StringComparison.OrdinalIgnoreCase) != 0)
-                r.Append("Внимание: открыта другая папка - ").Append(b.Folder).Append("\r\n");
+            if (!b.Ready) {
+                r.Append("База не открылась: ").Append(b.Error).Append("\r\n");
+                string folder = b.Folder ?? "";
+                if (folder.Length >= 2 && folder[1] == ':')
+                    r.Append("Сетевой диск (O: и т.п.) бывает подключён, только пока запущена программа базы: запустите её - «Поиск» с ней работает так же.\r\n");
+                return r.ToString();
+            }
+            string wanted = pf != null && pf.HasSettings ? pf.Line(0) : "";
+            r.Append("Основная база: ").Append(b.Folder).Append(wanted.Length > 0 && string.Compare(wanted.TrimEnd('\\'), b.Folder.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase) != 0
+                ? " (в poisk.txt - " + wanted + ", она недоступна; открыта эта)" : "").Append(", таблиц .DBF ").Append(Places.DbfFiles(b.Folder).Length).Append("\r\n");
             r.Append("Таблица абонентов: ").Append(b.Table).Append(", записей ").Append(b.Base.RecordCount).Append(" (открыта за ").Append(sw.ElapsedMilliseconds).Append(" мс)\r\n");
             List<string> fields = new List<string>(), lost = new List<string>();
-            foreach (string f in new string[] { "NAB", "FIO", "TEL", "UL", "DOM", "KOR", "KV", "NCH", "TIPCH", "GODPR", "KVP" })
-                (b.Base.Header.FieldIndex(f) >= 0 ? fields : lost).Add(f);
+            foreach (string f in RecFields) (b.Base.Header.FieldIndex(f) >= 0 ? fields : lost).Add(f);
             r.Append("Поля: ").Append(string.Join(", ", fields.ToArray())).Append(lost.Count > 0 ? "; нет: " + string.Join(", ", lost.ToArray()) : "").Append("\r\n");
-            IndexTag tn = b.Base.TagFor("NAB"), ta = b.Base.TagFor("UL", true), tf = b.Base.TagFor("FIO");
-            r.Append("Индекс по лицевому: ").Append(tn != null ? tn.FileName + ":" + tn.Name + " (" + tn.Expr + ")" : "НЕТ - лицевые по базе не проверить").Append("\r\n");
-            r.Append("Индекс по адресу: ").Append(ta != null ? ta.FileName + ":" + ta.Name + " (" + ta.Expr + ")" : "НЕТ - адреса по базе не проверить").Append("\r\n");
-            r.Append("Индекс по Ф.И.О.: ").Append(tf != null ? tf.FileName + ":" + tf.Name : "нет (не нужен)").Append("\r\n");
+            IndexTag tn = b.Base.TagFor("NAB"), ta = b.Base.TagFor("UL", true);
+            r.Append("Индекс базы по лицевому: ").Append(tn != null ? tn.FileName + ":" + tn.Name + " (" + tn.Expr + ")" : "НЕТ - лицевые по базе не проверить").Append("\r\n");
+            r.Append("Индекс базы по адресу: ").Append(ta != null ? ta.FileName + ":" + ta.Name + " (" + ta.Expr + ")" : "НЕТ - адреса по базе не проверить").Append("\r\n");
             r.Append("Справочник улиц: ").Append(b.Base.Dir != null ? b.Base.Dir.TableName + " (кодов улиц " + b.Base.Dir.Count + ")" :
                 "НЕ НАЙДЕН - в справке и наряде из базы не подставятся населённый пункт и улица").Append("\r\n");
-            // поиск по индексу: лицевые из разных мест таблицы (сами номера в отчёт не пишутся)
+            // поиск по индексам: записи из разных мест таблицы (сами номера и Ф.И.О. в отчёт не пишутся)
+            DbfTable s = b.Base.SpreadSample(6);
             bool search = false;
             if (tn != null) {
-                DbfTable s = b.Base.SpreadSample(6);
                 int hit = 0, n = 0;
                 long ms = 0;
                 for (int i = 0; i < s.Count; i++) {
@@ -13244,16 +13444,55 @@ public class BaseLink {
                     n++;
                 }
                 search = n > 0 && hit == n;
-                r.Append("Поиск по лицевому (по индексу): нашлось ").Append(hit).Append(" из ").Append(n).Append(n > 0 ? ", в среднем " + (ms / n) + " мс" : "").Append("\r\n");
+                r.Append("Поиск по лицевому (индекс базы): нашлось ").Append(hit).Append(" из ").Append(n).Append(n > 0 ? ", в среднем " + (ms / n) + " мс" : "").Append("\r\n");
             }
-            if ((testLs ?? "").Trim().Length > 0) {
-                Dictionary<string, string> rec = b.Record(Nab(testLs));
-                found = rec == null ? "Лицевого " + Nab(testLs) + " в базе нет" : "Нашёлся: " + rec["text"];
-                r.Append("Проверочный лицевой: ").Append(rec == null ? "не найден" : "найден").Append("\r\n");
+            sw = Stopwatch.StartNew();
+            bool names = b.EnsureNames();
+            r.Append("Индекс Ф.И.О. «Поиска» (indeks_fio.dat): ").Append(b.NamesNote).Append(names ? " (прочитан за " + sw.ElapsedMilliseconds + " мс)" : "").Append("\r\n");
+            if (names) {
+                int hit = 0, n = 0;
+                long ms = 0;
+                for (int i = 0; i < s.Count && n < 4; i++) {
+                    string fio = b.F(s, i, "FIO"), nab = b.F(s, i, "NAB");
+                    if (DbfTable.SplitWords(fio).Length < 2) continue;
+                    sw = Stopwatch.StartNew();
+                    string note;
+                    foreach (Dictionary<string, string> d in b.ByName(fio, out note)) if (Clean(d["NAB"]) == Clean(nab)) { hit++; break; }
+                    ms += sw.ElapsedMilliseconds;
+                    n++;
+                }
+                r.Append("Поиск по Ф.И.О. (индекс «Поиска»): нашлось ").Append(hit).Append(" из ").Append(n).Append(n > 0 ? ", в среднем " + (ms / n) + " мс" : "").Append("\r\n");
+            }
+            NaryadLookup nl = b.Naryady();
+            r.Append("Наряды «Поиска» (naryady.txt, indeks_naryady_ГГГГ.txt): ").Append(nl.Ready ? nl.Describe() : nl.Note).Append("\r\n");
+            if (nl.Ready) {
+                int year;
+                long number;
+                if (nl.Sample(out year, out number)) {
+                    sw = Stopwatch.StartNew();
+                    string note;
+                    List<NaryadLookup.Hit> hits = nl.Find(year, number, out note);
+                    r.Append("Поиск наряда (последний в индексе ").Append(year).Append(" года): ").Append(hits.Count > 0 ? "нашёлся" : "НЕ нашёлся" + (note != null ? " - " + note : ""))
+                        .Append(", ").Append(sw.ElapsedMilliseconds).Append(" мс\r\n");
+                }
+            }
+            if ((test ?? "").Trim().Length > 0) {
+                string kind = Guess(test), note;
+                List<Dictionary<string, string>> rows = b.Find(kind, test.Trim(), out note);
+                StringBuilder f = new StringBuilder("Проверочный запрос (" + KindText(kind) + "): ");
+                if (rows.Count == 0) f.Append(note ?? "ничего не нашлось");
+                else {
+                    f.Append("нашлось ").Append(rows.Count).Append(note != null ? " (" + note + ")" : "");
+                    for (int i = 0; i < rows.Count && i < 10; i++) f.Append("\r\n    ").Append(rows[i]["text"]).Append(rows[i]["naryad"].Length > 0 ? "  [наряд " + rows[i]["naryad"] + "]" : "");
+                }
+                found = f.ToString();
+                r.Append("Проверочный запрос (").Append(KindText(kind)).Append("): нашлось ").Append(rows.Count).Append("\r\n");
             }
             ok = tn != null && search;
-            r.Append(ok ? "ИТОГ: база подключается, лицевые ищутся по индексу" + (ta != null ? ", адреса - тоже" : "") + ". Нажмите «Сохранить»." :
+            r.Append(ok ? "ИТОГ: база подключается, лицевые ищутся по индексу базы" + (ta != null ? ", адреса - тоже" : "") + (names ? ", Ф.И.О. - по индексу «Поиска»" : "")
+                + (nl.Ready ? ", наряды - по индексам «Поиска»" : "") + ". Нажмите «Сохранить»." :
                 "ИТОГ: база открылась, но поиск по индексу не работает - пришлите этот отчёт (otchet_baza.txt рядом с программой).").Append("\r\n");
+            if (ok && !names) r.Append("Ф.И.О.: ").Append(b.NamesNote).Append("\r\n");
         } catch (Exception ex) {
             r.Append("Ошибка: ").Append(ex.Message).Append("\r\n");
         }
@@ -13338,13 +13577,436 @@ public class BaseLink {
     }
 }
 
-// Окно «База абонентов»: папка базы (программы базы, только чтение) - указать, проверить, сохранить. Договор, справка и наряд
-// после сохранения подключаются заново. Отчёт проверки - otchet_baza.txt рядом с программой (без данных абонентов)
+// Папка программы «Поиск абонента»: её poisk.txt - где основная база (диск O: или сетевой путь), таблица абонентов и справочник
+// улиц (строки: 0 папка базы, 1 таблица, 2 режим поиска, 3 таблица улиц, 4 ключ, 5 связи); там же её индексы - Ф.И.О.
+// (indeks_fio.dat) и нарядов (naryady.txt, indeks_naryady_ГГГГ.txt). «Договор» их только читает: ничего не пишет и не строит
+public class PoiskFolder {
+    public static string Home = "";          // папка «Договора» - «Поиск» ищется рядом с ней
+    static string found;
+    static bool searched;
+    static readonly object gate = new object();
+
+    public readonly string Dir;
+    readonly string[] lines = new string[0];
+
+    public PoiskFolder(string dir) {
+        Dir = dir;
+        try {
+            string f = Path.Combine(dir, "poisk.txt");
+            if (File.Exists(f)) lines = File.ReadAllLines(f, Encoding.UTF8);
+        } catch { }
+    }
+
+    public string Line(int i) { return i < lines.Length ? lines[i].Trim() : ""; }
+    public bool HasSettings { get { return Line(0).Length > 0; } }
+
+    // похоже на папку «Поиска»: его настройки, индекс ФИО или сам скрипт
+    public static bool Looks(string dir) {
+        try {
+            if (dir == null || dir.Length < 2 || !Directory.Exists(dir)) return false;
+            return File.Exists(Path.Combine(dir, "poisk.txt")) || File.Exists(Path.Combine(dir, "indeks_fio.dat")) || File.Exists(Path.Combine(dir, "prosmotr.ps1"));
+        } catch { return false; }
+    }
+
+    // что лежит в папке (для отчёта): настройки, индекс ФИО (размер, дата), наряды
+    public string Files() {
+        List<string> a = new List<string>();
+        a.Add(File.Exists(Path.Combine(Dir, "poisk.txt")) ? "poisk.txt есть" : "poisk.txt НЕТ");
+        try {
+            FileInfo fi = new FileInfo(Path.Combine(Dir, "indeks_fio.dat"));
+            a.Add(fi.Exists ? "indeks_fio.dat " + (fi.Length >= 1048576 ? (fi.Length / 1048576.0).ToString("0.0") + " МБ" : (fi.Length / 1024 + 1) + " КБ")
+                + " от " + fi.LastWriteTime.ToString("dd.MM.yyyy HH:mm") : "indeks_fio.dat НЕТ");
+        } catch { }
+        a.Add(File.Exists(Path.Combine(Dir, "naryady.txt")) ? "naryady.txt есть" : "naryady.txt нет");
+        List<int> years = NaryadLookup.YearsIn(Dir);
+        a.Add(years.Count > 0 ? "индексы нарядов: " + NaryadLookup.YearsText(years) : "индексов нарядов нет");
+        return string.Join(", ", a.ToArray());
+    }
+
+    // когда «Поиском» пользовались: самый свежий из его файлов
+    static DateTime Used(string dir) {
+        DateTime t = DateTime.MinValue;
+        foreach (string n in new string[] { "poisk.txt", "indeks_fio.dat", "otchet.txt", "prosmotr.ps1" }) {
+            try {
+                string f = Path.Combine(dir, n);
+                if (File.Exists(f) && File.GetLastWriteTime(f) > t) t = File.GetLastWriteTime(f);
+            } catch { }
+        }
+        return t;
+    }
+
+    // найти самой (один раз за запуск): папка «Договора», соседние с ней папки и на ступень выше, рабочий стол, «Документы»,
+    // корни дисков - по две ступени вглубь; из нескольких - та, где «Поиском» пользовались последней
+    public static string Find() {
+        lock (gate) {
+            if (searched) return found;
+            searched = true;
+            List<string> roots = new List<string>();
+            try {
+                if (Home.Length > 0) {
+                    string here = Path.GetFullPath(Home);
+                    string up = Path.GetDirectoryName(here);
+                    if (up != null) { roots.Add(up); string up2 = Path.GetDirectoryName(up); if (up2 != null) roots.Add(up2); }
+                }
+            } catch { }
+            try { roots.Add(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory)); } catch { }
+            try { roots.Add(Environment.GetFolderPath(Environment.SpecialFolder.Personal)); } catch { }
+            try { foreach (DriveInfo d in DriveInfo.GetDrives()) if (d.DriveType == DriveType.Fixed && d.IsReady) roots.Add(d.RootDirectory.FullName); } catch { }
+            string best = null;
+            DateTime bestTime = DateTime.MinValue;
+            int budget = 4000;
+            Dictionary<string, bool> seen = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+            foreach (string root in roots) if (root != null && root.Length > 0) Walk(root, 2, seen, ref best, ref bestTime, ref budget);
+            found = best;
+            return found;
+        }
+    }
+
+    static void Walk(string dir, int depth, Dictionary<string, bool> seen, ref string best, ref DateTime bestTime, ref int budget) {
+        if (budget-- <= 0 || seen.ContainsKey(dir)) return;
+        seen[dir] = true;
+        if (Looks(dir)) {
+            DateTime t = Used(dir);
+            if (best == null || t > bestTime) { best = dir; bestTime = t; }
+        }
+        if (depth == 0) return;
+        string[] subs;
+        try { subs = Directory.GetDirectories(dir); } catch { return; }
+        foreach (string sub in subs) {
+            string n = Path.GetFileName(sub).ToLowerInvariant();
+            if (n.StartsWith("$") || n.StartsWith(".") || n == "windows" || n == "program files" || n == "program files (x86)" || n == "programdata"
+                || n == "system volume information" || n == "recovery" || n == "appdata" || n == "proc" || n == "sys") continue;
+            try { if ((File.GetAttributes(sub) & (FileAttributes.Hidden | FileAttributes.System)) != 0) continue; } catch { continue; }
+            Walk(sub, depth - 1, seen, ref best, ref bestTime, ref budget);
+        }
+    }
+
+    // папку поменяли - искать заново
+    public static void Forget() { lock (gate) { searched = false; found = null; } }
+}
+
+// Наряды (Н-З) по номеру ГодНомер (202620936 = 2026 год, наряд 20936), как в «Поиске»: его индексы года (номер -> записи
+// таблицы нарядов, лицевой) и сама таблица нарядов (REGNZ в папке базы) - только чтение. Поиск - в индексе года и соседних
+// (наряд конца года, оформленный в январе), сверка - номер и год в самой записи; наряды новее индекса - из конца таблицы
+public class NaryadLookup {
+    public string Table = "", Number = "", Date = "", Done = "", DoneDate = "", Work = "", Account = "", YearFrom = "", WorkBook = "";
+    public string Dir = "", TablePath = "", Note = "";
+    public List<int> Years = new List<int>();
+    DbfTable header;
+    Dictionary<string, string> works;          // код работы -> название (справочник, найденный «Поиском»)
+    public const int TailLimit = 20000;        // наряды новее индекса - смотрим не больше стольких последних записей
+
+    public bool Ready { get { return header != null; } }
+
+    // «Поиск» пишет свои файлы через временный и заменяет; читаем, не мешая ему
+    static List<string> ReadLines(string file) {
+        List<string> list = new List<string>();
+        using (FileStream fs = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.Read))
+        using (StreamReader r = new StreamReader(fs, Encoding.UTF8)) {
+            string line;
+            while ((line = r.ReadLine()) != null) list.Add(line);
+        }
+        return list;
+    }
+
+    public static List<int> YearsIn(string dir) {
+        List<int> years = new List<int>();
+        try {
+            foreach (string f in Directory.GetFiles(dir, "indeks_naryady_*.txt")) {
+                string n = Path.GetFileNameWithoutExtension(f).Substring("indeks_naryady_".Length);
+                int y;
+                if (n.Length == 4 && int.TryParse(n, out y) && y >= 2000 && y < 2100 && !years.Contains(y)) years.Add(y);
+            }
+        } catch { }
+        years.Sort();
+        return years;
+    }
+
+    // «2021-2026» (подряд) или «2019, 2021, 2022»
+    public static string YearsText(List<int> years) {
+        if (years.Count == 0) return "";
+        if (years.Count > 1 && years[years.Count - 1] - years[0] == years.Count - 1) return years[0] + "-" + years[years.Count - 1];
+        List<string> a = new List<string>();
+        foreach (int y in years) a.Add(y.ToString());
+        return string.Join(", ", a.ToArray());
+    }
+
+    public static NaryadLookup Open(string poiskDir, string baseDir) {
+        NaryadLookup x = new NaryadLookup();
+        x.Dir = poiskDir;
+        try {
+            string file = Path.Combine(poiskDir, "naryady.txt");
+            if (!File.Exists(file)) { x.Note = "в папке «Поиска» нет naryady.txt - в «Поиске» ещё не открывали «Наряды...»"; return x; }
+            foreach (string line in ReadLines(file)) {
+                int e = line.IndexOf('=');
+                if (line.StartsWith("#") || e <= 0) continue;
+                string k = line.Substring(0, e).Trim(), v = line.Substring(e + 1).Trim();
+                if (k == "таблица") x.Table = v;
+                else if (k == "номер") x.Number = v;
+                else if (k == "дата") x.Date = v;
+                else if (k == "выполнил") x.Done = v;
+                else if (k == "дата_выполнения") x.DoneDate = v;
+                else if (k == "работа") x.Work = v;
+                else if (k == "лицевой") x.Account = v;
+                else if (k == "год_из") x.YearFrom = v;
+                else if (k == "справочник_работ") x.WorkBook = v;
+            }
+            if (x.Table.Length == 0 || x.Number.Length == 0 || x.Date.Length == 0) { x.Note = "в naryady.txt «Поиска» таблица нарядов не выбрана"; return x; }
+            x.TablePath = Path.Combine(baseDir, x.Table);
+            if (!File.Exists(x.TablePath)) { x.Note = "нет таблицы нарядов " + x.TablePath; return x; }
+            DbfTable h = DbfTable.LoadHeader(x.TablePath);
+            foreach (string f in new string[] { x.Number, x.Date }) if (h.FieldIndex(f) < 0) { x.Note = "в таблице нарядов " + x.Table + " нет поля " + f; return x; }
+            x.Years = YearsIn(poiskDir);
+            if (x.Years.Count == 0) { x.Note = "индексов нарядов в папке «Поиска» нет - «Поиск» создаёт их, когда в нём открывают «Наряды...»"; return x; }
+            x.header = h;
+        } catch (Exception ex) { x.Note = "не прочитались (" + ex.Message + ")"; }
+        return x;
+    }
+
+    public string Describe() {
+        return "таблица " + Table + " (номер " + Number + (YearFrom.Length > 0 ? ", год из " + YearFrom : ", год из " + Date) + ", выполнил " + Done
+            + (Account.Length > 0 ? ", лицевой " + Account : "") + "), индексы за " + YearsText(Years);
+    }
+
+    // 202620936, 2026-20936, 2026 20936, 2026/20936 -> год и номер; год 2000...следующий
+    public static bool AllDigits(string s) {
+        foreach (char c in s) if (c < '0' || c > '9') return false;
+        return s.Length > 0;
+    }
+
+    public static bool Parse(string text, out int year, out long number) {
+        year = 0;
+        number = 0;
+        string t = (text ?? "").Trim();
+        string y, n;
+        int sep = t.IndexOfAny(new char[] { '-', ' ', '/' });
+        if (sep > 0) { y = t.Substring(0, sep).Trim(); n = t.Substring(sep + 1).Trim(); }
+        else { if (t.Length < 6 || t.Length > 10) return false; y = t.Substring(0, 4); n = t.Substring(4); }
+        if (y.Length != 4 || n.Length == 0 || n.Length > 6) return false;
+        foreach (char c in y + n) if (c < '0' || c > '9') return false;
+        year = int.Parse(y);
+        number = long.Parse(n);
+        return year >= 2000 && year <= DateTime.Now.Year + 1 && number > 0;
+    }
+
+    public class Hit {
+        public int RecNo, Year;
+        public long Number;
+        public string Ls = "", Text = "";
+    }
+
+    // записи с этим номером в индексе года: «номер\tзапись:лицевой,...» (номера по возрастанию - дальше не читаем); to - по какую
+    // запись таблицы индекс просмотрен
+    List<int> FromIndex(int year, long number, out int to) {
+        List<int> recs = new List<int>();
+        to = 0;
+        string file = Path.Combine(Dir, "indeks_naryady_" + year + ".txt");
+        if (!File.Exists(file)) return recs;
+        bool data = false;
+        string key = number + "\t";
+        using (FileStream fs = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.Read))
+        using (StreamReader r = new StreamReader(fs, Encoding.UTF8)) {
+            string line;
+            while ((line = r.ReadLine()) != null) {
+                if (!data) {
+                    if (line == "записи:") data = true;
+                    else if (line.StartsWith("по_запись=")) int.TryParse(line.Substring(10), out to);
+                    else if (line.StartsWith("таблица=") && string.Compare(line.Substring(8), Table, StringComparison.OrdinalIgnoreCase) != 0) return recs;
+                    else if (line.StartsWith("длина_записи=") && line.Substring(13) != header.RecordLength.ToString()) return recs;
+                    continue;
+                }
+                if (!line.StartsWith(key)) {
+                    int t = line.IndexOf('\t');
+                    long k;
+                    if (t > 0 && long.TryParse(line.Substring(0, t), out k) && k > number) break;
+                    continue;
+                }
+                foreach (string rn in line.Substring(key.Length).Split(',')) {
+                    int c = rn.IndexOf(':'), rec;
+                    if (int.TryParse(c < 0 ? rn : rn.Substring(0, c), out rec) && !recs.Contains(rec)) recs.Add(rec);
+                }
+            }
+        }
+        return recs;
+    }
+
+    // последний наряд в индексе последнего года - для проверки (номер в отчёт не пишется)
+    public bool Sample(out int year, out long number) {
+        year = 0;
+        number = 0;
+        if (!Ready || Years.Count == 0) return false;
+        year = Years[Years.Count - 1];
+        string file = Path.Combine(Dir, "indeks_naryady_" + year + ".txt");
+        bool data = false;
+        foreach (string line in ReadLines(file)) {
+            if (line == "записи:") { data = true; continue; }
+            int t = line.IndexOf('\t');
+            long k;
+            if (data && t > 0 && long.TryParse(line.Substring(0, t), out k)) number = k;
+        }
+        return number > 0;
+    }
+
+    public List<Hit> Find(int year, long number, out string note) {
+        note = null;
+        List<Hit> hits = new List<Hit>();
+        if (!Ready) { note = Note; return hits; }
+        if (Years.IndexOf(year) < 0) note = "индекса нарядов " + year + " года в «Поиске» нет (есть " + YearsText(Years) + ") - найдите наряд в самом «Поиске»";
+        Dictionary<int, bool> recs = new Dictionary<int, bool>();
+        // по какую запись «Поиск» просмотрел таблицу: по индексу этого года (нет его - меньшее из соседних)
+        int to = 0, other = 0;
+        foreach (int y in new int[] { year, year - 1, year + 1 }) {
+            int t;
+            foreach (int rec in FromIndex(y, number, out t)) recs[rec] = true;
+            if (y == year) to = t;
+            else if (t > 0 && (other == 0 || t < other)) other = t;
+        }
+        if (to == 0) to = other;
+        using (FileStream fs = new FileStream(TablePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 1 << 16)) {
+            DbfField nf = Field(Number);
+            int len = header.RecordLength;
+            byte[] rec = new byte[len];
+            foreach (int recNo in recs.Keys) {
+                if (!Read(fs, recNo, rec)) continue;
+                if (Num(rec, nf) == number && RecYear(rec) == year) hits.Add(MakeHit(rec, recNo, year, number));
+            }
+            // наряды, дописанные после того, как «Поиск» обновлял индекс, - из конца таблицы
+            if (to > 0 && hits.Count == 0) {
+                int count = Count(fs);
+                int from = Math.Max(to + 1, count - TailLimit + 1);
+                const int chunk = 2048;
+                byte[] buf = new byte[chunk * len];
+                for (int at = from; at <= count; at += chunk) {
+                    int want = Math.Min(chunk, count - at + 1);
+                    fs.Seek(header.HeaderLength + (long)(at - 1) * len, SeekOrigin.Begin);
+                    int got = DbfTable.ReadUpTo(fs, buf, want * len) / len;
+                    for (int i = 0; i < got; i++) {
+                        if (buf[i * len] == (byte)'*') continue;
+                        Array.Copy(buf, i * len, rec, 0, len);
+                        if (Num(rec, nf) == number && RecYear(rec) == year) hits.Add(MakeHit(rec, at + i, year, number));
+                    }
+                    if (got < want) break;
+                }
+            }
+        }
+        if (hits.Count > 0) note = null;
+        return hits;
+    }
+
+    DbfField Field(string name) {
+        int i = name.Length > 0 ? header.FieldIndex(name) : -1;
+        return i < 0 ? null : header.Fields[i];
+    }
+
+    int Count(FileStream fs) {
+        byte[] h = new byte[8];
+        fs.Seek(0, SeekOrigin.Begin);
+        if (DbfTable.ReadUpTo(fs, h, 8) < 8) return 0;
+        int count = BitConverter.ToInt32(h, 4);
+        long fit = (fs.Length - header.HeaderLength) / header.RecordLength;
+        return (int)Math.Min(count, fit);
+    }
+
+    bool Read(FileStream fs, int recNo, byte[] rec) {
+        long at = header.HeaderLength + (long)(recNo - 1) * header.RecordLength;
+        if (recNo < 1 || at + header.RecordLength > fs.Length) return false;
+        fs.Seek(at, SeekOrigin.Begin);
+        return DbfTable.ReadUpTo(fs, rec, rec.Length) == rec.Length && rec[0] != (byte)'*';
+    }
+
+    // текст поля записи
+    string Text(byte[] rec, DbfField f) {
+        if (f == null) return "";
+        if (f.Type == 'I' && f.Length == 4) return BitConverter.ToInt32(rec, f.Offset).ToString();
+        return header.Enc.GetString(rec, f.Offset, f.Length).Trim();
+    }
+
+    // целое число поля (N, I или текст из цифр); нет - -1
+    long Num(byte[] rec, DbfField f) {
+        string t = Text(rec, f);
+        int dot = t.IndexOf('.');
+        if (dot >= 0) t = t.Substring(0, dot);
+        long v;
+        return t.Length > 0 && long.TryParse(t, out v) ? v : -1;
+    }
+
+    // год наряда: из полного номера ГодНомер (202655555 -> 2026) или из даты (ГГГГММДД)
+    int YearOf(byte[] rec, DbfField f) {
+        if (f == null) return 0;
+        if (f.Type == 'N' || f.Type == 'I' || f.Type == 'F') {
+            long v = Num(rec, f);
+            return v >= 200000000 && v < 210000000 ? (int)(v / 100000) : 0;
+        }
+        string t = Text(rec, f);
+        int y;
+        return f.Type == 'D' && t.Length == 8 && int.TryParse(t.Substring(0, 4), out y) ? y : 0;
+    }
+
+    // год записи - как в «Поиске»: из полного номера (UNNAR), если он есть и похож на ГодНомер, иначе из даты оформления
+    int RecYear(byte[] rec) {
+        int y = YearFrom.Length > 0 ? YearOf(rec, Field(YearFrom)) : 0;
+        return y > 0 ? y : YearOf(rec, Field(Date));
+    }
+
+    static string DateText(string yyyymmdd) {
+        return yyyymmdd.Length == 8 ? yyyymmdd.Substring(6, 2) + "." + yyyymmdd.Substring(4, 2) + "." + yyyymmdd.Substring(0, 4) : yyyymmdd;
+    }
+
+    // «202620936 от 05.11.2026, Подключение, выполнен 06.11.2026» / «..., НЕ выполнен»
+    Hit MakeHit(byte[] rec, int recNo, int year, long number) {
+        Hit h = new Hit();
+        h.RecNo = recNo;
+        h.Year = year;
+        h.Number = number;
+        h.Ls = Text(rec, Field(Account));
+        StringBuilder sb = new StringBuilder(year + number.ToString("00000"));
+        DbfField df = Field(Date);
+        if (df != null && df.Type == 'D' && Text(rec, df).Length == 8) sb.Append(" от ").Append(DateText(Text(rec, df)));
+        string work = Text(rec, Field(Work));
+        if (work.Length > 0) sb.Append(", ").Append(WorkName(work));
+        string done = Text(rec, Field(Done));
+        bool ok = done.Length > 0 && Num(rec, Field(Done)) != 0;
+        DbfField dd = Field(DoneDate);
+        string when = dd != null && dd.Type == 'D' ? Text(rec, dd) : "";
+        sb.Append(ok ? ", выполнен" + (when.Length == 8 ? " " + DateText(when) : "") : ", НЕ выполнен");
+        h.Text = sb.ToString();
+        return h;
+    }
+
+    // название работы по коду - справочник «таблица:код:название», найденный «Поиском»
+    string WorkName(string code) {
+        if (works == null) {
+            works = new Dictionary<string, string>();
+            try {
+                string[] p = WorkBook.Split(':');
+                string path = p.Length == 3 ? Path.Combine(Path.GetDirectoryName(TablePath), p[0]) : "";
+                if (path.Length > 0 && File.Exists(path) && new FileInfo(path).Length < 2000000) {
+                    DbfTable t = DbfTable.Load(path, false);
+                    int k = t.FieldIndex(p[1]), n = t.FieldIndex(p[2]);
+                    if (k >= 0 && n >= 0)
+                        for (int i = 0; i < t.Count; i++) {
+                            string c = DbfTable.Format(t.GetValue(i, k, null), true).Trim();
+                            if (c.Length > 0 && !works.ContainsKey(c)) works[c] = DbfTable.Format(t.GetValue(i, n, null), true).Trim();
+                        }
+                }
+            } catch { }
+        }
+        string name;
+        string key = code.Trim();
+        int dot = key.IndexOf('.');
+        if (dot >= 0) key = key.Substring(0, dot);
+        return works.TryGetValue(key, out name) && name.Length > 0 ? name : "работа " + code;
+    }
+}
+
+// Окно «База абонентов»: папка программы «Поиск абонента» - из её настроек «Договор» берёт, где основная база (диск O: или
+// сетевой путь), а из самой папки - индексы Ф.И.О. и нарядов, которые строит «Поиск» (только чтение). Указать (или «Найти»),
+// проверить, сохранить; договор, справка и наряд подключаются заново. Отчёт проверки - otchet_baza.txt рядом с программой
 public class BaseSetupForm : Form {
     readonly string here;
     readonly Memory memory;
     readonly TextBox path = Ui.Text(1), ls = Ui.Text(1), result = Ui.Text(14);
-    readonly Button pick, check, save;
+    readonly Button pick, auto, check, save;
     public bool Changed;
     bool busy;
 
@@ -13352,60 +14014,94 @@ public class BaseSetupForm : Form {
         this.here = here;
         memory = Memory.For(Path.Combine(here, "nastroiki.txt"));
         Load += delegate { St.Dress(this); };
-        Text = "База абонентов - папка программы базы (только чтение)";
+        Text = "База абонентов - через программу «Поиск абонента» (только чтение)";
         Font = St.Base;
         BackColor = St.Surface;
         StartPosition = FormStartPosition.CenterParent;
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = MinimizeBox = false;
         ShowInTaskbar = false;
-        ClientSize = new Size(760, 600);
-        Label l1 = Ui.Caption("Папка базы абонентов - где лежит ABONENT.DBF (и её индексы .CDX). Например \\\\fs-dos\\communal\\BASAFOX или O:\\BASAFOX");
-        l1.SetBounds(16, 12, 728, 20);
-        path.SetBounds(16, 34, 600, 26);
-        path.Text = memory.Get("БазаПапка", "");
-        path.HandleCreated += delegate { Ui.Cue(path, Places.Network); };
+        ClientSize = new Size(800, 640);
+        Label l0 = Ui.Caption("Папка программы «Поиск абонента» (где prosmotr.ps1, poisk.txt, indeks_fio.dat). Из её настроек берётся, где основная база " +
+            "(диск O: или сетевой путь), из самой папки - индексы Ф.И.О. и нарядов, которые строит «Поиск». «Договор» их только читает.");
+        l0.SetBounds(16, 10, 768, 40);
+        path.SetBounds(16, 54, 520, 26);
+        path.Text = memory.Get("ПоискПапка", "");
+        path.HandleCreated += delegate { Ui.Cue(path, "например D:\\Программы\\Поиск абонента"); };
         pick = Ui.Button("Выбрать…", false);
-        pick.SetBounds(624, 32, 120, 30);
+        pick.SetBounds(544, 52, 110, 30);
         pick.Click += delegate { PickFolder(); };
-        Label l2 = Ui.Caption("Для проверки (не обязательно): лицевой из базы - покажет, что нашлось");
-        l2.SetBounds(16, 70, 500, 20);
-        ls.SetBounds(16, 92, 200, 26);
+        auto = Ui.Button("Найти саму", false);
+        auto.SetBounds(660, 52, 124, 30);
+        auto.Click += delegate { FindFolder(); };
+        Label l2 = Ui.Caption("Для проверки (не обязательно): лицевой, Ф.И.О. или № наряда (202620936) - покажет, что нашлось");
+        l2.SetBounds(16, 92, 768, 20);
+        ls.SetBounds(16, 114, 300, 26);
         check = Ui.Button("Проверить", false);
-        check.SetBounds(228, 90, 140, 30);
+        check.SetBounds(328, 112, 140, 30);
         check.Click += delegate { RunCheck(); };
         Label l3 = Ui.Caption("Что нашлось:");
-        l3.SetBounds(16, 130, 300, 20);
-        result.SetBounds(16, 152, 728, 380);
+        l3.SetBounds(16, 152, 300, 20);
+        result.SetBounds(16, 174, 768, 400);
         result.ReadOnly = true;
         result.Font = St.Small;
-        result.Text = "Укажите папку и нажмите «Проверить». Диск O: подключается, только пока запущена программа базы - " +
-            "надёжнее сетевой путь (его видно в «Этот компьютер» у диска O:).";
+        result.Text = "Укажите папку «Поиска» (или «Найти саму») и нажмите «Проверить». Диск O: подключается, только пока запущена программа базы - " +
+            "если его нет, «Поиск» и «Договор» берут сетевой путь " + Places.Network + ".";
         save = Ui.Button("Сохранить", true);
-        save.SetBounds(520, 548, 110, 38);
+        save.SetBounds(560, 588, 110, 38);
         save.Click += delegate { Save(); };
         Button cancel = Ui.Button("Отмена", false);
-        cancel.SetBounds(638, 548, 106, 38);
+        cancel.SetBounds(678, 588, 106, 38);
         cancel.DialogResult = DialogResult.Cancel;
         CancelButton = cancel;
-        Controls.AddRange(new Control[] { l1, path, pick, l2, ls, check, l3, result, save, cancel });
+        Controls.AddRange(new Control[] { l0, path, pick, auto, l2, ls, check, l3, result, save, cancel });
     }
 
     void PickFolder() {
         using (FolderBrowserDialog d = new FolderBrowserDialog()) {
-            d.Description = "Папка базы абонентов (где ABONENT.DBF)";
+            d.Description = "Папка программы «Поиск абонента» (где prosmotr.ps1 и poisk.txt)";
             d.ShowNewFolderButton = false;
             try { if (Directory.Exists(path.Text.Trim())) d.SelectedPath = path.Text.Trim(); } catch { }
             if (d.ShowDialog(this) == DialogResult.OK) { path.Text = d.SelectedPath; RunCheck(); }
         }
     }
 
-    // проверка - в фоне (сетевая папка, большая таблица)
+    // поискать папку «Поиска» рядом с программой, на рабочем столе, на дисках
+    public void FindFolder() {
+        if (busy) return;
+        busy = true;
+        Enable(false);
+        result.Text = "Ищу папку «Поиска»: рядом с этой программой, на рабочем столе, в «Документах», на дисках (две ступени вглубь)...";
+        System.Threading.Thread th = new System.Threading.Thread(delegate() {
+            PoiskFolder.Forget();
+            string f = PoiskFolder.Find();
+            try {
+                BeginInvoke((MethodInvoker)delegate {
+                    busy = false;
+                    Enable(true);
+                    if (f == null) {
+                        result.Text = "Папка «Поиска» не нашлась. Укажите её сами: «Выбрать…» (там лежат prosmotr.ps1 и zapusk.vbs «Поиска»).";
+                        result.ForeColor = St.Bad;
+                        return;
+                    }
+                    path.Text = f;
+                    RunCheck();
+                });
+            } catch { }
+        });
+        th.IsBackground = true;
+        th.Start();
+    }
+
+    void Enable(bool on) { check.Enabled = save.Enabled = pick.Enabled = auto.Enabled = on; }
+
+    // проверка - в фоне (сетевая папка, большая таблица, индекс ФИО)
     public void RunCheck() {
         if (busy) return;
         busy = true;
-        check.Enabled = save.Enabled = pick.Enabled = false;
-        result.Text = "Проверяю папку " + path.Text.Trim() + "...";
+        Enable(false);
+        result.ForeColor = St.Text;
+        result.Text = "Проверяю: папка «Поиска», основная база, индексы...";
         string folder = path.Text.Trim(), test = ls.Text.Trim();
         System.Threading.Thread th = new System.Threading.Thread(delegate() {
             bool ok;
@@ -13415,7 +14111,7 @@ public class BaseSetupForm : Form {
             try {
                 BeginInvoke((MethodInvoker)delegate {
                     busy = false;
-                    check.Enabled = save.Enabled = pick.Enabled = true;
+                    Enable(true);
                     result.Text = report + (found != null ? "\r\n" + found + "\r\n" : "");
                     result.ForeColor = ok ? St.Text : St.Bad;
                     Checked = ok;
@@ -13428,12 +14124,12 @@ public class BaseSetupForm : Form {
 
     public bool Checked;
 
-    // запомнить папку; другая папка - таблица и справочник улиц ищутся заново
+    // запомнить папку «Поиска»; прежние настройки базы (папка, таблица, справочник улиц) - из неё заново
     public void Save() {
         string p = path.Text.Trim();
-        if (p != memory.Get("БазаПапка", ""))
-            foreach (string k in new string[] { "БазаТаблица", "БазаУлицы", "БазаУлицыКлюч", "БазаСвязи" }) memory.Values.Remove(k);
-        memory.Values["БазаПапка"] = p;
+        if (p != memory.Get("ПоискПапка", ""))
+            foreach (string k in new string[] { "БазаПапка", "БазаТаблица", "БазаУлицы", "БазаУлицыКлюч", "БазаСвязи" }) memory.Values.Remove(k);
+        memory.Values["ПоискПапка"] = p;
         memory.Save();
         BaseShare.Reset();
         Changed = true;
@@ -13445,7 +14141,175 @@ public class BaseSetupForm : Form {
     public void SetPath(string p) { path.Text = p; }
     public void SetLs(string l) { ls.Text = l; }
     public string Result { get { return result.Text; } }
+    public string PathText { get { return path.Text; } }
     public bool Busy { get { return busy; } }
+}
+
+// Окно «Найти в базе»: по лицевому, Ф.И.О. (индекс ФИО «Поиска») или № наряда (индексы нарядов «Поиска»). Выбранный абонент -
+// его лицевой уходит в справку или наряд, а дальше Ф.И.О., адрес и счётчик подтягиваются, как при вводе лицевого
+public class BaseFindForm : Form {
+    readonly Memory memory;
+    readonly RadioButton byLs = new RadioButton(), byFio = new RadioButton(), byNar = new RadioButton();
+    readonly TextBox query = Ui.Text(1);
+    readonly Button find, take;
+    readonly ListView list = new ListView();
+    readonly Label note = new Label();
+    List<Dictionary<string, string>> rows = new List<Dictionary<string, string>>();
+    public string ChosenLs = "";
+    public Dictionary<string, string> Chosen;
+    bool busy, picked, setting;
+
+    public BaseFindForm(Memory memory, string start) {
+        this.memory = memory;
+        Load += delegate { St.Dress(this); };
+        Text = "Найти в базе абонентов";
+        Font = St.Base;
+        BackColor = St.Surface;
+        StartPosition = FormStartPosition.CenterParent;
+        FormBorderStyle = FormBorderStyle.Sizable;
+        MinimizeBox = false;
+        ShowInTaskbar = false;
+        ClientSize = new Size(1200, 560);
+        MinimumSize = new Size(700, 400);
+        Label l1 = Ui.Caption("Искать по:");
+        l1.SetBounds(16, 14, 90, 22);
+        RadioButton[] rb = { byLs, byFio, byNar };
+        string[] names = { "лицевому", "Ф.И.О.", "№ наряда (Н-З)" };
+        int x = 108;
+        for (int i = 0; i < rb.Length; i++) {
+            rb[i].Text = names[i];
+            rb[i].AutoSize = true;
+            rb[i].Location = new Point(x, 13);
+            rb[i].ForeColor = St.Text;
+            x += i == 0 ? 110 : 100;
+        }
+        byLs.Checked = true;
+        // выбрали вид сами - больше не угадываем по вписанному
+        foreach (RadioButton r in rb) r.CheckedChanged += delegate { if (!setting) { picked = true; Hint(); } };
+        query.SetBounds(16, 42, 640, 26);
+        query.TextChanged += delegate { if (!picked) Auto(); };
+        query.KeyDown += delegate(object s, KeyEventArgs e) {
+            if (e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; Run(); }
+            else if (e.KeyCode == Keys.Down && list.Items.Count > 0) { e.SuppressKeyPress = true; list.Focus(); list.Items[0].Selected = true; }
+        };
+        find = Ui.Button("Найти", true);
+        find.SetBounds(664, 40, 110, 30);
+        find.Click += delegate { Run(); };
+        note.SetBounds(16, 76, 1168, 40);
+        note.ForeColor = St.Hint;
+        note.Font = St.Small;
+        list.View = View.Details;
+        list.FullRowSelect = true;
+        list.HideSelection = true;      // неактивное выделение в тёмной теме - светлым по светлому
+        list.MultiSelect = false;
+        list.GridLines = true;
+        list.Font = St.Base;
+        list.SetBounds(16, 120, 1168, 380);
+        list.Anchor = AnchorStyles.Left | AnchorStyles.Top | AnchorStyles.Right | AnchorStyles.Bottom;
+        string[] heads = { "Лицевой", "Ф.И.О.", "Адрес", "Телефон", "Счётчик", "Наряд" };
+        int[] widths = { 95, 215, 330, 95, 175, 255 };
+        for (int i = 0; i < heads.Length; i++) list.Columns.Add(heads[i], widths[i]);
+        list.DoubleClick += delegate { Take(); };
+        list.KeyDown += delegate(object s, KeyEventArgs e) { if (e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; Take(); } };
+        list.SelectedIndexChanged += delegate { take.Enabled = list.SelectedIndices.Count > 0; };
+        take = Ui.Button("Взять этого абонента", true);
+        take.SetBounds(884, 512, 190, 36);
+        take.Anchor = AnchorStyles.Right | AnchorStyles.Bottom;
+        take.Enabled = false;
+        take.Click += delegate { Take(); };
+        Button cancel = Ui.Button("Закрыть", false);
+        cancel.SetBounds(1082, 512, 102, 36);
+        cancel.Anchor = AnchorStyles.Right | AnchorStyles.Bottom;
+        cancel.DialogResult = DialogResult.Cancel;
+        CancelButton = cancel;
+        Controls.AddRange(new Control[] { l1, byLs, byFio, byNar, query, find, note, list, take, cancel });
+        query.Text = start ?? "";
+        Hint();
+        Shown += delegate { query.Focus(); query.SelectAll(); };
+    }
+
+    string Kind { get { return byFio.Checked ? "fio" : byNar.Checked ? "nar" : "ls"; } }
+
+    // вид - по тому, что вписано (пока не выбрали сами)
+    void Auto() {
+        string k = BaseLink.Guess(query.Text);
+        setting = true;
+        try { (k == "fio" ? byFio : k == "nar" ? byNar : byLs).Checked = true; } finally { setting = false; }
+        Hint();
+    }
+
+    void Hint() {
+        if (busy) return;
+        note.ForeColor = St.Hint;
+        note.Text = Kind == "fio" ? "Ф.И.О. полностью или фамилия и имя («Иванов Иван»); можно с населённым пунктом («Иванов Боровляны»). Ищется по индексу ФИО программы «Поиск»." :
+            Kind == "nar" ? "№ наряда с годом: 202620936 или 2026-20936 (как в «Поиске»). Ищется по индексам нарядов «Поиска» - покажет, чей наряд и выполнен ли." :
+            "Лицевой - 9 цифр (или 13 с припиской района 5002).";
+    }
+
+    public void Run() {
+        if (busy || query.Text.Trim().Length == 0) return;
+        busy = true;
+        find.Enabled = false;
+        list.Items.Clear();
+        take.Enabled = false;
+        note.ForeColor = St.Hint;
+        note.Text = Kind == "fio" ? "Ищу по Ф.И.О.... (в первый раз читается индекс ФИО «Поиска» - несколько секунд)" : "Ищу...";
+        string kind = Kind, text = query.Text.Trim();
+        BaseShare.Find(this, memory, kind, text, delegate(List<Dictionary<string, string>> found, string n, string err) {
+            busy = false;
+            find.Enabled = true;
+            rows = found;
+            if (err != null) { note.Text = "База недоступна: " + err + " (настройка - главное меню, «База абонентов…»)"; note.ForeColor = St.Bad; return; }
+            foreach (Dictionary<string, string> d in found) {
+                string meter = (d["TIPCH"] + " № " + d["NCH"]).Trim();
+                if (d["NCH"].Length == 0) meter = d["TIPCH"];
+                string fio = d.ContainsKey("missing") ? "(в базе абонентов нет)" : BaseLink.Title(d["FIO"]);
+                ListViewItem it = new ListViewItem(new string[] { d["NAB"], fio, d["adres"], d["TEL"] == "0" ? "" : d["TEL"], meter, d["naryad"] });
+                list.Items.Add(it);
+            }
+            if (found.Count > 0) {
+                list.Focus();
+                list.Items[0].Selected = true;
+                list.Items[0].Focused = true;
+                note.Text = "Нашлось: " + found.Count + (n != null ? " - " + n : "") + ". Двойной щелчок (или Enter) - взять абонента в справку/наряд.";
+                note.ForeColor = n != null ? St.Warn : St.Good;
+            } else {
+                note.Text = n ?? "Ничего не нашлось.";
+                note.ForeColor = St.Warn;
+            }
+        });
+    }
+
+    void Take() {
+        if (list.SelectedIndices.Count == 0) return;
+        int i = list.SelectedIndices[0];
+        if (i < 0 || i >= rows.Count) return;
+        Chosen = rows[i];
+        ChosenLs = rows[i]["NAB"];
+        if (ChosenLs.Length == 0) { note.Text = "У этого наряда нет лицевого - впишите данные сами."; note.ForeColor = St.Warn; return; }
+        DialogResult = DialogResult.OK;
+        Close();
+    }
+
+    // для проверки
+    public void SetQuery(string q, string kind) {
+        query.Text = q;
+        if (kind != null) { setting = true; (kind == "fio" ? byFio : kind == "nar" ? byNar : byLs).Checked = true; setting = false; picked = true; }
+    }
+    public bool Busy { get { return busy; } }
+    public string KindName { get { return BaseLink.KindText(Kind); } }
+    public string NoteText { get { return note.Text; } }
+    public int Found { get { return list.Items.Count; } }
+    public void Pick(int i) { if (i < list.Items.Count) { list.Items[i].Selected = true; Take(); } }
+    public string Dump() {
+        StringBuilder sb = new StringBuilder(note.Text + "\n");
+        foreach (ListViewItem it in list.Items) {
+            List<string> a = new List<string>();
+            foreach (ListViewItem.ListViewSubItem si in it.SubItems) a.Add(si.Text);
+            sb.Append(string.Join(" | ", a.ToArray())).Append("\n");
+        }
+        return sb.ToString();
+    }
 }
 
 // Оформление договора электроснабжения: форма -> шаблон Word (shablon.docx) -> готовый договор
@@ -14066,7 +14930,7 @@ public class DogovorForm : Form {
         // щелчок по надписи о базе - окно «База абонентов» (указать папку, проверить)
         baseLabel.Cursor = Cursors.Hand;
         baseLabel.Click += delegate { OpenBaseSetup(); };
-        tip.SetToolTip(baseLabel, "Папка базы абонентов: указать, проверить (щёлкните)");
+        tip.SetToolTip(baseLabel, "База абонентов - через папку программы «Поиск абонента»: указать, проверить (щёлкните)");
         nav.Controls.Add(baseLabel);
         nav.Resize += delegate {
             dirs.SetBounds(0, nav.ClientSize.Height - 20 - dirs.Height, nav.Width, dirs.Height);
@@ -14443,12 +15307,12 @@ public class DogovorForm : Form {
             Post(delegate {
                 if (b.Ready) {
                     baseLink = b;
-                    foreach (string k in new string[] { "БазаПапка", "БазаТаблица", "БазаУлицы", "БазаУлицыКлюч", "БазаСвязи" })
+                    foreach (string k in new string[] { "ПоискПапка", "БазаПапка", "БазаТаблица", "БазаУлицы", "БазаУлицыКлюч", "БазаСвязи" })
                         if (settings.ContainsKey(k)) memory.Values[k] = settings[k];
                     memory.Save();
                     // проверка - поиском по индексу базы (несколько чтений), не перебором всех записей
                     if (b.AccountIndex && b.AddressIndex) {
-                        baseLabel.Text = "База: " + b.Table + "\nлицевой и адрес ищутся по индексу базы";
+                        baseLabel.Text = "База: " + b.Table + (b.FromPoisk ? " (как в «Поиске»)" : "") + "\nлицевой и адрес ищутся по индексу базы";
                         baseLabel.ForeColor = Color.FromArgb(150, 210, 170);
                     } else {
                         string what = !b.AccountIndex && !b.AddressIndex ? "индексов - лицевые и адреса" : !b.AccountIndex ? "индекса по лицевому - лицевые" : "индекса по адресу - адреса";
@@ -14456,7 +15320,7 @@ public class DogovorForm : Form {
                         baseLabel.ForeColor = Color.FromArgb(240, 150, 150);
                     }
                 } else {
-                    baseLabel.Text = "База недоступна: " + b.Error + "\nщёлкните здесь - указать папку базы";
+                    baseLabel.Text = "База недоступна: " + b.Error + "\nщёлкните здесь - указать папку «Поиска»";
                     baseLabel.ForeColor = Color.FromArgb(240, 150, 150);
                 }
                 Recheck(true, true);
@@ -16182,6 +17046,7 @@ public class StartMenu : Form {
         // тёмная тема: белое и системное светлое в окне - тёмное (St.Dress)
         Load += delegate { St.Dress(this); };
         this.here = here;
+        PoiskFolder.Home = here;              // папка «Поиска» (база и индексы) ищется рядом с программой
         Tag = launch;
         Text = "Оформление договора электроснабжения";
         Font = St.Base;
@@ -16527,7 +17392,8 @@ public class SpravkaForm : Form {
         public readonly Dictionary<string, Control> Ctl = new Dictionary<string, Control>();
         public readonly Dictionary<string, string> Caps = new Dictionary<string, string>();
         public MeterPick Pick;
-        public Button Remove, Same;
+        public Button Remove, Same, Find;
+        public bool Force;               // выбран в «Найти в базе» - взять из базы всё (кроме пустого в базе)
         public string AutoAdres = "";
         // из базы по лицевому: что подставлено (поле -> значение; поправленное руками не трогается) и какой лицевой искали
         public readonly Dictionary<string, string> Filled = new Dictionary<string, string>();
@@ -16794,13 +17660,44 @@ public class SpravkaForm : Form {
         m.Same.Click += delegate { CopyPrevious(mm); };
         tip.SetToolTip(m.Same, "Подставить лицевой, адрес и Ф.И.О. (с телефоном) как у предыдущего прибора учёта");
         m.Box.Controls.Add(m.Same);
-        m.Box.Resize += delegate {
-            mm.Remove.Location = new Point(mm.Box.Width - mm.Remove.Width - 8, 6);
-            mm.Same.Location = new Point(mm.Remove.Left - mm.Same.Width - 6, 6);
-        };
+        // найти абонента в базе по лицевому, Ф.И.О. или № наряда (индексы «Поиска») - лицевой и всё остальное подставятся
+        m.Find = Ui.Button("Найти в базе…", false);
+        m.Find.Size = new Size(140, 28);
+        m.Find.TabStop = false;
+        m.Find.Click += delegate { FindInBase(mm); };
+        tip.SetToolTip(m.Find, "Найти абонента по лицевому, Ф.И.О. или № наряда (индексы программы «Поиск») и взять его данные в этот прибор учёта");
+        m.Box.Controls.Add(m.Find);
+        m.Box.Resize += delegate { PlaceHead(mm); };
         MeterLists(m);
         return m;
     }
+
+    // кнопки в шапке ПУ - справа налево: «× убрать», «Взять общие предыдущего», «Найти в базе…» (видимые)
+    static void PlaceHead(MeterBlock m) {
+        int x = m.Box.Width - 8;
+        foreach (Button b in new Button[] { m.Remove, m.Same, m.Find }) {
+            if (!b.Visible && b != m.Find) continue;
+            x -= b.Width;
+            b.Location = new Point(x, 6);
+            x -= 6;
+        }
+    }
+
+    // «Найти в базе…»: выбранный абонент - лицевой в этот ПУ, остальное подтягивается из базы (поверх вписанного)
+    void FindInBase(MeterBlock m) {
+        string ls = DigitsOnly(MV(m, "ls")), fio = MV(m, "fio");
+        using (BaseFindForm f = new BaseFindForm(memory, ls.Length > 0 ? ls : fio)) {
+            if (f.ShowDialog(this) != DialogResult.OK || meters.IndexOf(m) < 0) return;
+            m.Force = true;
+            m.Asked = "";
+            int i = meters.IndexOf(m) + 1;
+            if (DigitsOnly(MV(m, "ls")) == f.ChosenLs) AskBase(m);
+            else SetV("pu" + i + "_ls", f.ChosenLs);
+        }
+    }
+
+    // для проверки
+    public void OpenFind(int i) { FindInBase(meters[i - 1]); }
 
     static Cell Line() { return Cell.F(null, new Rule(), 4); }
 
@@ -16879,6 +17776,8 @@ public class SpravkaForm : Form {
         string who = meters.Count > 1 ? "ПУ " + i + ": " : "";
         if (err != null) { Note(who + "база недоступна (" + err + ") - впишите сами; папка базы - в главном меню «База абонентов…»", St.Warn); return; }
         if (rec == null) { Note(who + "лицевого " + nab + " в базе нет - Ф.И.О., адрес и счётчик впишите сами", St.Warn); return; }
+        bool force = m.Force;
+        m.Force = false;
         Dictionary<string, string> v = BaseValues(rec);
         string tipch = rec["TIPCH"];
         MeterType known = tipch.Length > 0 ? m.Pick.Known(tipch) : null;
@@ -16892,7 +17791,7 @@ public class SpravkaForm : Form {
         try {
             foreach (KeyValuePair<string, string> kv in v) {
                 string cur = MV(m, kv.Key), before;
-                if (cur.Length == 0 || m.Filled.TryGetValue(kv.Key, out before) && before == cur) SetV("pu" + i + "_" + kv.Key, kv.Value);
+                if (cur.Length == 0 || force && kv.Value.Length > 0 || m.Filled.TryGetValue(kv.Key, out before) && before == cur) SetV("pu" + i + "_" + kv.Key, kv.Value);
                 m.Filled[kv.Key] = kv.Value;
             }
             m.Pick.Loaded();
@@ -16972,6 +17871,7 @@ public class SpravkaForm : Form {
             m.Box.Number = (i + 1).ToString();
             m.Remove.Visible = meters.Count > 1;
             m.Same.Visible = i > 0;
+            PlaceHead(m);
             m.Box.Invalidate();
             meterCard.Grid.Row(Cell.G(m.Grid, 4));
         }
@@ -18214,10 +19114,14 @@ public class NaryadForm : Form {
         c.Grid.Row(F("Начальник (подпись)", C("nach_dolzh", "Начальник ГРП"), 18), F("Фамилия И.О. начальника", C("nach", "Фамилия И.О."), 20),
             F("Инженер группы по работе с потребителями", C("inzh", "Фамилия И.О."), 24));
 
-        c = new Card("Потребитель", "из справки или договора - кнопки внизу; можно вписать", 4);
+        c = new Card("Потребитель", "из справки или договора (кнопки внизу), из базы - «Найти в базе…»; можно вписать", 4);
         cards.Add(c);
+        Button find = Ui.Button("Найти в базе…", false);
+        find.Name = "findInBase";
+        find.Click += delegate { FindInBase(); };
+        tip.SetToolTip(find, "Найти абонента по лицевому, Ф.И.О. или № наряда (индексы программы «Поиск») и взять его данные в наряд");
         c.Grid.Row(F("Лицевой счёт (с припиской района)", T("ls", "5002123456789"), 17), F("Фамилия, имя, отчество", T("fio", "Иванов Иван Иванович"), 0),
-            F("Телефон", T("tel", "+375..."), 18));
+            F("Телефон", T("tel", "+375..."), 18), F(" ", find, 15));
         c.Grid.Row(F("Потребитель в наряде (собирается сам: «Гр. Ф.И.О. (телефон)», можно поправить)", T("potr", null), 0));
 
         c = new Card("Объект", "объект, причина и адрес", 4);
@@ -18422,6 +19326,22 @@ public class NaryadForm : Form {
     readonly Dictionary<string, string> filled = new Dictionary<string, string>();   // подставлено из базы
     string asked = "";
     Timer wait;
+    bool force;                      // абонент выбран в «Найти в базе» - взять из базы всё (кроме пустого в базе)
+
+    public void OpenFind() { FindInBase(); }   // для проверки
+
+    // «Найти в базе…»: по лицевому, Ф.И.О. или № наряда; выбранный - лицевой в наряд, остальное подтягивается
+    void FindInBase() {
+        string ls = Digits(V("ls"));
+        using (BaseFindForm f = new BaseFindForm(memory, ls.Length > 0 ? BaseLink.Nab(ls) : V("fio"))) {
+            if (f.ShowDialog(this) != DialogResult.OK) return;
+            force = true;
+            asked = "";
+            string full = FullLs(f.ChosenLs);
+            if (Digits(V("ls")) == Digits(full)) AskBase();
+            else SetV("ls", full);
+        }
+    }
 
     void AskBase() {
         string d = Digits(V("ls"));
@@ -18451,11 +19371,13 @@ public class NaryadForm : Form {
         if (rec == null) { headSub.Text = "Лицевого " + nab + " в базе нет - Ф.И.О. и адрес впишите сами"; headSub.ForeColor = St.Warn; return; }
         Dictionary<string, string> v = SpravkaForm.BaseValues(rec);
         v["selsovet"] = rec["ss"];
+        bool all = force;
+        force = false;
         loading = true;
         try {
             foreach (KeyValuePair<string, string> kv in v) {
                 string cur = V(kv.Key), before;
-                if (cur.Length == 0 || filled.TryGetValue(kv.Key, out before) && before == cur) SetV(kv.Key, kv.Value);
+                if (cur.Length == 0 || all && kv.Value.Length > 0 || filled.TryGetValue(kv.Key, out before) && before == cur) SetV(kv.Key, kv.Value);
                 filled[kv.Key] = kv.Value;
             }
         } finally { loading = false; }
@@ -18756,6 +19678,8 @@ public class NaryadForm : Form {
         Enable();
         head.Text = ("Наряд " + V("ls") + " " + Short(V("fio"))).Trim();
         RefreshState();
+        // сельсовета в справке нет - из базы по лицевому (подставится только в пустое)
+        if (V("selsovet").Length == 0) { asked = ""; AskBase(); }
     }
 
     // сохранённый договор с тем же лицевым (последний), его данные; нет - null
