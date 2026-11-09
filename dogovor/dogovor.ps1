@@ -912,6 +912,41 @@ public class Lists {
         try { AddMissing(); } catch { }
         try { AddMeters(); } catch { }
         try { ClearOformil(); } catch { }
+        try { AddOnce("Наряд: причина", NaryadMark); } catch { }
+    }
+
+    // 09.11: в список причин наряда (раздел появился днём раньше) дописать новые варианты - один раз (метка в файле)
+    public const string NaryadMark = "# список дополнен программой 09.11";
+
+    // в раздел справочника пользователя дописать варианты встроенного списка, которых в нём нет, - один раз (метка)
+    void AddOnce(string name, string mark) {
+        int section = -1, last = -1;
+        List<string> have = new List<string>();
+        for (int i = 0; i < lines.Count; i++) {
+            string s = lines[i].Trim();
+            if (s.StartsWith("[") && s.EndsWith("]")) {
+                if (section >= 0) break;
+                if (Key(s.Substring(1, s.Length - 2)) == Key(name)) { section = i; last = i; }
+                continue;
+            }
+            if (section < 0) continue;
+            if (s.StartsWith(mark)) return;
+            if (s.Length > 0) last = i;
+            if (s.Length > 0 && !s.StartsWith("#")) have.Add(Key(s));
+        }
+        if (section < 0) return;
+        List<string> add = new List<string>();
+        bool take = false;
+        foreach (string raw in Default.Replace("\r\n", "\n").Split('\n')) {
+            string s = raw.Trim();
+            if (s.StartsWith("[") && s.EndsWith("]")) { take = Key(s.Substring(1, s.Length - 2)) == Key(name); continue; }
+            if (!take || s.Length == 0 || s.StartsWith("#")) continue;
+            if (!have.Contains(Key(s))) { add.Add(s); have.Add(Key(s)); }
+        }
+        add.Insert(0, mark);
+        lines.InsertRange(last + 1, add);
+        System.IO.File.WriteAllLines(File, lines.ToArray(), new UTF8Encoding(true));
+        Load();
     }
 
     // 05.11: список «Оформил» (кто оформил договор, инженер в справке) - один человек, Степанович А.С.; в старом справочнике
@@ -1189,6 +1224,16 @@ OformilMark + "\r\n" +
 "\r\n" +
 "[Наряд: причина]\r\n" +
 "Допуск в эксплуатацию\r\n" +
+"Допуск выносного ПУ\r\n" +
+"\r\n" +
+"[Наряд: подпись начальника]\r\n" +
+"# наряд: кто подписывает («Начальник ГРП ___ Зенченко Д.И.»); первый - по умолчанию\r\n" +
+"Начальник ГРП\r\n" +
+"Начальник ОПСУ\r\n" +
+"\r\n" +
+"[Наряд: подстанция]\r\n" +
+"# наряд: место включения - «КТП № 2423, ВЛ № 2, опора № 9»\r\n" +
+"ТП\r\nКТП\r\nЗТП\r\nМТП\r\nСТП\r\nРП\r\n" +
 "\r\n" +
 "[Справка: заключение]\r\n" +
 "# справка (данные прибора учёта): строка после таблицы\r\n" +
@@ -1380,7 +1425,7 @@ public static class St {
     public static Tint TintOf(string card) {
         switch (card) {
             case "Договор": case "Справка": case "Наряд": return new Tint(236, 243, 252, 211, 227, 248, 52, 110, 190);
-            case "Фото документов": return new Tint(243, 240, 251, 225, 218, 246, 118, 90, 190);
+            case "Фото документов": case "Второй наряд": return new Tint(243, 240, 251, 225, 218, 246, 118, 90, 190);
             case "Потребитель": case "Абонент": return new Tint(235, 247, 238, 208, 237, 215, 46, 138, 78);
             case "Объект": return new Tint(253, 245, 229, 248, 229, 188, 196, 126, 24);
             case "Счётчики": case "Прибор учёта": case "Место включения": return new Tint(232, 246, 247, 201, 234, 237, 22, 126, 138);
@@ -17388,7 +17433,9 @@ public class MeterBox : Panel {
 // Наряд на включение (подключение) / отключение электроустановки - по шаблону naryad.docx (бланк «Энергосбыта»: наряд,
 // линия отреза, отрывной корешок). Лицевой, потребитель, объект, адрес - из справки или договора (открытых или сохранённых)
 // или вручную; своё у наряда: включение или отключение, кому (ОГРЭС), причина, место (ТП, ВЛ, опора), № и дата (пусто -
-// в наряде линия, впишут от руки), начальник ГРП и инженер. Наряды - в папку «Наряды», имя по адресу.
+// в наряде линия, впишут от руки), начальник ГРП (ОПСУ) и инженер. Наряды - в папку «Наряды», имя по адресу.
+// Лист альбомный, наряд - на половине листа; второй наряд (справа) - по желанию: объект сначала отключают, потом
+// включают. У второго свои вид, №, дата, лицевой, объект, причина, место; потребитель, адрес, кому, подписи - общие.
 public class NaryadForm : Form {
     readonly string here, templateFile;
     readonly Lists lists;
@@ -17403,7 +17450,10 @@ public class NaryadForm : Form {
     bool loading, dirty;
     string savedFile;
     // строки, которые собираются сами из полей, - пока их не поправили руками
-    string autoAdres = "", autoPotr = "", autoMesto = "";
+    readonly Dictionary<string, string> autos = new Dictionary<string, string>();
+    static readonly string[] Composed = { "adres", "potr", "mesto", "mesto2" };
+    // поля второго наряда (без «dva»): серые, пока галочки нет
+    static readonly string[] SecondKeys = { "vid2", "nomer2", "s_datoy2", "data2", "ls2", "obekt2", "prichina2", "tp_tip2", "tp2", "vl2", "opora2", "mesto2" };
 
     static readonly string[] AddrKeys = { "np_tip", "np", "selsovet", "ulica_tip", "ulica", "dom", "korp", "kv" };
     static readonly string[] Months = { "января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября", "ноября", "декабря" };
@@ -17503,8 +17553,11 @@ public class NaryadForm : Form {
             // строки наряда из частей: адрес, потребитель, место
             if (Array.IndexOf(AddrKeys, key) >= 0) Compose("adres");
             else if (key == "fio" || key == "tel") Compose("potr");
-            else if (key == "tp" || key == "vl" || key == "opora") Compose("mesto");
-            else if (key == "vid") PrichinaFor();
+            else if (key == "tp_tip" || key == "tp" || key == "vl" || key == "opora") Compose("mesto");
+            else if (key == "tp_tip2" || key == "tp2" || key == "vl2" || key == "opora2") Compose("mesto2");
+            else if (key == "vid") PrichinaFor("");
+            else if (key == "vid2") PrichinaFor("2");
+            else if (key == "dva" && V("dva") == "1") OnDva();
             RefreshState();
         };
         if (c is Seg) ((Seg)c).Changed += delegate { Enable(); h(c, EventArgs.Empty); };
@@ -17560,7 +17613,8 @@ public class NaryadForm : Form {
         Reg("data", date);
         c.Grid.Row(F("Наряд на", vid, 24), F("№ наряда", T("nomer", "пусто - линия"), 12), F(null, X("s_datoy", "указать дату"), 15),
             F("Дата наряда", date, 14), F("Кому (строка по центру)", C("komu", "ОГРЭС"), 0));
-        c.Grid.Row(F("Начальник ГРП", C("nach", "Фамилия И.О."), 24), F("Инженер группы по работе с потребителями", C("inzh", "Фамилия И.О."), 24));
+        c.Grid.Row(F("Начальник (подпись)", C("nach_dolzh", "Начальник ГРП"), 18), F("Фамилия И.О. начальника", C("nach", "Фамилия И.О."), 20),
+            F("Инженер группы по работе с потребителями", C("inzh", "Фамилия И.О."), 24));
 
         c = new Card("Потребитель", "из справки или договора - кнопки внизу; можно вписать", 4);
         cards.Add(c);
@@ -17576,10 +17630,29 @@ public class NaryadForm : Form {
             F("Корпус", T("korp", null), 6), F("Квартира", T("kv", null), 6));
         c.Grid.Row(F("Адрес в наряде (собирается сам из полей выше, с сельсоветом; можно поправить)", T("adres", null), 0));
 
-        c = new Card("Место включения", "трансформаторная подстанция, линия, опора", 4);
+        c = new Card("Место включения", "подстанция (ТП, КТП...), линия, опора", 4);
         cards.Add(c);
-        c.Grid.Row(F("ТП №", T("tp", null), 8), F("ВЛ №", T("vl", null), 6), F("Опора №", T("opora", null), 8),
+        c.Grid.Row(F("Подстанция", C("tp_tip", "ТП"), 7), F("№", T("tp", null), 8), F("ВЛ №", T("vl", null), 6), F("Опора №", T("opora", null), 8),
             F("Место в наряде (собирается само, можно поправить)", T("mesto", null), 0));
+
+        // второй наряд - справа на том же листе (объект сначала отключают, потом включают)
+        c = new Card("Второй наряд", "справа на том же листе; потребитель, адрес, кому и подписи - как в первом", 4);
+        cards.Add(c);
+        c.Grid.Row(F(null, X("dva", "Второй наряд на этом же листе (справа) - например, сначала отключение, потом включение"), 0));
+        Seg vid2 = new Seg("включение", "отключение");
+        Reg("vid2", vid2);
+        DateBox date2 = new DateBox();
+        Reg("data2", date2);
+        c.Grid.Row(F("Наряд на", vid2, 24), F("№ наряда", T("nomer2", "пусто - линия"), 12), F(null, X("s_datoy2", "указать дату"), 15),
+            F("Дата наряда", date2, 14));
+        c.Grid.Row(F("Лицевой счёт", T("ls2", null), 17), F("Объект", C("obekt2", null), 30), F("Причина", C("prichina2", null), 0));
+        c.Grid.Row(F("Подстанция", C("tp_tip2", "ТП"), 7), F("№", T("tp2", null), 8), F("ВЛ №", T("vl2", null), 6), F("Опора №", T("opora2", null), 8),
+            F("Место в наряде (собирается само, можно поправить)", T("mesto2", null), 0));
+        Button same = Ui.Button("Как в первом наряде", false);
+        same.Name = "sameAsFirst";
+        same.Click += delegate { CopyFirst(true); };
+        tip.SetToolTip(same, "Лицевой, объект и место (подстанция, ВЛ, опора) - как в первом наряде");
+        c.Grid.Row(F(null, same, 22));
     }
 
     void FillLists() {
@@ -17596,6 +17669,11 @@ public class NaryadForm : Form {
             Items("obekt", With(lists.Get("Объект электроснабжения"), memory.Hist("наряд объект")));
             Items("nach", Names());
             Items("inzh", Engineers());
+            Items("nach_dolzh", With(lists.Get("Наряд: подпись начальника"), memory.Hist("наряд начальник")));
+            Items("tp_tip", lists.Get("Наряд: подстанция"));
+            Items("tp_tip2", lists.Get("Наряд: подстанция"));
+            Items("obekt2", With(lists.Get("Объект электроснабжения"), memory.Hist("наряд объект")));
+            Items("prichina2", With(lists.Get("Наряд: причина"), memory.Hist("наряд причина")));
         } finally { loading = was; }
     }
 
@@ -17620,9 +17698,59 @@ public class NaryadForm : Form {
     }
 
     void Enable() {
-        bool on = V("s_datoy") == "1";
-        Control d = inp["data"];
-        d.Enabled = on;
+        inp["data"].Enabled = V("s_datoy") == "1";
+        bool two = V("dva") == "1";
+        foreach (string k in SecondKeys) {
+            Control c = inp[k];
+            bool on = two && (k != "data2" || V("s_datoy2") == "1");
+            c.Enabled = on;
+            if (c is TextBox || c is ComboBox) c.BackColor = on ? Color.White : St.Disabled;
+        }
+        Control same = Find("sameAsFirst");
+        if (same != null) same.Enabled = two;
+    }
+
+    Control Find(string name) {
+        foreach (Card c in cards) {
+            Control[] f = c.Panel.Controls.Find(name, true);
+            if (f.Length > 0) return f[0];
+        }
+        return null;
+    }
+
+    // галочку «второй наряд» поставили: второй ещё не заполняли (нет места) - заполнить; обычно сначала отключение, потом включение
+    void OnDva() {
+        if (V("tp2").Length > 0 || V("vl2").Length > 0 || V("opora2").Length > 0 || V("mesto2").Length > 0) return;
+        bool was = loading;
+        loading = true;
+        try {
+            string def = First(lists.Get("Наряд: причина"));
+            if (V("vid") == "включение") {
+                // первый был включением с причиной по умолчанию - она уходит во второй (включение), первый - отключение
+                string p = V("prichina");
+                SetV("vid", "отключение");
+                SetV("prichina", p == def ? "" : p);
+                SetV("vid2", "включение");
+                SetV("prichina2", p.Length > 0 ? p : def);
+            } else {
+                SetV("vid2", "включение");
+                SetV("prichina2", def);
+            }
+        } finally { loading = was; }
+        CopyFirst(false);
+    }
+
+    // лицевой, объект и место - как в первом наряде (кнопка или при включении второго)
+    void CopyFirst(bool byButton) {
+        bool was = loading;
+        loading = true;
+        try {
+            foreach (string k in new string[] { "ls", "obekt", "tp_tip", "tp", "vl", "opora" }) SetV(k + "2", V(k));
+            SetV("mesto2", "");
+            autos["mesto2"] = "";
+        } finally { loading = was; }
+        Compose("mesto2");
+        if (byButton) { dirty = true; RefreshState(); }
     }
 
     // ---------- строки из частей ----------
@@ -17653,36 +17781,41 @@ public class NaryadForm : Form {
     string AutoOf(string key) {
         if (key == "adres") return AddressFrom(V("np_tip"), V("np"), V("selsovet"), V("ulica_tip"), V("ulica"), V("dom"), V("korp"), V("kv"));
         if (key == "potr") return V("fio").Length == 0 ? "" : "Гр. " + V("fio") + (V("tel").Length > 0 ? " (" + V("tel") + ")" : "");
+        // место: «КТП № 2423, ВЛ № 2, опора № 9» (второй наряд - поля с «2»)
+        string s = key == "mesto2" ? "2" : "";
         List<string> m = new List<string>();
-        if (V("tp").Length > 0) m.Add("ТП № " + V("tp"));
-        if (V("vl").Length > 0) m.Add("ВЛ № " + V("vl"));
-        if (V("opora").Length > 0) m.Add("опора № " + V("opora"));
+        if (V("tp" + s).Length > 0) m.Add((V("tp_tip" + s).Length > 0 ? V("tp_tip" + s) : "ТП") + " № " + V("tp" + s));
+        if (V("vl" + s).Length > 0) m.Add("ВЛ № " + V("vl" + s));
+        if (V("opora" + s).Length > 0) m.Add("опора № " + V("opora" + s));
         return string.Join(", ", m.ToArray());
     }
+
+    string Auto(string key) { string a; return autos.TryGetValue(key, out a) ? a : ""; }
 
     // части поменялись - строка собирается заново, если её не правили руками
     void Compose(string key) {
         string a = AutoOf(key);
-        string prev = key == "adres" ? autoAdres : key == "potr" ? autoPotr : autoMesto;
         string cur = V(key);
-        if (cur == prev || cur.Length == 0) {
+        if (cur == Auto(key) || cur.Length == 0) {
             bool was = loading;
             loading = true;
             try { inp[key].Text = a; } finally { loading = was; }
         }
-        if (key == "adres") autoAdres = a; else if (key == "potr") autoPotr = a; else autoMesto = a;
+        autos[key] = a;
     }
 
-    void ComposeAll() { Compose("adres"); Compose("potr"); Compose("mesto"); }
+    void ComposeAll() { foreach (string k in Composed) Compose(k); }
+
+    void ResetAutos() { foreach (string k in Composed) autos[k] = ""; }
 
     // включение - причина по умолчанию «Допуск в эксплуатацию»; для отключения своей нет - пусто (вписать)
-    void PrichinaFor() {
+    void PrichinaFor(string s) {
         string def = First(lists.Get("Наряд: причина"));
         bool was = loading;
         loading = true;
         try {
-            if (V("vid") == "отключение" && V("prichina") == def) SetV("prichina", "");
-            else if (V("vid") == "включение" && V("prichina").Length == 0) SetV("prichina", def);
+            if (V("vid" + s) == "отключение" && V("prichina" + s) == def) SetV("prichina" + s, "");
+            else if (V("vid" + s) == "включение" && V("prichina" + s).Length == 0) SetV("prichina" + s, def);
         } finally { loading = was; }
     }
 
@@ -17849,15 +17982,28 @@ public class NaryadForm : Form {
         try {
             foreach (KeyValuePair<string, Control> kv in inp) if (!(kv.Value is DateBox) && !(kv.Value is Seg)) SetV(kv.Key, "");
             ((DateBox)inp["data"]).Value = DateTime.Today;
-            SetV("vid", "включение");
+            ((DateBox)inp["data2"]).Value = DateTime.Today;
+            // второй наряд на листе - как в прошлый раз; с ним первый - отключение, второй - включение
+            string def = First(lists.Get("Наряд: причина"));
+            bool two = memory.Get("НарядДва", "") == "1";
+            SetV("dva", two ? "1" : "");
+            SetV("vid", two ? "отключение" : "включение");
+            SetV("prichina", two ? "" : def);
+            SetV("vid2", "включение");
+            SetV("prichina2", def);
             SetV("s_datoy", memory.Get("НарядСДатой", ""));
+            SetV("s_datoy2", memory.Get("НарядСДатой", ""));
             SetV("komu", memory.Get("НарядКому", First(lists.Get("Наряд: кому"))));
-            SetV("prichina", First(lists.Get("Наряд: причина")));
             SetV("obekt", memory.Get("НарядОбъект", ""));
+            SetV("obekt2", V("obekt"));
+            string tp = memory.Get("НарядПодстанция", First(lists.Get("Наряд: подстанция")));
+            SetV("tp_tip", tp);
+            SetV("tp_tip2", tp);
+            SetV("nach_dolzh", memory.Get("НарядПодписьНачальника", First(lists.Get("Наряд: подпись начальника"))));
             string eng = memory.Get("НарядИнженер", memory.Get("СправкаИнженер", ""));
             SetV("inzh", Engineers().Contains(eng) ? eng : First(Engineers()));
             SetV("nach", memory.Get("НарядНачальник", memory.Get("СправкаНачальник", First(Names()))));
-            autoAdres = autoPotr = autoMesto = "";
+            ResetAutos();
             savedFile = null;
         } finally { loading = false; }
         dirty = false;
@@ -17905,7 +18051,9 @@ public class NaryadForm : Form {
             if (Get(d, "podp").Length > 0) SetV("nach", Get(d, "podp"));
             SetV("adres", "");
             SetV("potr", "");
-            autoAdres = autoPotr = "";
+            autos["adres"] = autos["potr"] = "";
+            SetV("ls2", V("ls"));
+            SetV("obekt2", V("obekt"));
             ComposeAll();
             // адреса по частям нет (старый договор) - строка адреса договора
             if (V("adres").Length == 0 && Get(d, "adres").Length > 0) SetV("adres", Get(d, "adres"));
@@ -17943,7 +18091,9 @@ public class NaryadForm : Form {
             }
             SetV("adres", "");
             SetV("potr", "");
-            autoAdres = autoPotr = "";
+            autos["adres"] = autos["potr"] = "";
+            SetV("ls2", V("ls"));
+            SetV("obekt2", V("obekt"));
             ComposeAll();
             // адреса по частям нет (справка прежней версии) - строка адреса справки
             if (V("adres").Length == 0) SetV("adres", Get(d, p + "adres").Length > 0 ? Get(d, p + "adres") : Get(d, "adres"));
@@ -18027,9 +18177,11 @@ public class NaryadForm : Form {
                 if (d.TryGetValue(k, out v)) SetV(k, v);
             }
             // правленные руками строки остаются как были, остальные - собираются из частей
-            autoAdres = AutoOf("adres");
-            autoPotr = AutoOf("potr");
-            autoMesto = AutoOf("mesto");
+            // наряд прежней версии (один, без подписи начальника и подстанции) - как было
+            if (!d.ContainsKey("nach_dolzh")) SetV("nach_dolzh", "Начальник ГРП");
+            if (!d.ContainsKey("tp_tip")) SetV("tp_tip", "ТП");
+            if (!d.ContainsKey("dva")) SetV("dva", "");
+            foreach (string k in Composed) autos[k] = AutoOf(k);
             savedFile = Path.Combine(Folder(here), name + ".docx");
         } finally { loading = false; }
         dirty = false;
@@ -18060,27 +18212,46 @@ public class NaryadForm : Form {
     }
 
     // значения полей шаблона
+    // значения полей шаблона: первый наряд - «ВИД», «ЛС»...; второй (справа) - «ВИД2», «ЛС2»...; «Н2» - в каждом абзаце
+    // второго наряда: пусто - он есть, «убрать» - его нет (правая половина листа пустая)
     public Dictionary<string, string> Compose() {
         Dictionary<string, string> v = new Dictionary<string, string>();
-        bool on = V("vid") != "отключение";
-        v["ВИД"] = on ? "включение" : "отключение";
-        v["ВИДА"] = on ? "включения" : "отключения";
-        v["ВИДП"] = on ? "Включение" : "Отключение";
-        v["НОМЕР"] = V("nomer").Length > 0 ? V("nomer") : "____________";
-        DateTime d = ((DateBox)inp["data"]).Value;
-        bool dated = V("s_datoy") == "1";
-        v["ДАТАН"] = dated ? "«" + d.ToString("dd") + "» " + Months[d.Month - 1] + " " + d.Year : "«________» ______________________ " + DateTime.Today.Year;
-        v["ГОД"] = (dated ? d.Year : DateTime.Today.Year).ToString();
-        v["КОМУ"] = V("komu");
-        v["ЛС"] = V("ls");
-        v["ПОТРЕБИТЕЛЬ"] = V("potr");
-        v["ПРИЧИНА"] = V("prichina");
-        v["МЕСТО"] = V("mesto");
-        v["ОБЪЕКТ"] = LowerFirst(V("obekt"));
-        v["АДРЕС"] = V("adres");
-        v["НАЧАЛЬНИК"] = V("nach");
-        v["ИНЖЕНЕР"] = V("inzh");
+        bool two = V("dva") == "1";
+        foreach (string s in new string[] { "", "2" }) {
+            bool on = V("vid" + s) != "отключение";
+            v["ВИД" + s] = on ? "включение" : "отключение";
+            v["ВИДА" + s] = on ? "включения" : "отключения";
+            v["ВИДП" + s] = on ? "Включение" : "Отключение";
+            v["НОМЕР" + s] = V("nomer" + s).Length > 0 ? V("nomer" + s) : "____________";
+            DateTime d = ((DateBox)inp["data" + s]).Value;
+            bool dated = V("s_datoy" + s) == "1";
+            v["ДАТАН" + s] = dated ? "«" + d.ToString("dd") + "» " + Months[d.Month - 1] + " " + d.Year : "«______» ______________ " + DateTime.Today.Year;
+            v["ГОД" + s] = (dated ? d.Year : DateTime.Today.Year).ToString();
+            v["ЛС" + s] = V("ls" + s);
+            v["ПРИЧИНА" + s] = V("prichina" + s);
+            v["МЕСТО" + s] = V("mesto" + s);
+            v["ОБЪЕКТ" + s] = LowerFirst(V("obekt" + s));
+            v["КОМУ" + s] = V("komu");
+            v["ПОТРЕБИТЕЛЬ" + s] = V("potr");
+            v["АДРЕС" + s] = V("adres");
+            v["НАЧДОЛЖН" + s] = V("nach_dolzh").Length > 0 ? V("nach_dolzh") : "Начальник ГРП";
+            v["НАЧАЛЬНИК" + s] = V("nach");
+            v["ИНЖЕНЕР" + s] = V("inzh");
+        }
+        v["Н2"] = two ? "" : DocxTemplate.Drop;
         return v;
+    }
+
+    // второй наряд нужен, а шаблон naryad.docx прежний (один наряд на вертикальном листе) - сказать
+    bool OldTemplate() {
+        if (V("dva") != "1") return false;
+        try { return !DocxTemplate.Fields(templateFile).Contains("ВИД2"); } catch { return false; }
+    }
+
+    void OldTemplateNote() {
+        if (!OldTemplate()) return;
+        MessageBox.Show(this, "Шаблон naryad.docx старый: в нём один наряд на вертикальном листе, второго наряда в нём не будет.\n\n" +
+            "Положите рядом с программой naryad.docx из нового архива (альбомный лист, два наряда рядом).", Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
     }
 
     // «Стройплощадка жилого дома» -> «стройплощадка жилого дома» (как в бланке); «ЛПХ» не трогаем
@@ -18092,6 +18263,8 @@ public class NaryadForm : Form {
     List<string> Missing() {
         List<string> m = new List<string>();
         foreach (string k in new string[] { "ls", "fio", "obekt", "prichina", "adres", "mesto", "komu", "nach", "inzh" }) if (V(k).Length == 0) m.Add(k);
+        if (V("dva") == "1")
+            foreach (string k in new string[] { "ls2", "obekt2", "prichina2", "mesto2" }) if (V(k).Length == 0) m.Add(k);
         return m;
     }
 
@@ -18107,6 +18280,10 @@ public class NaryadForm : Form {
             case "komu": return "кому (ОГРЭС)";
             case "nach": return "начальник ГРП";
             case "inzh": return "инженер";
+            case "ls2": return "второй наряд: лицевой";
+            case "obekt2": return "второй наряд: объект";
+            case "prichina2": return "второй наряд: причина";
+            case "mesto2": return "второй наряд: место (ТП, ВЛ, опора)";
             default: return key;
         }
     }
@@ -18125,12 +18302,14 @@ public class NaryadForm : Form {
     // имя файла - по адресу: «Новый Двор Рябиновая 12»
     public string FileName() {
         string name;
-        if ((V("np").Length > 0 || V("ulica").Length > 0) && V("adres") == autoAdres)
+        if ((V("np").Length > 0 || V("ulica").Length > 0) && V("adres") == Auto("adres"))
             name = (Up(V("np")) + " " + Up(V("ulica")) + " " + V("dom") + (V("kv").Length > 0 ? "-" + V("kv") : "")).Trim();
         else name = AddressName(V("adres"));
         if (name.Length == 0) name = ("Наряд " + V("ls") + " " + Short(V("fio"))).Trim();
         if (name == "Наряд") name = "Наряд " + DateTime.Now.ToString("yyyy-MM-dd HH-mm");
-        if (V("vid") == "отключение") name += " отключение";
+        // по видам: «отключение», два наряда - «отключение и включение»; один на включение - без приписки
+        if (V("dva") == "1") name += " " + V("vid") + " и " + V("vid2");
+        else if (V("vid") == "отключение") name += " отключение";
         foreach (char ch in Path.GetInvalidFileNameChars()) name = name.Replace(ch, '_');
         while (name.Contains("  ")) name = name.Replace("  ", " ");
         return name.Trim().TrimEnd('.');
@@ -18167,6 +18346,7 @@ public class NaryadForm : Form {
         try {
             string f = DocPreview.NewFile(here, FileName());
             DocxTemplate.Fill(templateFile, f, Compose());
+            OldTemplateNote();
             DocPreview.Show(this, f);
             return f;
         } catch (Exception ex) {
@@ -18183,7 +18363,7 @@ public class NaryadForm : Form {
             foreach (string k in m) names.Add("  • " + Caption(k));
             if (MessageBox.Show(this, "Не заполнено:\n" + string.Join("\n", names.ToArray()) + "\n\nВсё равно сохранить наряд? (Незаполненное можно дописать в Word.)",
                     "Проверка перед сохранением", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) != DialogResult.Yes) {
-                Control c = inp[m[0] == "mesto" && V("tp").Length == 0 ? "tp" : m[0]];
+                Control c = inp[m[0] == "mesto" && V("tp").Length == 0 ? "tp" : m[0] == "mesto2" && V("tp2").Length == 0 ? "tp2" : m[0]];
                 content.ScrollControlIntoView(c);
                 c.Focus();
                 return null;
@@ -18215,9 +18395,14 @@ public class NaryadForm : Form {
             memory.Values["НарядИнженер"] = V("inzh");
             memory.Values["НарядНачальник"] = V("nach");
             memory.Values["НарядСДатой"] = V("s_datoy");
+            memory.Values["НарядДва"] = V("dva");
+            memory.Values["НарядПодстанция"] = V("tp_tip");
+            memory.Values["НарядПодписьНачальника"] = V("nach_dolzh");
             memory.Remember("наряд кому", V("komu"));
+            memory.Remember("наряд начальник", V("nach_dolzh"));
             memory.Remember("наряд причина", V("prichina"));
             memory.Remember("наряд объект", V("obekt"));
+            if (V("dva") == "1") { memory.Remember("наряд причина", V("prichina2")); memory.Remember("наряд объект", V("obekt2")); }
             memory.Remember("нп", Up(V("np")));
             memory.Remember("улица", Up(V("ulica")));
             memory.Remember("сельсовет", V("selsovet"));
@@ -18229,6 +18414,7 @@ public class NaryadForm : Form {
             RefreshState();
             if (missing.Count > 0)
                 MessageBox.Show(this, "В шаблоне наряда есть поля, которые программа не знает (остались пустыми):\n" + string.Join(", ", missing.ToArray()), Text);
+            if (ask) OldTemplateNote();
             if (dataError != null && ask)
                 MessageBox.Show(this, "Наряд сохранён, но его данные (чтобы открыть его заново) не записались:\n" + dataError, Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
             if (openWord) {
