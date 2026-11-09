@@ -4123,6 +4123,7 @@ public class BaseCard : Form {
         nextButton = AddButton("След. (PgDn) >", delegate { Step(1); });
         extraButton = AddButton("Доп. сведения (Ctrl+D)", delegate { ToggleExtra(); });
         AddButton("Все поля (F2)", delegate { ResultColumns.ShowList(this, res, this.row, live == null ? null : live.Extra); });
+        AddButton("Оплаты (F6)", delegate { ShowOplaty(); });
         AddButton("Наряды (Ctrl+Z)", delegate { ShowNaryady(); });
         AddButton("Обходы (Ctrl+O)", delegate { ShowObhody(); });
         closeButton = AddButton("Закрыть (Esc)", delegate { Close(); });
@@ -4158,6 +4159,7 @@ public class BaseCard : Form {
             case Keys.Escape: if (extraPage) ToggleExtra(); else Close(); return true;
             case Keys.Control | Keys.D: ToggleExtra(); return true;
             case Keys.F2: ResultColumns.ShowList(this, res, row, live == null ? null : live.Extra); return true;
+            case Keys.F6: ShowOplaty(); return true;
             case Keys.Control | Keys.Z: ShowNaryady(); return true;
             case Keys.Control | Keys.O: ShowObhody(); return true;
             case Keys.PageUp: Step(-1); return true;
@@ -4179,6 +4181,13 @@ public class BaseCard : Form {
     internal void ShowNaryady() {
         if (live == null || Field("NAB").Length == 0) { System.Media.SystemSounds.Beep.Play(); return; }
         LastWindow = new NaryadLsForm(Path.GetDirectoryName(live.FilePath), Field("NAB"), Who());
+        LastWindow.Show(this);
+    }
+
+    // F6 - оплаты лицевого (за текущий год, стрелки вверх / вниз - другой год)
+    internal void ShowOplaty() {
+        if (live == null || Field("NAB").Length == 0) { System.Media.SystemSounds.Beep.Play(); return; }
+        LastWindow = new OplataForm(Path.GetDirectoryName(live.FilePath), Field("NAB"), Who());
         LastWindow.Show(this);
     }
 
@@ -9969,6 +9978,241 @@ public class ObhodForm : BlueListForm {
 
     public string Dump() {
         StringBuilder sb = new StringBuilder(head.Text);
+        foreach (ListViewItem it in list.Items) {
+            sb.Append("\n   ");
+            for (int c = 0; c < it.SubItems.Count; c++) sb.Append(c > 0 ? " | " : "").Append(it.SubItems[c].Text);
+        }
+        return sb.ToString();
+    }
+}
+
+// Оплаты лицевого (F6 в карточке, как в программе базы): все таблицы оплат папки базы - с лицевым (NAB), датой оплаты (DOPL...),
+// суммой (SUMM...) и индексом NAB программы базы: новые (NOPL), текущие (OPLAKT, OPLATA, OPLRKC), архивы (AROPL, AROPRKC), по
+// суду (OPFORSUD) - какие есть. Находятся один раз (в фоне) - общие для всех карточек. Только чтение
+public class PaymentRow {
+    public DateTime Date = DateTime.MinValue;
+    public string[] Values;
+    public decimal Sum, Pen;
+    public int Order, RecNo;
+}
+
+public class PaymentSource {
+    static PaymentSource shared;
+    static string sharedFolder = "";
+    static readonly object sync = new object();
+    public readonly List<AccountTable> Tables = new List<AccountTable>();
+    public string Note = "";
+
+    // столбцы окна: подпись и поля таблиц (первое, что есть в таблице); дата и сумма - любые подходящие
+    public static readonly string[] Titles = { "Дата опл.", "За месяц", "Сумма", "Пеня", "Показ. пред.", "Показ. тек.", "кВт·ч", "Тариф", "Касса / кассир", "№ пачки", "Таблица" };
+    static readonly string[][] Fields = { null, new string[] { "MES" }, null, new string[] { "PEN" }, new string[] { "PPOK" }, new string[] { "PRPOK" },
+        new string[] { "KVTALL", "RP" }, new string[] { "TAR" }, new string[] { "NKASIR", "NKA", "NRKC", "KASSIR" }, new string[] { "NPL" }, null };
+
+    public static PaymentSource Get(string folder) {
+        lock (sync) if (shared != null && string.Compare(sharedFolder, folder, StringComparison.OrdinalIgnoreCase) == 0) return shared;
+        PaymentSource p = Find(folder);
+        lock (sync) { shared = p; sharedFolder = folder; }
+        Report.Line("Оплаты (F6): " + p.Note);
+        return p;
+    }
+
+    // дата оплаты: DOPL, DATOPL...; иначе дата, в имени которой «OPL»
+    public static int DateField(DbfTable h) {
+        foreach (string n in new string[] { "DOPL", "DATOPL", "DATAOPL", "DPL" }) { int j = h.FieldIndex(n); if (j >= 0 && h.Fields[j].Type == 'D') return j; }
+        for (int j = 0; j < h.Fields.Count; j++) if (h.Fields[j].Type == 'D' && h.Fields[j].Name.ToUpperInvariant().Contains("OPL")) return j;
+        return -1;
+    }
+
+    // сумма: SUMM, SUMOPL, SUMMA; иначе число, имя которого начинается с SUM
+    public static int SumField(DbfTable h) {
+        foreach (string n in new string[] { "SUMM", "SUMOPL", "SUMMA", "SUM" }) { int j = h.FieldIndex(n); if (j >= 0 && (h.Fields[j].Type == 'N' || h.Fields[j].Type == 'F')) return j; }
+        for (int j = 0; j < h.Fields.Count; j++) if ((h.Fields[j].Type == 'N' || h.Fields[j].Type == 'F') && h.Fields[j].Name.ToUpperInvariant().StartsWith("SUM")) return j;
+        return -1;
+    }
+
+    // порядок: новые и текущие (имя без AR), потом архивы (AR...)
+    static int Rank(string name) {
+        string n = Path.GetFileNameWithoutExtension(name).ToUpperInvariant();
+        if (n.StartsWith("NOPL")) return 0;
+        if (!n.StartsWith("AR")) return 1;
+        return 2;
+    }
+
+    public static PaymentSource Find(string folder) {
+        PaymentSource p = new PaymentSource();
+        List<string> files = new List<string>();
+        foreach (string f in Directory.GetFiles(folder)) if (string.Compare(Path.GetExtension(f), ".dbf", StringComparison.OrdinalIgnoreCase) == 0) files.Add(f);
+        files.Sort(delegate(string a, string b) { int c = Rank(a).CompareTo(Rank(b)); return c != 0 ? c : string.Compare(Path.GetFileName(a), Path.GetFileName(b), StringComparison.OrdinalIgnoreCase); });
+        List<string> notes = new List<string>();
+        foreach (string f in files) {
+            DbfTable h;
+            try { h = DbfTable.LoadHeader(f); } catch (Exception) { continue; }
+            if (h.FieldIndex("NAB") < 0 || DateField(h) < 0 || SumField(h) < 0) continue;
+            AccountTable t = AccountTable.Open(f);
+            notes.Add(t.Name + " (" + h.Expected + "): " + t.Note);
+            if (t.Indexed) p.Tables.Add(t);
+        }
+        p.Note = notes.Count > 0 ? string.Join("; ", notes.ToArray()) : "таблиц оплат (с лицевым NAB, датой оплаты и суммой) в папке нет";
+        return p;
+    }
+
+    // все оплаты лицевого из всех таблиц, новые сверху; одна и та же оплата в двух таблицах (новые и текущие) - один раз
+    public List<PaymentRow> Rows(string ls, out string error) {
+        error = null;
+        List<PaymentRow> r = new List<PaymentRow>();
+        Dictionary<string, bool> seen = new Dictionary<string, bool>();
+        foreach (AccountTable t in Tables) {
+            List<int> rows;
+            DbfTable part;
+            try { part = t.Find(ls, out rows); } catch (Exception ex) { error = t.Name + ": " + ex.Message; continue; }
+            int date = DateField(part), sum = SumField(part);
+            int[] cols = new int[Titles.Length];
+            for (int c = 0; c < Titles.Length; c++) {
+                cols[c] = -1;
+                if (c == 0) cols[c] = date;
+                else if (c == 2) cols[c] = sum;
+                else if (Fields[c] != null) foreach (string n in Fields[c]) if (cols[c] < 0) cols[c] = part.FieldIndex(n);
+            }
+            int pen = part.FieldIndex("PEN");
+            foreach (int row in rows) {
+                PaymentRow o = new PaymentRow();
+                o.Order = Tables.IndexOf(t);
+                o.RecNo = part.RecNos[row];
+                object d = date >= 0 ? part.GetValue(row, date, null) : null;
+                if (d is DateTime) o.Date = (DateTime)d;
+                object sv = sum >= 0 ? part.GetValue(row, sum, null) : null;
+                if (sv is decimal) o.Sum = (decimal)sv;
+                object pv = pen >= 0 ? part.GetValue(row, pen, null) : null;
+                if (pv is decimal) o.Pen = (decimal)pv;
+                o.Values = new string[Titles.Length];
+                for (int c = 0; c < Titles.Length; c++) {
+                    if (cols[c] < 0) { o.Values[c] = ""; continue; }
+                    object v = part.GetValue(row, cols[c], null);
+                    o.Values[c] = v is decimal && (c == 2 || c == 3) ? ((decimal)v).ToString("0.00", CultureInfo.InvariantCulture) : DbfTable.Format(v, false).Trim();
+                }
+                o.Values[Titles.Length - 1] = t.Name;
+                string key = o.Date.Ticks + "|" + o.Sum + "|" + o.Values[1] + "|" + o.Values[9];
+                if (seen.ContainsKey(key)) continue;
+                seen[key] = true;
+                r.Add(o);
+            }
+        }
+        r.Sort(delegate(PaymentRow a, PaymentRow b) {
+            int c = b.Date.CompareTo(a.Date);
+            if (c != 0) return c;
+            if (a.Order != b.Order) return a.Order.CompareTo(b.Order);
+            return b.RecNo.CompareTo(a.RecNo);
+        });
+        return r;
+    }
+}
+
+// F6 в карточке: оплаты лицевого за год - сначала текущий; стрелка вверх - год назад, вниз - год вперёд; внизу - итог за год
+public class OplataForm : BlueListForm {
+    readonly ListView list;
+    readonly Label total = new Label();
+    readonly List<PaymentRow> all = new List<PaymentRow>();
+    readonly string who;
+    int year = DateTime.Today.Year;
+    bool loaded;
+    string note = "";
+
+    public OplataForm(string folder, string ls, string who) : base(folder, ls, "Оплаты " + ls + " (только просмотр)", "ОПЛАТЫ  " + ls + "  " + who) {
+        this.who = who;
+        list = List();
+        total.Dock = DockStyle.Bottom;
+        total.Height = 28;
+        total.Font = head.Font;
+        total.ForeColor = Title;
+        total.BackColor = Back;
+        total.TextAlign = ContentAlignment.MiddleLeft;
+        Controls.Add(list);
+        Controls.Add(head);
+        Controls.Add(total);
+        for (int c = 0; c < PaymentSource.Titles.Length; c++) {
+            string t = PaymentSource.Titles[c];
+            ColumnHeader h = list.Columns.Add(t, t == "Таблица" ? 100 : t == "Касса / кассир" ? 120 : t == "Дата опл." ? 105 : t.StartsWith("Показ.") ? 108 : 92);
+            if (c >= 2 && c <= 7) h.TextAlign = HorizontalAlignment.Right;
+        }
+        list.Items.Add(new ListViewItem("читаю оплаты..."));
+        Shown += delegate { ActiveControl = list; };
+        string f = folder, l = ls;
+        System.Threading.Thread th = new System.Threading.Thread(delegate() {
+            List<PaymentRow> rows = null;
+            string err = null, src = "";
+            try {
+                PaymentSource p = PaymentSource.Get(f);
+                if (p.Tables.Count == 0) err = p.Note;
+                else {
+                    rows = p.Rows(l, out err);
+                    List<string> names = new List<string>();
+                    foreach (AccountTable t in p.Tables) names.Add(t.Name);
+                    src = string.Join(", ", names.ToArray());
+                }
+            } catch (Exception ex) { err = ex.Message; }
+            Post(delegate { Loaded(rows, err, src); });
+        });
+        th.IsBackground = true;
+        th.Start();
+    }
+
+    void Loaded(List<PaymentRow> rows, string err, string src) {
+        loaded = true;
+        if (rows != null) all.AddRange(rows);
+        note = (err != null ? "ошибка: " + err + "; " : "") + (src.Length > 0 ? "таблицы: " + src : "");
+        // нет оплат за текущий год - сразу последний год с оплатами
+        if (all.Count > 0 && all[0].Date != DateTime.MinValue && all[0].Date.Year < year && !HasYear(year)) year = all[0].Date.Year;
+        ShowYear();
+    }
+
+    bool HasYear(int y) { foreach (PaymentRow r in all) if (r.Date.Year == y) return true; return false; }
+
+    // стрелки: вверх - год назад, вниз - год вперёд (не дальше первой оплаты и текущего года)
+    protected override bool ProcessCmdKey(ref Message msg, Keys keyData) {
+        if (keyData == Keys.Up || keyData == Keys.Down) {
+            if (loaded) Step(keyData == Keys.Up ? -1 : 1);
+            return true;
+        }
+        return base.ProcessCmdKey(ref msg, keyData);
+    }
+
+    public void Step(int d) {
+        int first = year, last = Math.Max(DateTime.Today.Year, year);
+        foreach (PaymentRow r in all) if (r.Date != DateTime.MinValue) { first = Math.Min(first, r.Date.Year); last = Math.Max(last, r.Date.Year); }
+        int y = year + d;
+        if (y < first || y > last) { System.Media.SystemSounds.Beep.Play(); return; }
+        year = y;
+        ShowYear();
+    }
+
+    void ShowYear() {
+        list.BeginUpdate();
+        try {
+            list.Items.Clear();
+            decimal sum = 0, pen = 0;
+            int n = 0;
+            foreach (PaymentRow r in all) {
+                if (r.Date.Year != year) continue;
+                list.Items.Add(new ListViewItem(r.Values));
+                sum += r.Sum;
+                pen += r.Pen;
+                n++;
+            }
+            if (n == 0) {
+                List<string> years = new List<string>();
+                foreach (PaymentRow r in all) { string y = r.Date == DateTime.MinValue ? "без даты" : r.Date.Year.ToString(); if (!years.Contains(y)) years.Add(y); }
+                list.Items.Add(new ListViewItem("за " + year + " год оплат нет" + (years.Count > 0 ? " (годы с оплатами: " + string.Join(", ", years.ToArray()) + ")" : " - у лицевого оплат нет")));
+            } else list.Items[0].Selected = true;
+            head.Text = "ОПЛАТЫ  " + ls + "  " + who + "   ·   " + year + " год";
+            total.Text = " " + year + ": оплат " + n + ", сумма " + sum.ToString("0.00", CultureInfo.InvariantCulture) +
+                (pen != 0 ? ", пеня " + pen.ToString("0.00", CultureInfo.InvariantCulture) : "") + "      ↑ - год назад, ↓ - год вперёд, Esc - закрыть";
+            Text = "Оплаты " + ls + " за " + year + ": " + n + (note.Length > 0 ? " (" + note + ")" : "") + " - только просмотр";
+        } finally { list.EndUpdate(); }
+    }
+
+    public bool Ready { get { return loaded; } }
+    public string Dump() {
+        StringBuilder sb = new StringBuilder(head.Text + "\n" + total.Text + "\n" + Text);
         foreach (ListViewItem it in list.Items) {
             sb.Append("\n   ");
             for (int c = 0; c < it.SubItems.Count; c++) sb.Append(c > 0 ? " | " : "").Append(it.SubItems[c].Text);
