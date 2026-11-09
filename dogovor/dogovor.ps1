@@ -1183,6 +1183,13 @@ OformilMark + "\r\n" +
 "# номиналы автоматов\r\n" +
 "6\r\n10\r\n16\r\n20\r\n25\r\n32\r\n40\r\n50\r\n63\r\n80\r\n100\r\n120\r\n" +
 "\r\n" +
+"[Наряд: кому]\r\n" +
+"# наряд на включение/отключение: строка по центру под заголовком\r\n" +
+"ОГРЭС\r\n" +
+"\r\n" +
+"[Наряд: причина]\r\n" +
+"Допуск в эксплуатацию\r\n" +
+"\r\n" +
 "[Справка: заключение]\r\n" +
 "# справка (данные прибора учёта): строка после таблицы\r\n" +
 "СИСТЕМА УЧЁТА ПРОВЕРЕНА, ПУ на балансе абонента, ТРЕБУЕТСЯ ОТКРЫТЬ ДАННЫЙ Л/С ПО ЗАЯВЛЕНИЮ ПОТРЕБИТЕЛЯ.\r\n" +
@@ -1372,11 +1379,11 @@ public static class St {
     // свой цвет у каждого раздела: фон, полоса заголовка, метка (полоска слева, рамка, значок в меню)
     public static Tint TintOf(string card) {
         switch (card) {
-            case "Договор": case "Справка": return new Tint(236, 243, 252, 211, 227, 248, 52, 110, 190);
+            case "Договор": case "Справка": case "Наряд": return new Tint(236, 243, 252, 211, 227, 248, 52, 110, 190);
             case "Фото документов": return new Tint(243, 240, 251, 225, 218, 246, 118, 90, 190);
             case "Потребитель": case "Абонент": return new Tint(235, 247, 238, 208, 237, 215, 46, 138, 78);
             case "Объект": return new Tint(253, 245, 229, 248, 229, 188, 196, 126, 24);
-            case "Счётчики": case "Прибор учёта": return new Tint(232, 246, 247, 201, 234, 237, 22, 126, 138);
+            case "Счётчики": case "Прибор учёта": case "Место включения": return new Tint(232, 246, 247, 201, 234, 237, 22, 126, 138);
             case "Пломбы и оборудование": case "Пломбы": return new Tint(252, 238, 241, 245, 212, 219, 184, 68, 94);
             case "Дополнительно": case "Текст справки": return new Tint(244, 246, 230, 228, 235, 196, 116, 138, 26);
             default: return new Tint(241, 242, 244, 223, 226, 231, 100, 110, 125);
@@ -13059,7 +13066,7 @@ public class DogovorForm : Form {
             try { lists.Load(); FillLists(); } catch { }
         };
         KeyDown += delegate(object s, KeyEventArgs e) {
-            if (e.Control && e.KeyCode == Keys.S) { e.SuppressKeyPress = true; Create(true, true); }
+            if (e.Control && e.KeyCode == Keys.S) { e.SuppressKeyPress = true; CreateClick(); }
             else if (e.Control && e.KeyCode == Keys.O) { e.SuppressKeyPress = true; OpenSaved(); }
             else if (e.Control && e.KeyCode == Keys.N) { e.SuppressKeyPress = true; AskNew(); }
             else if (e.Control && e.KeyCode == Keys.P) { e.SuppressKeyPress = true; Preview(); }
@@ -13090,6 +13097,25 @@ public class DogovorForm : Form {
     public StartMenu Home;                           // главное меню (нет - окно договора само по себе, как раньше)
     SpravkaForm ownSpravka;
     CheckBox withSpravka;                            // сохранять вместе с договором и справку
+    CheckBox withNaryad;                             // после сохранения - наряд на подключение по этому договору
+    NaryadForm ownNaryad;
+
+    // «Сохранить договор» (и Ctrl+S): галочка «+ наряд на подключение» - после сохранения открыть наряд по этому договору
+    public string CreateClick() {
+        string f = Create(true, true);
+        if (f != null && withNaryad != null && withNaryad.Checked) MakeNaryad();
+        return f;
+    }
+
+    // наряд на включение по этому договору: окно наряда, лицевой, Ф.И.О., объект, адрес - отсюда
+    public void MakeNaryad() {
+        if (Home != null) { Home.OpenNaryad(this, Data(), null); return; }
+        if (ownNaryad == null || ownNaryad.IsDisposed) ownNaryad = new NaryadForm(here);
+        ownNaryad.Back = this;
+        ownNaryad.FromContract(Data());
+        ownNaryad.Show();
+        Hide();
+    }
 
     // справка вместе с договором: заполняется из договора и сохраняется сама (без окна справки)
     string SpravkaAlongside(bool openWord) {
@@ -13536,7 +13562,10 @@ public class DogovorForm : Form {
         dirs.Click += delegate { OpenLists(); };
         NavItem reqs = new NavItem("Обязательные поля", true);
         reqs.Click += delegate { SetupRequired(); };
-        foreach (NavItem n in new NavItem[] { reqs, folder, dirs }) {
+        NavItem narItem = new NavItem("Наряд на подключение…", true);
+        narItem.Click += delegate { MakeNaryad(); };
+        tip.SetToolTip(narItem, "Наряд на включение (отключение) по этому договору: лицевой, Ф.И.О., объект, адрес возьмутся отсюда");
+        foreach (NavItem n in new NavItem[] { narItem, reqs, folder, dirs }) {
             n.Anchor = AnchorStyles.Left | AnchorStyles.Bottom | AnchorStyles.Right;
             nav.Controls.Add(n);
         }
@@ -13549,7 +13578,8 @@ public class DogovorForm : Form {
             dirs.SetBounds(0, nav.ClientSize.Height - 20 - dirs.Height, nav.Width, dirs.Height);
             folder.SetBounds(0, dirs.Top - folder.Height, nav.Width, folder.Height);
             reqs.SetBounds(0, folder.Top - reqs.Height, nav.Width, reqs.Height);
-            baseLabel.SetBounds(22, reqs.Top - 58, nav.Width - 34, 52);
+            narItem.SetBounds(0, reqs.Top - narItem.Height, nav.Width, narItem.Height);
+            baseLabel.SetBounds(22, narItem.Top - 58, nav.Width - 34, 52);
         };
         return nav;
     }
@@ -13598,11 +13628,23 @@ public class DogovorForm : Form {
         withSpravka.Font = St.Base;
         withSpravka.ForeColor = St.Text;
         withSpravka.Cursor = Cursors.Hand;
-        withSpravka.Size = new Size(104, 38);
+        withSpravka.Size = new Size(104, 22);
         withSpravka.Anchor = AnchorStyles.Right | AnchorStyles.Top;
         withSpravka.Checked = memory.Get("СправкаСДоговором", "") == "1";
         withSpravka.CheckedChanged += delegate { memory.Values["СправкаСДоговором"] = withSpravka.Checked ? "1" : ""; memory.Save(); };
         tip.SetToolTip(withSpravka, "Вместе с договором сохранить и справку (данные прибора учёта) - заполнится из договора, в папку «Справки»");
+        // под «+ справка»: наряд на подключение - откроется после сохранения договора (дописать ТП, ВЛ, опору)
+        withNaryad = new CheckBox();
+        withNaryad.Name = "withNaryad";
+        withNaryad.Text = "+ наряд на подключение";
+        withNaryad.Font = St.Base;
+        withNaryad.ForeColor = St.Text;
+        withNaryad.Cursor = Cursors.Hand;
+        withNaryad.Size = new Size(190, 22);
+        withNaryad.Anchor = AnchorStyles.Right | AnchorStyles.Top;
+        withNaryad.Checked = memory.Get("НарядСДоговором", "") == "1";
+        withNaryad.CheckedChanged += delegate { memory.Values["НарядСДоговором"] = withNaryad.Checked ? "1" : ""; memory.Save(); };
+        tip.SetToolTip(withNaryad, "После сохранения договора открыть наряд на подключение: лицевой, Ф.И.О., объект, адрес возьмутся из договора, допишите ТП, ВЛ, опору");
         Button look = Ui.Button("Предпросмотр", false);
         look.Size = new Size(140, 38);
         look.Anchor = AnchorStyles.Right | AnchorStyles.Top;
@@ -13611,7 +13653,7 @@ public class DogovorForm : Form {
         Button create = Ui.Button("Сохранить договор", true);
         create.Size = new Size(210, 40);
         create.Anchor = AnchorStyles.Right | AnchorStyles.Top;
-        create.Click += delegate { Create(true, true); };
+        create.Click += delegate { CreateClick(); };
         tip.SetToolTip(create, "Заполнить шаблон, сохранить договор в папку «Договоры» и открыть в Word (Ctrl+S)");
         status.AutoSize = false;
         status.Font = St.Base;
@@ -13624,6 +13666,7 @@ public class DogovorForm : Form {
         p.Controls.Add(sp);
         p.Controls.Add(look);
         p.Controls.Add(withSpravka);
+        p.Controls.Add(withNaryad);
         p.Controls.Add(create);
         p.Controls.Add(status);
         p.Resize += delegate {
@@ -13637,7 +13680,12 @@ public class DogovorForm : Form {
             create.Location = new Point(p.ClientSize.Width - 24 - create.Width, 13);
             sp.Text = narrow ? "Справка" : "Создать справку";
             sp.Width = narrow ? 90 : 160;
-            withSpravka.Location = new Point(create.Left - 8 - withSpravka.Width, 14);
+            // «+ справка» и «+ наряд» - друг под другом
+            withNaryad.Text = narrow ? "+ наряд" : "+ наряд на подключение";
+            withNaryad.Width = narrow ? 104 : 190;
+            withSpravka.Width = withNaryad.Width;
+            withSpravka.Location = new Point(create.Left - 8 - withSpravka.Width, 9);
+            withNaryad.Location = new Point(withSpravka.Left, 34);
             look.Width = narrow ? 124 : 140;
             look.Location = new Point(withSpravka.Left - 10 - look.Width, 14);
             sp.Location = new Point(look.Left - 10 - sp.Width, 14);
@@ -15475,14 +15523,17 @@ public class SavedDialog : Form {
     readonly ListView list = new ListView();
     readonly TextBox find = Ui.Text(1);
     readonly List<string[]> rows = new List<string[]>();
-    readonly bool spravki;
+    readonly int kind;
 
-    public SavedDialog(string dir) : this(dir, false) { }
+    public SavedDialog(string dir) : this(dir, 0) { }
 
-    // spravki - сохранённые справки (данные справок), иначе - договоры
-    public SavedDialog(string dir, bool spravki) {
-        this.spravki = spravki;
-        Text = spravki ? "Сохранённые справки" : "Сохранённые договоры";
+    public SavedDialog(string dir, bool spravki) : this(dir, spravki ? 1 : 0) { }
+
+    // kind: 0 - сохранённые договоры, 1 - справки (данные справок), 2 - наряды
+    public SavedDialog(string dir, int kind) {
+        this.kind = kind;
+        bool spravki = kind == 1;
+        Text = kind == 1 ? "Сохранённые справки" : kind == 2 ? "Сохранённые наряды" : "Сохранённые договоры";
         Font = St.Base;
         BackColor = Color.White;
         StartPosition = FormStartPosition.CenterParent;
@@ -15509,7 +15560,7 @@ public class SavedDialog : Form {
         list.Columns.Add("Дата", 95);
         list.Columns.Add("Лицевой счёт", 140);
         list.Columns.Add("Потребитель", 250);
-        list.Columns.Add(spravki ? "Адрес" : "Адрес объекта", 300);
+        list.Columns.Add(kind == 0 ? "Адрес объекта" : "Адрес", 300);
         list.Columns.Add(spravki ? "Сохранена" : "Сохранён", 130);
         list.DoubleClick += delegate { Pick(); };
         list.KeyDown += delegate(object s, KeyEventArgs e) { if (e.KeyCode == Keys.Enter) { Pick(); e.SuppressKeyPress = true; } };
@@ -15534,6 +15585,8 @@ public class SavedDialog : Form {
                     try {
                         Dictionary<string, string> d = DogovorForm.ReadData(f);
                         string[] r = new string[] { Get(d, "data"), Get(d, "ls"), Get(d, "fio"), Get(d, "adres"), Get(d, spravki ? "сохранена" : "сохранён"), f };
+                        // наряд: дата - если указана в наряде
+                        if (kind == 2 && Get(d, "s_datoy") != "1") r[0] = "";
                         all.Add(new KeyValuePair<DateTime, string[]>(File.GetLastWriteTime(f), r));
                     } catch { }
                 }
@@ -15561,7 +15614,7 @@ public class SavedDialog : Form {
             list.Items.Add(it);
         }
         if (list.Items.Count == 0) {
-            ListViewItem it = new ListViewItem(new string[] { "", "", rows.Count == 0 ? (spravki ? "Сохранённых справок пока нет" : "Сохранённых договоров пока нет") : "Ничего не найдено", "", "" });
+            ListViewItem it = new ListViewItem(new string[] { "", "", rows.Count == 0 ? (kind == 1 ? "Сохранённых справок пока нет" : kind == 2 ? "Сохранённых нарядов пока нет" : "Сохранённых договоров пока нет") : "Ничего не найдено", "", "" });
             it.ForeColor = St.Hint;
             list.Items.Add(it);
         }
@@ -15597,7 +15650,8 @@ public class StartMenu : Form {
     readonly string here;
     DogovorForm dog;
     SpravkaForm spr;
-    readonly Tile dogTile, sprTile, jurTile, plTile, logTile;
+    NaryadForm nar;
+    readonly Tile dogTile, sprTile, narTile, jurTile, plTile, logTile;
     JurForm jur;
     JurPick jurPick;
     PlombyForm pl;
@@ -15610,7 +15664,7 @@ public class StartMenu : Form {
         Font = St.Base;
         BackColor = St.Back;
         StartPosition = FormStartPosition.CenterScreen;
-        ClientSize = new Size(640, 690);
+        ClientSize = new Size(640, 682);
         FormBorderStyle = FormBorderStyle.FixedSingle;
         MaximizeBox = false;
         KeyPreview = true;
@@ -15618,69 +15672,84 @@ public class StartMenu : Form {
 
         Panel top = new Panel();
         top.Dock = DockStyle.Top;
-        top.Height = 104;
+        top.Height = 94;
         top.BackColor = St.Nav;
         Label title = new Label();
         title.Text = "Оформление договора";
         title.Font = new Font("Segoe UI", 18f, FontStyle.Bold);
         title.ForeColor = Color.White;
         title.AutoSize = true;
-        title.Location = new Point(34, 22);
+        title.Location = new Point(34, 17);
         Label sub = new Label();
-        sub.Text = "электроснабжения - договор и справка по шаблонам Word";
+        sub.Text = "электроснабжения - договор, справка и наряд по шаблонам Word";
         sub.Font = St.Base;
         sub.ForeColor = St.NavText;
         sub.AutoSize = true;
-        sub.Location = new Point(37, 62);
+        sub.Location = new Point(37, 57);
         top.Controls.Add(title);
         top.Controls.Add(sub);
         Controls.Add(top);
 
+        // плитки поменьше (74 точки): шесть штук влезают и на экран 1366x768
         dogTile = new Tile("Создать договор", "по шаблону Word; фото документов; проверка по базе", St.TintOf("Договор").Mark);
-        dogTile.SetBounds(34, 122, 572, 86);
+        dogTile.SetBounds(34, 108, 572, 74);
         dogTile.Click += delegate { OpenDogovor(); };
         sprTile = new Tile("Создать справку", "данные прибора учёта - из договора или вручную", St.TintOf("Счётчики").Mark);
-        sprTile.SetBounds(34, 218, 572, 86);
+        sprTile.SetBounds(34, 190, 572, 74);
         sprTile.Click += delegate { OpenSpravka(this, null); };
+        narTile = new Tile("Наряд на подключение", "включение / отключение по справке или договору; ТП, ВЛ, опора", Color.FromArgb(214, 76, 76));
+        narTile.SetBounds(34, 272, 572, 74);
+        narTile.Click += delegate { OpenNaryad(this, null, null); };
         logTile = new Tile("Журнал справок", "вернувшиеся ответы - зелёным; забрать ответы с телефона", St.TintOf("Счётчики").Mark);
-        logTile.SetBounds(34, 314, 572, 86);
+        logTile.SetBounds(34, 354, 572, 74);
         logTile.Click += delegate { OpenLog(this); };
         jurTile = new Tile("Перевод из юр в физ", "адрес -> счётчик и лицевой из баз -> новый договор с гражданином", St.TintOf("Объект").Mark);
-        jurTile.SetBounds(34, 410, 572, 86);
+        jurTile.SetBounds(34, 436, 572, 74);
         jurTile.Click += delegate { OpenJur(); };
         Controls.Add(dogTile);
         Controls.Add(sprTile);
+        Controls.Add(narTile);
         Controls.Add(logTile);
         plTile = new Tile("Мои отчёты пломб", "партии пломб, что поставлено по договорам, пропущенные, печать отчёта", St.TintOf("Пломбы и оборудование").Mark);
-        plTile.SetBounds(34, 506, 572, 86);
+        plTile.SetBounds(34, 518, 572, 74);
         plTile.Click += delegate { OpenPlomby(); };
         Controls.Add(jurTile);
         Controls.Add(plTile);
 
-        int x = 34;
-        foreach (string[] l in new string[][] { new string[] { "Папка с договорами", "d" }, new string[] { "Папка со справками", "s" }, new string[] { "Справочники (списки)", "l" } }) {
+        // папки: договоры, справки, наряды; справочники
+        Label folders = new Label();
+        folders.Text = "Папки:";
+        folders.Font = St.Base;
+        folders.ForeColor = St.Hint;
+        folders.AutoSize = true;
+        folders.Location = new Point(34, 608);
+        Controls.Add(folders);
+        int x = 34 + TextRenderer.MeasureText(folders.Text, St.Base).Width + 4;
+        foreach (string[] l in new string[][] { new string[] { "договоры", "d" }, new string[] { "справки", "s" }, new string[] { "наряды", "n" }, new string[] { "Справочники (списки)", "l" } }) {
+            if (l[1] == "l") x += 24;
             LinkLabel link = new LinkLabel();
             link.Text = l[0];
             link.Font = St.Base;
             link.AutoSize = true;
             link.LinkColor = St.Accent;
-            link.Location = new Point(x, 612);
+            link.Location = new Point(x, 608);
             string what = l[1];
             link.LinkClicked += delegate { OpenPlace(what); };
             Controls.Add(link);
-            x += TextRenderer.MeasureText(l[0], St.Base).Width + 34;
+            x += TextRenderer.MeasureText(l[0], St.Base).Width + 16;
         }
         Label keys = new Label();
-        keys.Text = "Enter - создать договор, F2 - справка";
+        keys.Text = "Enter - создать договор, F2 - справка, F3 - наряд";
         keys.Font = St.Small;
         keys.ForeColor = St.Hint;
         keys.AutoSize = true;
-        keys.Location = new Point(36, 650);
+        keys.Location = new Point(36, 644);
         Controls.Add(keys);
 
         KeyDown += delegate(object s, KeyEventArgs e) {
             if (e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; OpenDogovor(); }
             else if (e.KeyCode == Keys.F2) { e.SuppressKeyPress = true; OpenSpravka(this, null); }
+            else if (e.KeyCode == Keys.F3) { e.SuppressKeyPress = true; OpenNaryad(this, null, null); }
         };
         Shown += delegate { RefreshTiles(); };
         Activated += delegate { RefreshTiles(); };
@@ -15695,7 +15764,12 @@ public class StartMenu : Form {
             if (spr != null && spr.Unsaved) {
                 spr.Show();
                 spr.Activate();
-                if (!spr.AskSaveBeforeExit()) { e.Cancel = true; Hide(); }
+                if (!spr.AskSaveBeforeExit()) { e.Cancel = true; Hide(); return; }
+            }
+            if (nar != null && nar.Unsaved) {
+                nar.Show();
+                nar.Activate();
+                if (!nar.AskSaveBeforeExit()) { e.Cancel = true; Hide(); }
             }
         };
     }
@@ -15709,6 +15783,8 @@ public class StartMenu : Form {
         dogTile.Invalidate();
         sprTile.Note = spr != null && spr.Unsaved ? "есть несохранённая справка - откроется она" : "";
         sprTile.Invalidate();
+        narTile.Note = nar != null && nar.Unsaved ? "есть несохранённый наряд - откроется он" : "";
+        narTile.Invalidate();
         int wait = SpravkaJournal.Waiting(here);
         logTile.Note = wait > 0 ? "ждём ответа: " + wait : "";
         logTile.Invalidate();
@@ -15735,6 +15811,18 @@ public class StartMenu : Form {
         if (spr.WindowState == FormWindowState.Minimized) spr.WindowState = FormWindowState.Normal;
         spr.Activate();
         if (from != spr) from.Hide();
+    }
+
+    // наряд на включение/отключение; from - куда вернётся «Назад»; данные договора или справки (или null - как было)
+    public void OpenNaryad(Form from, Dictionary<string, string> contract, Dictionary<string, string> spravka) {
+        if (nar == null || nar.IsDisposed) { nar = new NaryadForm(here); nar.Home = this; }
+        nar.Back = from;
+        if (contract != null) nar.FromContract(contract);
+        else if (spravka != null) nar.FromSpravka(spravka);
+        nar.Show();
+        if (nar.WindowState == FormWindowState.Minimized) nar.WindowState = FormWindowState.Normal;
+        nar.Activate();
+        if (from != nar) from.Hide();
     }
 
     // журнал справок; from - куда вернётся «Назад»
@@ -15802,7 +15890,7 @@ public class StartMenu : Form {
 
     void OpenPlace(string what) {
         Memory m = Memory.For(Settings);
-        string d = what == "d" ? DogovorForm.Folder(here, m) : what == "s" ? SpravkaForm.Folder(here) : Path.Combine(here, "spravochniki.txt");
+        string d = what == "d" ? DogovorForm.Folder(here, m) : what == "s" ? SpravkaForm.Folder(here) : what == "n" ? NaryadForm.Folder(here) : Path.Combine(here, "spravochniki.txt");
         try {
             if (what == "l") {
                 if (!File.Exists(d)) new Lists(d);
@@ -15817,6 +15905,7 @@ public class StartMenu : Form {
     // для проверки без окон
     public DogovorForm Dogovor { get { return dog; } }
     public SpravkaForm Spravka { get { return spr; } }
+    public NaryadForm Naryad { get { return nar; } }
     public JurForm Jur { get { return jur; } }
     public JurPick Pick { get { return jurPick; } }
     public PlombyForm Plomby { get { return pl; } }
@@ -15846,9 +15935,11 @@ public class Tile : Control {
         using (SolidBrush b = new SolidBrush(hover ? Color.FromArgb(246, 249, 253) : Color.White)) g.FillRectangle(b, ClientRectangle);
         using (SolidBrush b = new SolidBrush(mark)) g.FillRectangle(b, 0, 0, 8, Height);
         using (Pen p = new Pen(hover || Focused ? St.Accent : St.Border, hover || Focused ? 2f : 1f)) g.DrawRectangle(p, 1, 1, Width - 2, Height - 2);
-        TextRenderer.DrawText(g, Title, TitleFont, new Point(28, 10), St.Text);
-        TextRenderer.DrawText(g, Sub, St.Base, new Rectangle(30, 43, Width - 70, 22), St.Hint, TextFormatFlags.EndEllipsis);
-        if (Note.Length > 0) TextRenderer.DrawText(g, Note, St.Small, new Point(30, 63), Color.FromArgb(190, 105, 0));
+        // невысокая плитка (меню из шести) - строки плотнее
+        bool low = Height < 80;
+        TextRenderer.DrawText(g, Title, TitleFont, new Point(28, low ? 6 : 10), St.Text);
+        TextRenderer.DrawText(g, Sub, St.Base, new Rectangle(30, low ? 36 : 43, Width - 70, 22), St.Hint, TextFormatFlags.EndEllipsis);
+        if (Note.Length > 0) TextRenderer.DrawText(g, Note, St.Small, new Point(30, low ? 54 : 63), Color.FromArgb(190, 105, 0));
         // стрелка справа
         using (Pen p = new Pen(St.Accent, 2.5f)) {
             int cx = Width - 30, cy = Height / 2;
@@ -15900,6 +15991,8 @@ public class SpravkaForm : Form {
     public Form Back;                     // куда «Назад»: меню или окно договора
     bool loading, dirty;
     string savedFile, savedId;
+    CheckBox withNaryad;                  // после сохранения - наряд на подключение по этой справке
+    NaryadForm ownNaryad;
 
     // строки под таблицей, которые можно отключить галочкой: галочка -> поля этой строки
     static readonly string[][] LineKeys = {
@@ -15948,7 +16041,7 @@ public class SpravkaForm : Form {
             try { lists.Load(); FillLists(); } catch { }
         };
         KeyDown += delegate(object s, KeyEventArgs e) {
-            if (e.Control && e.KeyCode == Keys.S) { e.SuppressKeyPress = true; Save(true, true); }
+            if (e.Control && e.KeyCode == Keys.S) { e.SuppressKeyPress = true; SaveClick(); }
             else if (e.Control && e.KeyCode == Keys.P) { e.SuppressKeyPress = true; Preview(); }
             else if (e.KeyCode == Keys.Escape) { e.SuppressKeyPress = true; GoBack(); }
             else if (e.KeyCode == Keys.Enter && !e.Control && !e.Alt) {
@@ -16390,6 +16483,9 @@ public class SpravkaForm : Form {
             nav.Controls.Add(n);
             y += n.Height;
         }
+        NavItem narItem = new NavItem("Наряд на подключение…", true);
+        narItem.Click += delegate { MakeNaryad(); };
+        tip.SetToolTip(narItem, "Наряд на включение (отключение) по этой справке: лицевой, Ф.И.О., адрес возьмутся отсюда");
         NavItem openItem = new NavItem("Открыть сохранённую…", true);
         openItem.Click += delegate { OpenSaved(); };
         tip.SetToolTip(openItem, "Открыть сохранённую справку, чтобы исправить (пломбы, текст...) и сохранить заново");
@@ -16412,7 +16508,7 @@ public class SpravkaForm : Form {
         dirs.Click += delegate {
             try { Process.Start("notepad.exe", "\"" + lists.File + "\""); } catch (Exception ex) { MessageBox.Show(this, ex.Message, Text); }
         };
-        foreach (NavItem n in new NavItem[] { openItem, logItem, folder, dirs }) {
+        foreach (NavItem n in new NavItem[] { narItem, openItem, logItem, folder, dirs }) {
             n.Anchor = AnchorStyles.Left | AnchorStyles.Bottom | AnchorStyles.Right;
             nav.Controls.Add(n);
         }
@@ -16421,6 +16517,7 @@ public class SpravkaForm : Form {
             folder.SetBounds(0, dirs.Top - folder.Height, nav.Width, folder.Height);
             logItem.SetBounds(0, folder.Top - logItem.Height, nav.Width, logItem.Height);
             openItem.SetBounds(0, logItem.Top - openItem.Height, nav.Width, openItem.Height);
+            narItem.SetBounds(0, openItem.Top - narItem.Height, nav.Width, narItem.Height);
         };
         return nav;
     }
@@ -16470,8 +16567,19 @@ public class SpravkaForm : Form {
         Button save = Ui.Button("Сохранить справку", true);
         save.Size = new Size(210, 40);
         save.Anchor = AnchorStyles.Right | AnchorStyles.Top;
-        save.Click += delegate { Save(true, true); };
+        save.Click += delegate { SaveClick(); };
         tip.SetToolTip(save, "Заполнить шаблон spravka.docx, сохранить в папку «Справки» и открыть в Word (Ctrl+S)");
+        withNaryad = new CheckBox();
+        withNaryad.Name = "withNaryad";
+        withNaryad.Text = "+ наряд на подключение";
+        withNaryad.Font = St.Base;
+        withNaryad.ForeColor = St.Text;
+        withNaryad.Cursor = Cursors.Hand;
+        withNaryad.Size = new Size(190, 38);
+        withNaryad.Anchor = AnchorStyles.Right | AnchorStyles.Top;
+        withNaryad.Checked = memory.Get("НарядСоСправкой", "") == "1";
+        withNaryad.CheckedChanged += delegate { memory.Values["НарядСоСправкой"] = withNaryad.Checked ? "1" : ""; memory.Save(); };
+        tip.SetToolTip(withNaryad, "После сохранения справки открыть наряд на подключение: лицевой, Ф.И.О., адрес возьмутся из справки, допишите ТП, ВЛ, опору");
         status.AutoSize = false;
         status.Font = St.Base;
         status.TextAlign = ContentAlignment.MiddleLeft;
@@ -16479,6 +16587,7 @@ public class SpravkaForm : Form {
         p.Controls.Add(from);
         p.Controls.Add(clear);
         p.Controls.Add(look);
+        p.Controls.Add(withNaryad);
         p.Controls.Add(save);
         p.Controls.Add(status);
         p.Resize += delegate {
@@ -16489,7 +16598,11 @@ public class SpravkaForm : Form {
             clear.SetBounds(from.Right + 10, 14, narrow ? 100 : 110, 38);
             save.Width = narrow ? 180 : 210;
             save.Location = new Point(p.ClientSize.Width - 24 - save.Width, 13);
-            look.Location = new Point(save.Left - 10 - look.Width, 14);
+            withNaryad.Text = narrow ? "+ наряд" : "+ наряд на подключение";
+            withNaryad.Width = narrow ? 86 : 190;
+            withNaryad.Location = new Point(save.Left - 8 - withNaryad.Width, 14);
+            look.Width = narrow ? 124 : 140;
+            look.Location = new Point(withNaryad.Left - 10 - look.Width, 14);
             status.SetBounds(clear.Right + (narrow ? 14 : 24), 14, Math.Max(10, look.Left - clear.Right - (narrow ? 28 : 48)), 38);
             status.Font = narrow || status.Width < 300 ? St.Small : St.Base;
         };
@@ -17044,6 +17157,33 @@ public class SpravkaForm : Form {
         }
     }
 
+    // «Сохранить справку» (и Ctrl+S): галочка «+ наряд на подключение» - после сохранения открыть наряд по этой справке
+    public string SaveClick() {
+        string f = Save(true, true);
+        if (f != null && withNaryad != null && withNaryad.Checked) MakeNaryad();
+        return f;
+    }
+
+    // наряд на включение по этой справке (прибор учёта 1): окно наряда, данные - отсюда
+    public void MakeNaryad() {
+        if (Home != null) { Home.OpenNaryad(this, null, Data()); return; }
+        if (ownNaryad == null || ownNaryad.IsDisposed) ownNaryad = new NaryadForm(here);
+        ownNaryad.Back = this;
+        ownNaryad.FromSpravka(Data());
+        ownNaryad.Show();
+        Hide();
+    }
+
+    // поля справки - как в её сохранённых данных (pu_n, pu1_ls...)
+    public Dictionary<string, string> Data() {
+        Dictionary<string, string> d = new Dictionary<string, string>();
+        foreach (string k in inp.Keys) d[k] = V(k);
+        d["pu_n"] = meters.Count.ToString();
+        for (int i = 1; i <= meters.Count; i++)
+            foreach (string k in MeterKeys) d["pu" + i + "_" + k] = V("pu" + i + "_" + k);
+        return d;
+    }
+
     // перед выходом из программы: несохранённая справка - спросить. true - можно выходить
     public string SavedId { get { return savedId; } }
 
@@ -17243,6 +17383,879 @@ public class MeterBox : Panel {
         TextRenderer.DrawText(g, Info, St.Base, new Rectangle(x, 0, right - x, Head), St.Hint,
             TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
     }
+}
+
+// Наряд на включение (подключение) / отключение электроустановки - по шаблону naryad.docx (бланк «Энергосбыта»: наряд,
+// линия отреза, отрывной корешок). Лицевой, потребитель, объект, адрес - из справки или договора (открытых или сохранённых)
+// или вручную; своё у наряда: включение или отключение, кому (ОГРЭС), причина, место (ТП, ВЛ, опора), № и дата (пусто -
+// в наряде линия, впишут от руки), начальник ГРП и инженер. Наряды - в папку «Наряды», имя по адресу.
+public class NaryadForm : Form {
+    readonly string here, templateFile;
+    readonly Lists lists;
+    readonly Memory memory;
+    readonly Dictionary<string, Control> inp = new Dictionary<string, Control>();
+    readonly List<Card> cards = new List<Card>();
+    readonly Panel content = new Panel();
+    readonly Label head = new Label(), headSub = new Label(), status = new Label();
+    readonly ToolTip tip = new ToolTip();
+    public StartMenu Home;
+    public Form Back;                     // куда «Назад»: меню, справка или договор
+    bool loading, dirty;
+    string savedFile;
+    // строки, которые собираются сами из полей, - пока их не поправили руками
+    string autoAdres = "", autoPotr = "", autoMesto = "";
+
+    static readonly string[] AddrKeys = { "np_tip", "np", "selsovet", "ulica_tip", "ulica", "dom", "korp", "kv" };
+    static readonly string[] Months = { "января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября", "ноября", "декабря" };
+
+    public bool Unsaved { get { return dirty; } }
+
+    public static string Folder(string here) { return Path.Combine(here, "Наряды"); }
+
+    // данные сохранённых нарядов (поля окна) - открыть наряд заново
+    public static string DataFolder(string here) { return Path.Combine(Folder(here), "данные"); }
+
+    public NaryadForm(string here) {
+        this.here = here;
+        templateFile = Path.Combine(here, "naryad.docx");
+        lists = new Lists(Path.Combine(here, "spravochniki.txt"));
+        memory = Memory.For(Path.Combine(here, "nastroiki.txt"));
+
+        Text = "Наряд на включение / отключение";
+        Font = St.Base;
+        BackColor = St.Back;
+        StartPosition = FormStartPosition.CenterScreen;
+        Rectangle wa = Screen.PrimaryScreen.WorkingArea;
+        Size = new Size(Math.Min(1180, wa.Width), Math.Min(860, wa.Height));
+        MinimumSize = new Size(860, 560);
+        KeyPreview = true;
+        try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
+
+        BuildCards();
+        content.Dock = DockStyle.Fill;
+        content.AutoScroll = true;
+        content.BackColor = St.Back;
+        foreach (Card c in cards) content.Controls.Add(c.Panel);
+        content.Resize += delegate { LayoutCards(); };
+        Controls.Add(content);
+        Controls.Add(BuildHeader());
+        Controls.Add(BuildBottom());
+        Controls.Add(BuildNav());
+
+        FillLists();
+        Clear();
+        Shown += delegate { LayoutCards(); FillLists(); };
+        Activated += delegate {
+            if (!lists.Changed()) return;
+            try { lists.Load(); FillLists(); } catch { }
+        };
+        KeyDown += delegate(object s, KeyEventArgs e) {
+            if (e.Control && e.KeyCode == Keys.S) { e.SuppressKeyPress = true; Save(true, true); }
+            else if (e.Control && e.KeyCode == Keys.P) { e.SuppressKeyPress = true; Preview(); }
+            else if (e.KeyCode == Keys.Escape) { e.SuppressKeyPress = true; GoBack(); }
+            else if (e.KeyCode == Keys.Enter && !e.Control && !e.Alt) {
+                Control a = ActiveControl;
+                if (a == null || (a is TextBox && ((TextBox)a).Multiline) || a is Button) return;
+                if (a is ComboBox && ((ComboBox)a).DroppedDown) return;
+                e.SuppressKeyPress = true;
+                SelectNextControl(a, true, true, true, true);
+            }
+        };
+        FormClosing += delegate(object s, FormClosingEventArgs e) {
+            // крестик окна - назад (в меню, к справке или договору); наряд остаётся как был
+            if (Home != null && e.CloseReason == CloseReason.UserClosing) { e.Cancel = true; GoBack(); }
+        };
+    }
+
+    // ---------- поля ----------
+
+    TextBox T(string key, string cue) {
+        TextBox t = Ui.Text(1);
+        Reg(key, t);
+        if (cue != null) t.HandleCreated += delegate { Ui.Cue(t, cue); };
+        return t;
+    }
+
+    Combo C(string key, string cue) {
+        Combo c = new Combo(true, false);
+        Reg(key, c);
+        if (cue != null) c.HandleCreated += delegate { Ui.Cue(c, cue); };
+        return c;
+    }
+
+    CheckBox X(string key, string text) {
+        CheckBox c = new CheckBox();
+        c.Text = text;
+        c.Font = St.Base;
+        c.ForeColor = St.Text;
+        c.BackColor = Color.Transparent;
+        c.Cursor = Cursors.Hand;
+        Reg(key, c);
+        return c;
+    }
+
+    void Reg(string key, Control c) {
+        inp[key] = c;
+        c.Name = key;
+        EventHandler h = delegate {
+            if (loading) return;
+            dirty = true;
+            // строки наряда из частей: адрес, потребитель, место
+            if (Array.IndexOf(AddrKeys, key) >= 0) Compose("adres");
+            else if (key == "fio" || key == "tel") Compose("potr");
+            else if (key == "tp" || key == "vl" || key == "opora") Compose("mesto");
+            else if (key == "vid") PrichinaFor();
+            RefreshState();
+        };
+        if (c is Seg) ((Seg)c).Changed += delegate { Enable(); h(c, EventArgs.Empty); };
+        else if (c is ComboBox) { ((ComboBox)c).TextChanged += h; ((ComboBox)c).SelectedIndexChanged += h; }
+        else if (c is DateBox) ((DateBox)c).ValueChanged += h;
+        else if (c is CheckBox) ((CheckBox)c).CheckedChanged += delegate { Enable(); h(c, EventArgs.Empty); };
+        else c.TextChanged += h;
+        if (c is TextBox || c is ComboBox) {
+            c.Enter += delegate { c.BackColor = St.Focus; };
+            c.Leave += delegate { c.BackColor = c.Enabled ? Color.White : St.Disabled; };
+        }
+        // с заглавной, когда уходим из поля: «боровляны» -> «Боровляны»
+        if (key == "np" || key == "ulica" || key == "fio") c.Leave += delegate { string v = c.Text.Trim(); if (v.Length > 0 && Up(v) != v) c.Text = Up(v); };
+    }
+
+    public string V(string key) {
+        Control c;
+        if (!inp.TryGetValue(key, out c)) return "";
+        if (c is Seg) return ((Seg)c).Value;
+        if (c is DateBox) return ((DateBox)c).Text2;
+        if (c is CheckBox) return ((CheckBox)c).Checked ? "1" : "";
+        return c.Text.Trim();
+    }
+
+    public void SetV(string key, string v) {
+        Control c;
+        if (!inp.TryGetValue(key, out c)) return;
+        v = v ?? "";
+        if (c is Seg) ((Seg)c).Value = v;
+        else if (c is CheckBox) ((CheckBox)c).Checked = v == "1";
+        else if (c is DateBox) {
+            DateTime d;
+            if (DateTime.TryParseExact(v, "dd.MM.yyyy", CultureInfo.InvariantCulture, DateTimeStyles.None, out d)) ((DateBox)c).Value = d;
+        } else if (c is Combo) ((Combo)c).Value = v;
+        else c.Text = v;
+    }
+
+    // chars - ширина поля в знаках; 0 - во всю оставшуюся ширину
+    Cell F(string caption, Control c, int chars) {
+        Cell x = Cell.F(caption, c, chars == 0 ? 4 : 1);
+        x.W = chars;
+        return x;
+    }
+
+    // ---------- разделы ----------
+
+    void BuildCards() {
+        Card c = new Card("Наряд", "№ и дату можно не писать - в наряде будет линия, впишут от руки", 4);
+        cards.Add(c);
+        Seg vid = new Seg("включение", "отключение");
+        Reg("vid", vid);
+        DateBox date = new DateBox();
+        Reg("data", date);
+        c.Grid.Row(F("Наряд на", vid, 24), F("№ наряда", T("nomer", "пусто - линия"), 12), F(null, X("s_datoy", "указать дату"), 15),
+            F("Дата наряда", date, 14), F("Кому (строка по центру)", C("komu", "ОГРЭС"), 0));
+        c.Grid.Row(F("Начальник ГРП", C("nach", "Фамилия И.О."), 24), F("Инженер группы по работе с потребителями", C("inzh", "Фамилия И.О."), 24));
+
+        c = new Card("Потребитель", "из справки или договора - кнопки внизу; можно вписать", 4);
+        cards.Add(c);
+        c.Grid.Row(F("Лицевой счёт (с припиской района)", T("ls", "5002123456789"), 17), F("Фамилия, имя, отчество", T("fio", "Иванов Иван Иванович"), 0),
+            F("Телефон", T("tel", "+375..."), 18));
+        c.Grid.Row(F("Потребитель в наряде (собирается сам: «Гр. Ф.И.О. (телефон)», можно поправить)", T("potr", null), 0));
+
+        c = new Card("Объект", "объект, причина и адрес", 4);
+        cards.Add(c);
+        c.Grid.Row(F("Объект", C("obekt", "стройплощадка жилого дома"), 34), F("Причина включения (отключения)", C("prichina", "Допуск в эксплуатацию"), 0));
+        c.Grid.Row(F("Тип н.п.", C("np_tip", null), 7), F("Населённый пункт / СТ", C("np", null), 0), F("Сельсовет", C("selsovet", null), 16));
+        c.Grid.Row(F("Тип улицы", C("ulica_tip", null), 7), F("Улица", C("ulica", null), 0), F("Дом / участок", T("dom", null), 8),
+            F("Корпус", T("korp", null), 6), F("Квартира", T("kv", null), 6));
+        c.Grid.Row(F("Адрес в наряде (собирается сам из полей выше, с сельсоветом; можно поправить)", T("adres", null), 0));
+
+        c = new Card("Место включения", "трансформаторная подстанция, линия, опора", 4);
+        cards.Add(c);
+        c.Grid.Row(F("ТП №", T("tp", null), 8), F("ВЛ №", T("vl", null), 6), F("Опора №", T("opora", null), 8),
+            F("Место в наряде (собирается само, можно поправить)", T("mesto", null), 0));
+    }
+
+    void FillLists() {
+        bool was = loading;
+        loading = true;
+        try {
+            Items("np_tip", lists.Get("Тип населённого пункта"));
+            Items("ulica_tip", lists.Get("Тип улицы"));
+            Items("np", memory.Hist("нп"));
+            Items("ulica", memory.Hist("улица"));
+            Items("selsovet", With(lists.Get("Сельсовет"), memory.Hist("сельсовет")));
+            Items("komu", With(lists.Get("Наряд: кому"), memory.Hist("наряд кому")));
+            Items("prichina", With(lists.Get("Наряд: причина"), memory.Hist("наряд причина")));
+            Items("obekt", With(lists.Get("Объект электроснабжения"), memory.Hist("наряд объект")));
+            Items("nach", Names());
+            Items("inzh", Engineers());
+        } finally { loading = was; }
+    }
+
+    void Items(string key, List<string> items) { Combo c = inp[key] as Combo; if (c != null) c.SetItems(items); }
+
+    static List<string> With(List<string> a, List<string> b) {
+        List<string> r = new List<string>(a);
+        foreach (string s in b) {
+            bool found = false;
+            foreach (string x in r) if (string.Compare(x, s, StringComparison.OrdinalIgnoreCase) == 0) found = true;
+            if (!found) r.Add(s);
+        }
+        return r;
+    }
+
+    List<string> Engineers() { return lists.Get("Оформил"); }
+
+    List<string> Names() {
+        List<string> r = new List<string>();
+        foreach (string[] s in lists.Signers()) r.Add(s[0]);
+        return r;
+    }
+
+    void Enable() {
+        bool on = V("s_datoy") == "1";
+        Control d = inp["data"];
+        d.Enabled = on;
+    }
+
+    // ---------- строки из частей ----------
+
+    // «д. Новый Двор, ул. Рябиновая, д. 12 (Шершунский с/с)»; СТ - «СТ «Ромашка», уч. 15»
+    static string AddressFrom(string npTip, string np, string ss, string ulTip, string ul, string dom, string korp, string kv) {
+        List<string> p = new List<string>();
+        bool st = npTip.ToUpper() == "СТ" || npTip.ToLower() == "с/т";
+        np = Up(np);
+        if (np.Length > 0) p.Add(st ? npTip + " «" + np.Trim('«', '»', '"') + "»" : (npTip + " " + np).Trim());
+        if (ul.Length > 0) p.Add((ulTip + " " + Up(ul)).Trim());
+        if (dom.Length > 0) p.Add((st ? "уч. " : "д. ") + dom);
+        if (korp.Length > 0) p.Add("корп. " + korp);
+        if (kv.Length > 0) p.Add("кв. " + kv);
+        string a = string.Join(", ", p.ToArray());
+        if (ss.Length > 0) a += (a.Length > 0 ? " " : "") + "(" + SelsovetName(ss) + " с/с)";
+        return a;
+    }
+
+    // «Шершунский» -> «Шершунский»; «Шершунский с/с» и «Шершунский сельсовет» - без повтора
+    static string SelsovetName(string s) {
+        string t = s.Trim();
+        foreach (string end in new string[] { " с/с", " сельсовет", " с/с." })
+            if (t.ToLower().EndsWith(end)) t = t.Substring(0, t.Length - end.Length).Trim();
+        return t;
+    }
+
+    string AutoOf(string key) {
+        if (key == "adres") return AddressFrom(V("np_tip"), V("np"), V("selsovet"), V("ulica_tip"), V("ulica"), V("dom"), V("korp"), V("kv"));
+        if (key == "potr") return V("fio").Length == 0 ? "" : "Гр. " + V("fio") + (V("tel").Length > 0 ? " (" + V("tel") + ")" : "");
+        List<string> m = new List<string>();
+        if (V("tp").Length > 0) m.Add("ТП № " + V("tp"));
+        if (V("vl").Length > 0) m.Add("ВЛ № " + V("vl"));
+        if (V("opora").Length > 0) m.Add("опора № " + V("opora"));
+        return string.Join(", ", m.ToArray());
+    }
+
+    // части поменялись - строка собирается заново, если её не правили руками
+    void Compose(string key) {
+        string a = AutoOf(key);
+        string prev = key == "adres" ? autoAdres : key == "potr" ? autoPotr : autoMesto;
+        string cur = V(key);
+        if (cur == prev || cur.Length == 0) {
+            bool was = loading;
+            loading = true;
+            try { inp[key].Text = a; } finally { loading = was; }
+        }
+        if (key == "adres") autoAdres = a; else if (key == "potr") autoPotr = a; else autoMesto = a;
+    }
+
+    void ComposeAll() { Compose("adres"); Compose("potr"); Compose("mesto"); }
+
+    // включение - причина по умолчанию «Допуск в эксплуатацию»; для отключения своей нет - пусто (вписать)
+    void PrichinaFor() {
+        string def = First(lists.Get("Наряд: причина"));
+        bool was = loading;
+        loading = true;
+        try {
+            if (V("vid") == "отключение" && V("prichina") == def) SetV("prichina", "");
+            else if (V("vid") == "включение" && V("prichina").Length == 0) SetV("prichina", def);
+        } finally { loading = was; }
+    }
+
+    // ---------- окно ----------
+
+    Control BuildNav() {
+        Panel nav = new Panel();
+        nav.Dock = DockStyle.Left;
+        nav.Width = 252;
+        nav.BackColor = St.Nav;
+        Label title = new Label();
+        title.Text = "Наряд";
+        title.Font = new Font("Segoe UI", 15f, FontStyle.Bold);
+        title.ForeColor = Color.White;
+        title.SetBounds(22, 22, 210, 34);
+        Label sub = new Label();
+        sub.Text = "на включение / отключение";
+        sub.Font = St.Small;
+        sub.ForeColor = St.NavText;
+        sub.SetBounds(24, 58, 210, 20);
+        nav.Controls.Add(title);
+        nav.Controls.Add(sub);
+        NavItem back = new NavItem("← Назад", false);
+        back.SetBounds(0, 100, nav.Width, back.Height);
+        back.Click += delegate { GoBack(); };
+        nav.Controls.Add(back);
+        tip.SetToolTip(back, "Вернуться (наряд не пропадёт) - Esc");
+        int y = 150;
+        foreach (Card c in cards) {
+            NavItem n = new NavItem(c.Name, false);
+            n.Mark = St.TintOf(c.Name).Mark;
+            n.SetBounds(0, y, nav.Width, n.Height);
+            Card card = c;
+            n.Click += delegate { content.AutoScrollPosition = new Point(0, Math.Max(0, card.Panel.Top - content.AutoScrollPosition.Y - 4)); };
+            nav.Controls.Add(n);
+            y += n.Height;
+        }
+        NavItem openItem = new NavItem("Открыть сохранённый…", true);
+        openItem.Click += delegate { OpenSaved(); };
+        tip.SetToolTip(openItem, "Открыть сохранённый наряд, чтобы исправить и сохранить заново");
+        NavItem folder = new NavItem("Папка с нарядами", true);
+        folder.Click += delegate {
+            try { Directory.CreateDirectory(Folder(here)); Process.Start("explorer.exe", "\"" + Folder(here) + "\""); }
+            catch (Exception ex) { MessageBox.Show(this, ex.Message, Text); }
+        };
+        NavItem dirs = new NavItem("Справочники (списки)", true);
+        dirs.Click += delegate {
+            try { Process.Start("notepad.exe", "\"" + lists.File + "\""); } catch (Exception ex) { MessageBox.Show(this, ex.Message, Text); }
+        };
+        foreach (NavItem n in new NavItem[] { openItem, folder, dirs }) {
+            n.Anchor = AnchorStyles.Left | AnchorStyles.Bottom | AnchorStyles.Right;
+            nav.Controls.Add(n);
+        }
+        nav.Resize += delegate {
+            dirs.SetBounds(0, nav.ClientSize.Height - 20 - dirs.Height, nav.Width, dirs.Height);
+            folder.SetBounds(0, dirs.Top - folder.Height, nav.Width, folder.Height);
+            openItem.SetBounds(0, folder.Top - openItem.Height, nav.Width, openItem.Height);
+        };
+        return nav;
+    }
+
+    Control BuildHeader() {
+        Panel p = new Panel();
+        p.Dock = DockStyle.Top;
+        p.Height = 74;
+        p.BackColor = St.Back;
+        head.Font = St.Big;
+        head.ForeColor = St.Text;
+        head.AutoSize = true;
+        head.Location = new Point(28, 14);
+        headSub.Font = St.Small;
+        headSub.ForeColor = St.Hint;
+        headSub.AutoSize = true;
+        headSub.Location = new Point(30, 46);
+        p.Controls.Add(head);
+        p.Controls.Add(headSub);
+        return p;
+    }
+
+    Control BuildBottom() {
+        Panel p = new Panel();
+        p.Dock = DockStyle.Bottom;
+        p.Height = 66;
+        p.BackColor = Color.White;
+        p.Paint += delegate(object s, PaintEventArgs e) {
+            using (Pen pen = new Pen(St.Border)) e.Graphics.DrawLine(pen, 0, 0, p.Width, 0);
+        };
+        Button fromSpr = Ui.Button("Из справки…", false);
+        fromSpr.SetBounds(24, 14, 130, 38);
+        fromSpr.Click += delegate { FromSaved(true); };
+        tip.SetToolTip(fromSpr, "Взять лицевой, Ф.И.О., телефон, адрес из сохранённой справки (прибор учёта 1)");
+        Button fromDog = Ui.Button("Из договора…", false);
+        fromDog.SetBounds(164, 14, 130, 38);
+        fromDog.Click += delegate { FromSaved(false); };
+        tip.SetToolTip(fromDog, "Взять лицевой, Ф.И.О., телефон, объект, адрес с сельсоветом из сохранённого договора");
+        Button clear = Ui.Button("Очистить", false);
+        clear.SetBounds(304, 14, 100, 38);
+        clear.Click += delegate {
+            if (dirty && MessageBox.Show(this, "Очистить наряд? Введённое пропадёт.", Text, MessageBoxButtons.YesNo, MessageBoxIcon.Question,
+                    MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
+            Clear();
+        };
+        Button look = Ui.Button("Предпросмотр", false);
+        look.Size = new Size(140, 38);
+        look.Anchor = AnchorStyles.Right | AnchorStyles.Top;
+        look.Click += delegate { Preview(); };
+        tip.SetToolTip(look, "Посмотреть наряд в Word, ничего не сохраняя (Ctrl+P). Открывается только для чтения");
+        Button save = Ui.Button("Сохранить наряд", true);
+        save.Size = new Size(200, 40);
+        save.Anchor = AnchorStyles.Right | AnchorStyles.Top;
+        save.Click += delegate { Save(true, true); };
+        tip.SetToolTip(save, "Заполнить шаблон naryad.docx, сохранить в папку «Наряды» и открыть в Word (Ctrl+S)");
+        status.AutoSize = false;
+        status.Font = St.Base;
+        status.TextAlign = ContentAlignment.MiddleLeft;
+        status.Anchor = AnchorStyles.Left | AnchorStyles.Top | AnchorStyles.Right;
+        p.Controls.Add(fromSpr);
+        p.Controls.Add(fromDog);
+        p.Controls.Add(clear);
+        p.Controls.Add(look);
+        p.Controls.Add(save);
+        p.Controls.Add(status);
+        p.Resize += delegate {
+            bool narrow = p.ClientSize.Width < 1100;
+            fromSpr.Width = fromDog.Width = narrow ? 112 : 130;
+            fromSpr.Text = narrow ? "Справка…" : "Из справки…";
+            fromDog.Text = narrow ? "Договор…" : "Из договора…";
+            fromDog.Left = fromSpr.Right + 8;
+            clear.SetBounds(fromDog.Right + 8, 14, narrow ? 92 : 100, 38);
+            save.Width = narrow ? 170 : 200;
+            save.Location = new Point(p.ClientSize.Width - 24 - save.Width, 13);
+            look.Location = new Point(save.Left - 10 - look.Width, 14);
+            status.SetBounds(clear.Right + (narrow ? 12 : 20), 14, Math.Max(10, look.Left - clear.Right - (narrow ? 24 : 40)), 38);
+            status.Font = narrow || status.Width < 300 ? St.Small : St.Base;
+        };
+        return p;
+    }
+
+    void LayoutCards() {
+        content.SuspendLayout();
+        int full = content.Width - SystemInformation.VerticalScrollBarWidth;
+        int w = Math.Max(600, Math.Min(full - 32, 1060));
+        int x = Math.Max(16, (full - w) / 2);
+        int y = 4 + content.AutoScrollPosition.Y;
+        foreach (Card c in cards) {
+            int h = c.Layout(w);
+            c.Panel.Location = new Point(x + content.AutoScrollPosition.X, y);
+            y += h + 10;
+        }
+        content.AutoScrollMinSize = new Size(0, y - content.AutoScrollPosition.Y + 6);
+        content.ResumeLayout();
+    }
+
+    public void GoBack() {
+        Hide();
+        if (Home != null) Home.Return(Back);
+        else if (Back != null && !Back.IsDisposed) { Back.Show(); Back.Activate(); }
+    }
+
+    // ---------- данные ----------
+
+    public void Clear() {
+        loading = true;
+        try {
+            foreach (KeyValuePair<string, Control> kv in inp) if (!(kv.Value is DateBox) && !(kv.Value is Seg)) SetV(kv.Key, "");
+            ((DateBox)inp["data"]).Value = DateTime.Today;
+            SetV("vid", "включение");
+            SetV("s_datoy", memory.Get("НарядСДатой", ""));
+            SetV("komu", memory.Get("НарядКому", First(lists.Get("Наряд: кому"))));
+            SetV("prichina", First(lists.Get("Наряд: причина")));
+            SetV("obekt", memory.Get("НарядОбъект", ""));
+            string eng = memory.Get("НарядИнженер", memory.Get("СправкаИнженер", ""));
+            SetV("inzh", Engineers().Contains(eng) ? eng : First(Engineers()));
+            SetV("nach", memory.Get("НарядНачальник", memory.Get("СправкаНачальник", First(Names()))));
+            autoAdres = autoPotr = autoMesto = "";
+            savedFile = null;
+        } finally { loading = false; }
+        dirty = false;
+        Enable();
+        head.Text = "Новый наряд";
+        headSub.Text = "Наряд на включение (отключение) - возьмите данные из справки или договора и допишите ТП, ВЛ, опору";
+        RefreshState();
+    }
+
+    static string Up(string s) { return s.Length == 0 ? s : char.ToUpper(s[0]) + s.Substring(1); }
+
+    static string First(List<string> l) { return l.Count > 0 ? l[0] : ""; }
+
+    static string Get(Dictionary<string, string> d, string k) {
+        string v;
+        return d != null && d.TryGetValue(k, out v) && v != null ? v.Trim() : "";
+    }
+
+    static string Digits(string s) {
+        StringBuilder sb = new StringBuilder();
+        foreach (char c in s) if (char.IsDigit(c)) sb.Append(c);
+        return sb.ToString();
+    }
+
+    // лицевой в наряде - как в программе, с припиской района: 5002 + 9 цифр номера в базе
+    string FullLs(string ls) {
+        string d = Digits(ls);
+        if (d.Length == 9) {
+            string pre = Digits(memory.Get("ЛицевойПриписка", "5002"));
+            return (pre.Length > 0 ? pre : "5002") + d;
+        }
+        return d.Length > 0 ? d : ls;
+    }
+
+    // из договора: лицевой, Ф.И.О., телефон, объект, адрес с сельсоветом, кто оформил, начальник ГРП
+    public void FromContract(Dictionary<string, string> d) {
+        loading = true;
+        try {
+            SetV("ls", FullLs(Get(d, "ls")));
+            SetV("fio", Get(d, "fio"));
+            SetV("tel", Get(d, "telefon"));
+            foreach (string k in AddrKeys) SetV(k, k == "np" || k == "ulica" ? Up(Get(d, k)) : Get(d, k));
+            if (Get(d, "obekt").Length > 0) SetV("obekt", Get(d, "obekt"));
+            if (Get(d, "oformil").Length > 0) SetV("inzh", Get(d, "oformil"));
+            if (Get(d, "podp").Length > 0) SetV("nach", Get(d, "podp"));
+            SetV("adres", "");
+            SetV("potr", "");
+            autoAdres = autoPotr = "";
+            ComposeAll();
+            // адреса по частям нет (старый договор) - строка адреса договора
+            if (V("adres").Length == 0 && Get(d, "adres").Length > 0) SetV("adres", Get(d, "adres"));
+            savedFile = null;
+        } finally { loading = false; }
+        dirty = true;
+        Enable();
+        head.Text = ("Наряд " + V("ls") + " " + Short(V("fio"))).Trim();
+        headSub.Text = "Заполнено из договора - допишите место включения (ТП, ВЛ, опора) и проверьте причину";
+        RefreshState();
+    }
+
+    // из справки (её данные: pu1_ls, pu1_fio...): прибор учёта 1; сельсовета в справке нет - из договора с тем же лицевым, если он есть
+    public void FromSpravka(Dictionary<string, string> d) {
+        int n;
+        if (!int.TryParse(Get(d, "pu_n"), out n)) n = 1;
+        loading = true;
+        try {
+            string p = "pu1_";
+            // справки прежних версий - общие лицевой, Ф.И.О., адрес
+            string ls = Get(d, p + "ls").Length > 0 ? Get(d, p + "ls") : Get(d, "ls");
+            SetV("ls", FullLs(ls));
+            SetV("fio", Get(d, p + "fio").Length > 0 ? Get(d, p + "fio") : Get(d, "fio"));
+            SetV("tel", Get(d, p + "tel").Length > 0 ? Get(d, p + "tel") : Get(d, "tel"));
+            foreach (string k in AddrKeys) if (k != "selsovet") SetV(k, k == "np" || k == "ulica" ? Up(Get(d, p + k)) : Get(d, p + k));
+            SetV("selsovet", "");
+            if (Get(d, "inzh").Length > 0) SetV("inzh", Get(d, "inzh"));
+            if (Get(d, "nach").Length > 0) SetV("nach", Get(d, "nach"));
+            Dictionary<string, string> dog = ContractWithLs(ls);
+            if (dog != null) {
+                // лицевой с припиской района - как в договоре (в справке - номер в базе, 9 цифр)
+                if (Digits(Get(dog, "ls")).Length == 13) SetV("ls", Digits(Get(dog, "ls")));
+                if (Get(dog, "selsovet").Length > 0) SetV("selsovet", Get(dog, "selsovet"));
+                if (Get(dog, "obekt").Length > 0) SetV("obekt", Get(dog, "obekt"));
+            }
+            SetV("adres", "");
+            SetV("potr", "");
+            autoAdres = autoPotr = "";
+            ComposeAll();
+            // адреса по частям нет (справка прежней версии) - строка адреса справки
+            if (V("adres").Length == 0) SetV("adres", Get(d, p + "adres").Length > 0 ? Get(d, p + "adres") : Get(d, "adres"));
+            savedFile = null;
+            headSub.Text = "Заполнено из справки" + (n > 1 ? " (прибор учёта 1 из " + n + ")" : "") + (dog != null ? " и договора с тем же лицевым" : "") +
+                " - допишите место включения (ТП, ВЛ, опора)" + (V("selsovet").Length == 0 ? " и сельсовет" : "");
+        } finally { loading = false; }
+        dirty = true;
+        Enable();
+        head.Text = ("Наряд " + V("ls") + " " + Short(V("fio"))).Trim();
+        RefreshState();
+    }
+
+    // сохранённый договор с тем же лицевым (последний), его данные; нет - null
+    Dictionary<string, string> ContractWithLs(string ls) {
+        string nab = BaseLink.Nab(ls);
+        if (nab.Length == 0) return null;
+        try {
+            string dir = Path.Combine(DogovorForm.Folder(here, memory), "данные");
+            if (!Directory.Exists(dir)) return null;
+            Dictionary<string, string> best = null;
+            DateTime when = DateTime.MinValue;
+            foreach (string f in Directory.GetFiles(dir, "*.txt")) {
+                try {
+                    Dictionary<string, string> d = DogovorForm.ReadData(f);
+                    if (BaseLink.Nab(Get(d, "ls")) != nab) continue;
+                    DateTime t = File.GetLastWriteTime(f);
+                    if (best == null || t > when) { best = d; when = t; }
+                } catch { }
+            }
+            return best;
+        } catch { return null; }
+    }
+
+    static string Short(string fio) {
+        string[] w = fio.Split(new char[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+        if (w.Length == 0) return "";
+        string s = w[0];
+        for (int i = 1; i < w.Length && i < 3; i++) s += (i == 1 ? " " : "") + char.ToUpper(w[i][0]) + ".";
+        return s;
+    }
+
+    // «Из справки…» / «Из договора…» - выбрать сохранённую
+    void FromSaved(bool spravka) {
+        string dir = spravka ? SpravkaForm.DataFolder(here) : Path.Combine(DogovorForm.Folder(here, memory), "данные");
+        if (!Directory.Exists(dir) || Directory.GetFiles(dir, "*.txt").Length == 0) {
+            MessageBox.Show(this, (spravka ? "Сохранённых справок" : "Сохранённых договоров") + " пока нет:\n" + dir, Text);
+            return;
+        }
+        if (dirty && MessageBox.Show(this, "Заменить введённое в наряде данными " + (spravka ? "справки" : "договора") + "?", Text, MessageBoxButtons.YesNo,
+                MessageBoxIcon.Question, MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
+        using (SavedDialog dlg = new SavedDialog(dir, spravka ? 1 : 0)) {
+            if (dlg.ShowDialog(this) != DialogResult.OK || dlg.Chosen == null) return;
+            try {
+                Dictionary<string, string> d = DogovorForm.ReadData(dlg.Chosen);
+                if (spravka) FromSpravka(d); else FromContract(d);
+            } catch (Exception ex) { MessageBox.Show(this, "Не удалось открыть:\n" + ex.Message, Text); }
+        }
+    }
+
+    void OpenSaved() {
+        string dir = DataFolder(here);
+        if (!Directory.Exists(dir) || Directory.GetFiles(dir, "*.txt").Length == 0) { MessageBox.Show(this, "Сохранённых нарядов пока нет.", Text); return; }
+        if (dirty && MessageBox.Show(this, "Наряд не сохранён. Открыть другой? Введённое здесь пропадёт.", Text, MessageBoxButtons.YesNo, MessageBoxIcon.Question,
+                MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
+        using (SavedDialog dlg = new SavedDialog(dir, 2)) {
+            if (dlg.ShowDialog(this) != DialogResult.OK || dlg.Chosen == null) return;
+            try { LoadSaved(dlg.Chosen); }
+            catch (Exception ex) { MessageBox.Show(this, "Не удалось открыть:\n" + ex.Message, Text); }
+        }
+    }
+
+    public void LoadSaved(string file) {
+        Dictionary<string, string> d = DogovorForm.ReadData(file);
+        string name = Path.GetFileNameWithoutExtension(file);
+        Clear();
+        loading = true;
+        try {
+            foreach (string k in new List<string>(inp.Keys)) {
+                string v;
+                if (d.TryGetValue(k, out v)) SetV(k, v);
+            }
+            // правленные руками строки остаются как были, остальные - собираются из частей
+            autoAdres = AutoOf("adres");
+            autoPotr = AutoOf("potr");
+            autoMesto = AutoOf("mesto");
+            savedFile = Path.Combine(Folder(here), name + ".docx");
+        } finally { loading = false; }
+        dirty = false;
+        Enable();
+        head.Text = "Наряд «" + name + "»";
+        headSub.Text = "открыт сохранённый (" + Get(d, "сохранён") + ") - исправьте и сохраните заново";
+        RefreshState();
+    }
+
+    // поля окна - для справки/договора не нужны; для проверки и открытия заново
+    public Dictionary<string, string> Data() {
+        Dictionary<string, string> d = new Dictionary<string, string>();
+        foreach (string k in inp.Keys) d[k] = V(k);
+        return d;
+    }
+
+    void SaveData(string name) {
+        string dir = DataFolder(here);
+        Directory.CreateDirectory(dir);
+        StringBuilder sb = new StringBuilder();
+        sb.Append("# Данные наряда для программы «Оформление договора» (открыть заново)\r\n");
+        sb.Append("сохранён=").Append(DateTime.Now.ToString("dd.MM.yyyy HH:mm")).Append("\r\n");
+        foreach (KeyValuePair<string, Control> kv in inp) sb.Append(kv.Key).Append('=').Append(Memory.Escape(V(kv.Key))).Append("\r\n");
+        string file = Path.Combine(dir, name + ".txt"), tmp = file + ".tmp";
+        File.WriteAllText(tmp, sb.ToString(), new UTF8Encoding(true));
+        if (File.Exists(file)) File.Replace(tmp, file, null);
+        else File.Move(tmp, file);
+    }
+
+    // значения полей шаблона
+    public Dictionary<string, string> Compose() {
+        Dictionary<string, string> v = new Dictionary<string, string>();
+        bool on = V("vid") != "отключение";
+        v["ВИД"] = on ? "включение" : "отключение";
+        v["ВИДА"] = on ? "включения" : "отключения";
+        v["ВИДП"] = on ? "Включение" : "Отключение";
+        v["НОМЕР"] = V("nomer").Length > 0 ? V("nomer") : "____________";
+        DateTime d = ((DateBox)inp["data"]).Value;
+        bool dated = V("s_datoy") == "1";
+        v["ДАТАН"] = dated ? "«" + d.ToString("dd") + "» " + Months[d.Month - 1] + " " + d.Year : "«________» ______________________ " + DateTime.Today.Year;
+        v["ГОД"] = (dated ? d.Year : DateTime.Today.Year).ToString();
+        v["КОМУ"] = V("komu");
+        v["ЛС"] = V("ls");
+        v["ПОТРЕБИТЕЛЬ"] = V("potr");
+        v["ПРИЧИНА"] = V("prichina");
+        v["МЕСТО"] = V("mesto");
+        v["ОБЪЕКТ"] = LowerFirst(V("obekt"));
+        v["АДРЕС"] = V("adres");
+        v["НАЧАЛЬНИК"] = V("nach");
+        v["ИНЖЕНЕР"] = V("inzh");
+        return v;
+    }
+
+    // «Стройплощадка жилого дома» -> «стройплощадка жилого дома» (как в бланке); «ЛПХ» не трогаем
+    static string LowerFirst(string s) {
+        if (s.Length < 2 || !char.IsUpper(s[0]) || char.IsUpper(s[1])) return s;
+        return char.ToLower(s[0]) + s.Substring(1);
+    }
+
+    List<string> Missing() {
+        List<string> m = new List<string>();
+        foreach (string k in new string[] { "ls", "fio", "obekt", "prichina", "adres", "mesto", "komu", "nach", "inzh" }) if (V(k).Length == 0) m.Add(k);
+        return m;
+    }
+
+    // коротко - для строки «Не заполнено» и вопроса перед сохранением
+    static string Caption(string key) {
+        switch (key) {
+            case "ls": return "лицевой счёт";
+            case "fio": return "Ф.И.О.";
+            case "obekt": return "объект";
+            case "prichina": return "причина";
+            case "adres": return "адрес";
+            case "mesto": return "место включения (ТП, ВЛ, опора)";
+            case "komu": return "кому (ОГРЭС)";
+            case "nach": return "начальник ГРП";
+            case "inzh": return "инженер";
+            default: return key;
+        }
+    }
+
+    void RefreshState() {
+        List<string> m = Missing();
+        if (m.Count == 0) { status.Text = savedFile != null && !dirty ? "Наряд сохранён" : "Всё основное заполнено"; status.ForeColor = St.Good; }
+        else {
+            List<string> names = new List<string>();
+            foreach (string k in m) names.Add(Caption(k));
+            status.Text = "Не заполнено: " + string.Join(", ", names.ToArray());
+            status.ForeColor = St.Bad;
+        }
+    }
+
+    // имя файла - по адресу: «Новый Двор Рябиновая 12»
+    public string FileName() {
+        string name;
+        if ((V("np").Length > 0 || V("ulica").Length > 0) && V("adres") == autoAdres)
+            name = (Up(V("np")) + " " + Up(V("ulica")) + " " + V("dom") + (V("kv").Length > 0 ? "-" + V("kv") : "")).Trim();
+        else name = AddressName(V("adres"));
+        if (name.Length == 0) name = ("Наряд " + V("ls") + " " + Short(V("fio"))).Trim();
+        if (name == "Наряд") name = "Наряд " + DateTime.Now.ToString("yyyy-MM-dd HH-mm");
+        if (V("vid") == "отключение") name += " отключение";
+        foreach (char ch in Path.GetInvalidFileNameChars()) name = name.Replace(ch, '_');
+        while (name.Contains("  ")) name = name.Replace("  ", " ");
+        return name.Trim().TrimEnd('.');
+    }
+
+    // «д. Новый Двор, ул. Рябиновая, д. 12 (Шершунский с/с)» -> «Новый Двор Рябиновая 12»
+    static string AddressName(string a) {
+        int ss = a.LastIndexOf(" (");
+        if (ss > 0 && a.EndsWith(")")) a = a.Substring(0, ss);
+        string[] skip = { "г", "д", "аг", "п", "гп", "г.п", "пос", "ул", "пер", "пр", "пр-т", "просп", "б-р", "пл", "кв", "корп", "к", "дом", "с/с", "р-н", "обл", "уч" };
+        List<string> w = new List<string>();
+        bool kv = false;
+        foreach (string raw in a.Replace(",", " ").Split(new char[] { ' ' }, StringSplitOptions.RemoveEmptyEntries)) {
+            string t = raw.Trim('.', ' ');
+            string low = t.ToLowerInvariant();
+            if (low == "кв") { kv = true; continue; }
+            if (Array.IndexOf(skip, low) >= 0 || t.Length == 0) continue;
+            if (kv && w.Count > 0) { w[w.Count - 1] += "-" + t; kv = false; continue; }
+            w.Add(t);
+        }
+        return string.Join(" ", w.ToArray());
+    }
+
+    bool HasTemplate() {
+        if (File.Exists(templateFile)) return true;
+        MessageBox.Show(this, "Нет файла шаблона наряда:\n" + templateFile + "\n\nОн должен лежать рядом с программой (есть в архиве программы).", Text,
+            MessageBoxButtons.OK, MessageBoxIcon.Error);
+        return false;
+    }
+
+    // предпросмотр: наряд заполняется в папку «Предпросмотр» и открывается в Word только для чтения; ничего не сохраняется
+    public string Preview() {
+        if (!HasTemplate()) return null;
+        try {
+            string f = DocPreview.NewFile(here, FileName());
+            DocxTemplate.Fill(templateFile, f, Compose());
+            DocPreview.Show(this, f);
+            return f;
+        } catch (Exception ex) {
+            MessageBox.Show(this, "Предпросмотр не получился:\n" + ex.Message, Text, MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return null;
+        }
+    }
+
+    // ask - с вопросами; openWord - открыть в Word. Возвращает путь к наряду или null
+    public string Save(bool openWord, bool ask) {
+        List<string> m = Missing();
+        if (ask && m.Count > 0) {
+            List<string> names = new List<string>();
+            foreach (string k in m) names.Add("  • " + Caption(k));
+            if (MessageBox.Show(this, "Не заполнено:\n" + string.Join("\n", names.ToArray()) + "\n\nВсё равно сохранить наряд? (Незаполненное можно дописать в Word.)",
+                    "Проверка перед сохранением", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) != DialogResult.Yes) {
+                Control c = inp[m[0] == "mesto" && V("tp").Length == 0 ? "tp" : m[0]];
+                content.ScrollControlIntoView(c);
+                c.Focus();
+                return null;
+            }
+        }
+        if (!HasTemplate()) return null;
+        string dir = Folder(here);
+        string name = FileName();
+        string docx = Path.Combine(dir, name + ".docx");
+        try {
+            Directory.CreateDirectory(dir);
+            bool same = savedFile != null && string.Compare(savedFile, docx, StringComparison.OrdinalIgnoreCase) == 0;
+            if (ask && !same && File.Exists(docx) && MessageBox.Show(this, "Наряд «" + name + "» уже есть в папке.\n\nЗаменить его?", Text,
+                    MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2) != DialogResult.Yes) return null;
+            string tmp = docx + ".tmp";
+            List<string> missing = DocxTemplate.Fill(templateFile, tmp, Compose());
+            try {
+                if (File.Exists(docx)) File.Delete(docx);
+            } catch (IOException) {
+                File.Delete(tmp);
+                MessageBox.Show(this, "Наряд «" + name + "» сейчас открыт в Word.\nЗакройте его в Word и сохраните ещё раз.", Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return null;
+            }
+            File.Move(tmp, docx);
+            string dataError = null;
+            try { SaveData(name); } catch (Exception ex) { dataError = ex.Message; }
+            memory.Values["НарядКому"] = V("komu");
+            memory.Values["НарядОбъект"] = V("obekt");
+            memory.Values["НарядИнженер"] = V("inzh");
+            memory.Values["НарядНачальник"] = V("nach");
+            memory.Values["НарядСДатой"] = V("s_datoy");
+            memory.Remember("наряд кому", V("komu"));
+            memory.Remember("наряд причина", V("prichina"));
+            memory.Remember("наряд объект", V("obekt"));
+            memory.Remember("нп", Up(V("np")));
+            memory.Remember("улица", Up(V("ulica")));
+            memory.Remember("сельсовет", V("selsovet"));
+            memory.Save();
+            savedFile = docx;
+            dirty = false;
+            head.Text = "Наряд «" + name + "»";
+            headSub.Text = "сохранён " + DateTime.Now.ToString("dd.MM.yyyy HH:mm") + " - " + docx;
+            RefreshState();
+            if (missing.Count > 0)
+                MessageBox.Show(this, "В шаблоне наряда есть поля, которые программа не знает (остались пустыми):\n" + string.Join(", ", missing.ToArray()), Text);
+            if (dataError != null && ask)
+                MessageBox.Show(this, "Наряд сохранён, но его данные (чтобы открыть его заново) не записались:\n" + dataError, Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            if (openWord) {
+                try { Process.Start(docx); }
+                catch (Exception ex) { MessageBox.Show(this, "Наряд сохранён:\n" + docx + "\n\nОткрыть в Word не получилось: " + ex.Message, Text); }
+            }
+            return docx;
+        } catch (Exception ex) {
+            MessageBox.Show(this, "Не удалось сохранить наряд:\n" + ex.Message, Text, MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return null;
+        }
+    }
+
+    // перед выходом из программы: несохранённый наряд - спросить. true - можно выходить
+    public bool AskSaveBeforeExit() {
+        if (!dirty) return true;
+        DialogResult r = MessageBox.Show(this, "Наряд не сохранён. Сохранить его?\n\nДа - сохранить и выйти\nНет - выйти без сохранения\nОтмена - вернуться к наряду", Text,
+            MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
+        if (r == DialogResult.Cancel) return false;
+        if (r == DialogResult.Yes) return Save(false, true) != null;
+        return true;
+    }
+
+    // для проверки
+    public Control Field(string key) { Control c; return inp.TryGetValue(key, out c) ? c : null; }
+    public string StatusText { get { return status.Text; } }
+    public void ScrollToCard(int i) { content.AutoScrollPosition = new Point(0, Math.Max(0, cards[i].Panel.Top - content.AutoScrollPosition.Y - 4)); }
 }
 
 // Справки с QR-кодом. У каждой справки свой номер («S261027-01»: дата и порядковый за день) - он в QR-коде в правом
