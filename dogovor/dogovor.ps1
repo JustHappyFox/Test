@@ -579,11 +579,15 @@ public static class DocxTemplate {
                 pw = Twips(sz, "w", pw); ph = Twips(sz, "h", ph);
                 ml = Twips(mar, "left", ml); mr = Twips(mar, "right", mr); mt = Twips(mar, "top", mt); mb = Twips(mar, "bottom", mb);
             }
-            int width = pw - ml - mr, half = (ph - mt - mb) / 2 - 140;
+            // первая половина (до линии отреза) - пол-листа вместе с отступом под ней; у второй высоты нет - сколько займёт.
+            // Раньше и у второй было «не ниже пол-листа»: Word прибавляет к высоте строки отступы ячейки, две половины
+            // выходили больше листа, и второй экземпляр всегда уходил на новую страницу
+            int usable = ph - mt - mb;
+            int width = pw - ml - mr, half = usable / 2 - 340;
             // экземпляр должен влезть в половину листа: не влезает - сначала убрать двойные пустые строки, потом чуть
             // уменьшить шрифт (не меньше чем до 3/4); не влез и так - второй экземпляр уйдёт на следующий лист
             // оценка примерная (Word и другие программы рисуют чуть по-разному) - с запасом 6%
-            double avail = (half - 340) / 20.0 / 1.06, wpt = width / 20.0;
+            double avail = (usable / 2 - 454 - 60) / 20.0 / 1.06, wpt = width / 20.0;
             if (Estimate(content, wpt, defPt, 1) > avail) {
                 for (int i = content.Count - 1; i > 0; i--)
                     if (content[i].LocalName == "p" && content[i - 1].LocalName == "p" && EmptyPara(content[i]) && EmptyPara(content[i - 1])) {
@@ -599,7 +603,7 @@ public static class DocxTemplate {
                 "<w:tblCellMar><w:top w:w=\"0\" w:type=\"dxa\"/><w:left w:w=\"0\" w:type=\"dxa\"/><w:bottom w:w=\"0\" w:type=\"dxa\"/><w:right w:w=\"0\" w:type=\"dxa\"/></w:tblCellMar>" +
                 "</w:tblPr><w:tblGrid><w:gridCol w:w=\"" + width + "\"/></w:tblGrid>" +
                 CopyRow(width, half, "<w:tcBorders><w:bottom w:val=\"dashed\" w:sz=\"12\" w:space=\"0\" w:color=\"000000\"/></w:tcBorders><w:tcMar><w:bottom w:w=\"340\" w:type=\"dxa\"/></w:tcMar>") +
-                CopyRow(width, half, "<w:tcMar><w:top w:w=\"454\" w:type=\"dxa\"/></w:tcMar>") + "</w:tbl>";
+                CopyRow(width, 0, "<w:tcMar><w:top w:w=\"454\" w:type=\"dxa\"/></w:tcMar>") + "</w:tbl>";
             XmlDocument t = new XmlDocument();
             t.LoadXml(x);
             XmlNode tbl = doc.ImportNode(t.DocumentElement, true);
@@ -781,7 +785,8 @@ public static class DocxTemplate {
     }
 
     static string CopyRow(int width, int height, string cellProps) {
-        return "<w:tr><w:trPr><w:cantSplit/><w:trHeight w:val=\"" + height + "\" w:hRule=\"atLeast\"/></w:trPr><w:tc><w:tcPr><w:tcW w:w=\"" + width +
+        return "<w:tr><w:trPr><w:cantSplit/>" + (height > 0 ? "<w:trHeight w:val=\"" + height + "\" w:hRule=\"atLeast\"/>" : "") +
+            "</w:trPr><w:tc><w:tcPr><w:tcW w:w=\"" + width +
             "\" w:type=\"dxa\"/>" + cellProps + "</w:tcPr></w:tc></w:tr>";
     }
 
@@ -13000,6 +13005,49 @@ public class AbonentQuery {
 
 // Главное окно: одна строка поиска. Каждый поиск идёт по индексам прямо в базе - данные всегда свежие.
 
+// База абонентов для справки и наряда (по лицевому - Ф.И.О., адрес, счётчик): одна на всю программу, открывается в фоне при
+// первом лицевом; не открылась - следующая попытка не раньше чем через минуту
+public static class BaseShare {
+    static readonly object gate = new object();
+    static BaseLink link;
+    static string failed;
+    static DateTime failedAt = DateTime.MinValue;
+
+    // вызывать в фоновом потоке: открытие базы - секунды (заголовок, индексы, справочник улиц)
+    public static BaseLink Get(Dictionary<string, string> settings, out string error) {
+        lock (gate) {
+            error = null;
+            if (link != null) return link;
+            if (failed != null && (DateTime.Now - failedAt).TotalSeconds < 60) { error = failed; return null; }
+            BaseLink b = new BaseLink();
+            b.Open(settings);
+            if (b.Ready) { link = b; failed = null; return b; }
+            failed = b.Error ?? "база не открылась";
+            failedAt = DateTime.Now;
+            error = failed;
+            return null;
+        }
+    }
+
+    public delegate void Found(Dictionary<string, string> rec, string error);
+
+    // найти лицевой в фоне; ответ - в поток окна owner. rec == null и error == null - такого лицевого в базе нет
+    public static void Lookup(Control owner, Memory memory, string nab, Found done) {
+        Dictionary<string, string> settings = new Dictionary<string, string>(memory.Values);
+        System.Threading.Thread th = new System.Threading.Thread(delegate() {
+            Dictionary<string, string> rec = null;
+            string err;
+            try {
+                BaseLink b = Get(settings, out err);
+                if (b != null) rec = b.Record(nab);
+            } catch (Exception ex) { err = ex.Message; }
+            try { if (!owner.IsDisposed && owner.IsHandleCreated) owner.BeginInvoke((MethodInvoker)delegate { done(rec, err); }); } catch { }
+        });
+        th.IsBackground = true;
+        th.Start();
+    }
+}
+
 // Проверка по базе абонентов (только чтение, тем же движком, что «Поиск абонента»):
 // есть ли уже такой лицевой (копия лицевого ломает базу) и есть ли абоненты по этому адресу.
 public class BaseLink {
@@ -13112,6 +13160,81 @@ public class BaseLink {
                 if (Clean(F(r.Table, row, "NAB")) == Clean(nab)) found.Add(Describe(r.Table, row));
         }
         return found;
+    }
+
+    // запись абонента по лицевому (точное совпадение) - для справки и наряда: Ф.И.О., телефон, адрес по частям, сельсовет,
+    // счётчик (номер, тип, поверка); нет такого лицевого - null
+    public Dictionary<string, string> Record(string nab) {
+        if (Clean(nab).Length == 0) return null;
+        lock (sync) {
+            SearchResult r = Base.Search(nab, SearchMode.Account, null, false);
+            if (r.Error != null) throw new Exception(r.Error);
+            if (r.NoIndex) throw new Exception("в базе нет индекса по лицевому счёту");
+            if (r.Table == null) return null;
+            foreach (int row in r.Rows) {
+                if (Clean(F(r.Table, row, "NAB")) != Clean(nab)) continue;
+                Dictionary<string, string> d = new Dictionary<string, string>();
+                foreach (string f in new string[] { "NAB", "FIO", "TEL", "UL", "DOM", "KOR", "KV", "NCH", "TIPCH", "GODPR", "KVP" }) d[f] = F(r.Table, row, f);
+                string ul = d["UL"];
+                d["town"] = d["street"] = d["ss"] = "";
+                if (Base.Dir != null && ul.Length > 0) {
+                    d["town"] = Base.Dir.Town(ul) ?? "";
+                    d["street"] = Base.Dir.Street(ul) ?? "";
+                    d["ss"] = Base.Dir.Selsovet(ul) ?? "";
+                }
+                d["text"] = Describe(r.Table, row);
+                return d;
+            }
+        }
+        return null;
+    }
+
+    // «аг. Боровляны» -> тип «аг.» и «Боровляны»; «Лесная ул.» -> «ул.» и «Лесная» (тип - как в списках программы)
+    public static string[] TypeAndName(string s, bool street) {
+        string[] words = (s ?? "").Trim().Split(new char[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+        if (words.Length == 0) return new string[] { "", "" };
+        string[] types = street ? AddressText.StreetTypes : AddressText.TownTypes;
+        foreach (int i in new int[] { 0, words.Length - 1 }) {
+            string w = words[i].ToLowerInvariant().Replace(".", "").Replace("-", "");
+            if (words.Length < 2 || Array.IndexOf(types, w) < 0) continue;
+            List<string> rest = new List<string>(words);
+            rest.RemoveAt(i);
+            return new string[] { TypeText(w, street, words[i]), Title(string.Join(" ", rest.ToArray())) };
+        }
+        return new string[] { "", Title(s.Trim()) };
+    }
+
+    static string TypeText(string w, bool street, string raw) {
+        if (street) {
+            if (w == "ул" || w == "улица") return "ул.";
+            if (w == "пер" || w == "переулок") return "пер.";
+            if (w == "прт" || w == "просп" || w == "проспект") return "пр-т";
+            if (w == "туп" || w == "тупик") return "туп.";
+            if (w == "мкр" || w == "мкрн" || w == "микрорайон") return "мкр.";
+        } else {
+            if (w == "д" || w == "дер" || w == "деревня") return "д.";
+            if (w == "аг" || w == "агрогородок") return "аг.";
+            if (w == "г" || w == "город") return "г.";
+            if (w == "гп") return "г.п.";
+            if (w == "п" || w == "пос" || w == "поселок") return "п.";
+        }
+        return raw.EndsWith(".") || raw.Contains("-") ? raw.ToLowerInvariant() : raw.ToLowerInvariant() + ".";
+    }
+
+    // «ИВАНОВ ИВАН ИВАНОВИЧ» -> «Иванов Иван Иванович» (написанное как надо - не трогаем)
+    public static string Title(string s) {
+        if (s == null || s.ToUpperInvariant() != s || s.ToLowerInvariant() == s) return s ?? "";
+        char[] a = s.ToLowerInvariant().ToCharArray();
+        for (int i = 0; i < a.Length; i++) if (i == 0 || !char.IsLetter(a[i - 1]) && a[i - 1] != '\'') a[i] = char.ToUpperInvariant(a[i]);
+        return new string(a);
+    }
+
+    // поверка «2025-2» из года и квартала базы (год «25» -> «2025»)
+    public static string Verification(string year, string quarter) {
+        string y = (year ?? "").Trim(), q = (quarter ?? "").Trim();
+        if (y.Length == 2) y = "20" + y;
+        if (y.Length != 4) return "";
+        return q.Length > 0 && q != "0" ? y + "-" + q : y;
     }
 
     // лицевые, квартиры и дома по адресу дома (без квартиры) или улицы - для книги лицевых новой квартиры: NAB, KV, DOM, KOR
@@ -16190,6 +16313,10 @@ public class SpravkaForm : Form {
         public MeterPick Pick;
         public Button Remove, Same;
         public string AutoAdres = "";
+        // из базы по лицевому: что подставлено (поле -> значение; поправленное руками не трогается) и какой лицевой искали
+        public readonly Dictionary<string, string> Filled = new Dictionary<string, string>();
+        public string Asked = "";
+        public Timer Wait;
     }
     readonly List<MeterBlock> meters = new List<MeterBlock>();
     Card meterCard;
@@ -16491,11 +16618,90 @@ public class SpravkaForm : Form {
             else if (k == "korpus") m.Pick.Changed(1);
             else if (k == "modif") m.Pick.Changed(2);
             if (Array.IndexOf(AddrKeys, k) >= 0) ComposeAddress(m);
+            // лицевой вписан полностью - Ф.И.О., адрес и счётчик из базы
+            if (k == "ls") AskBase(m);
             RefreshState();
         };
         Hook(c, h);
         // с заглавной, когда уходим из поля: «боровляны» -> «Боровляны»
         if (k == "np" || k == "ulica") c.Leave += delegate { string v = c.Text.Trim(); if (v.Length > 0 && Up(v) != v) c.Text = Up(v); };
+    }
+
+    // ---------- лицевой -> база абонентов ----------
+
+    // лицевой вписан полностью (9 цифр или с припиской района 13) - через полсекунды (дописывают - не дёргаем базу) найти в базе
+    void AskBase(MeterBlock m) {
+        string d = DigitsOnly(MV(m, "ls"));
+        if (d.Length != 9 && d.Length != 13) return;
+        string nab = BaseLink.Nab(d);
+        if (nab == m.Asked) return;
+        m.Asked = nab;
+        if (m.Wait == null) {
+            m.Wait = new Timer();
+            m.Wait.Interval = 500;
+            MeterBlock mm = m;
+            m.Wait.Tick += delegate { mm.Wait.Stop(); LookUp(mm); };
+        }
+        m.Wait.Stop();
+        m.Wait.Start();
+    }
+
+    void LookUp(MeterBlock m) {
+        string nab = m.Asked;
+        if (meters.IndexOf(m) < 0) return;
+        Note("Ищу лицевой " + nab + " в базе...", St.Hint);
+        BaseShare.Lookup(this, memory, nab, delegate(Dictionary<string, string> rec, string err) { FromBase(m, nab, rec, err); });
+    }
+
+    void Note(string text, Color c) { headSub.Text = text; headSub.ForeColor = c; }
+
+    // ответ базы: Ф.И.О., телефон, адрес по частям, счётчик (номер, тип, поверка) - в пустые поля и в подставленные из базы раньше
+    // (поправленное руками остаётся); показания - нет (в справке - сегодняшние, их снимают на месте)
+    void FromBase(MeterBlock m, string nab, Dictionary<string, string> rec, string err) {
+        int i = meters.IndexOf(m) + 1;
+        if (i < 1 || BaseLink.Nab(DigitsOnly(MV(m, "ls"))) != nab) return;     // ПУ убрали или лицевой уже другой
+        string who = meters.Count > 1 ? "ПУ " + i + ": " : "";
+        if (err != null) { Note(who + "база недоступна (" + err + ") - Ф.И.О., адрес и счётчик впишите сами", St.Warn); return; }
+        if (rec == null) { Note(who + "лицевого " + nab + " в базе нет - Ф.И.О., адрес и счётчик впишите сами", St.Warn); return; }
+        Dictionary<string, string> v = BaseValues(rec);
+        string tipch = rec["TIPCH"];
+        MeterType known = tipch.Length > 0 ? m.Pick.Known(tipch) : null;
+        v["model"] = known != null ? known.Model : "";
+        v["korpus"] = known != null ? known.Case : "";
+        v["modif"] = known != null ? known.Mod : "";
+        v["tip"] = tipch;
+        v["zav"] = rec["NCH"];
+        v["pov"] = BaseLink.Verification(rec["GODPR"], rec["KVP"]);
+        loading = true;
+        try {
+            foreach (KeyValuePair<string, string> kv in v) {
+                string cur = MV(m, kv.Key), before;
+                if (cur.Length == 0 || m.Filled.TryGetValue(kv.Key, out before) && before == cur) SetV("pu" + i + "_" + kv.Key, kv.Value);
+                m.Filled[kv.Key] = kv.Value;
+            }
+            m.Pick.Loaded();
+        } finally { loading = false; }
+        ComposeAddress(m);
+        dirty = true;
+        RefreshState();
+        Note(who + "из базы: " + rec["text"] + " - проверьте; неверное поправьте руками", St.Good);
+    }
+
+    // Ф.И.О., телефон, адрес по частям из записи базы
+    public static Dictionary<string, string> BaseValues(Dictionary<string, string> rec) {
+        Dictionary<string, string> v = new Dictionary<string, string>();
+        v["fio"] = BaseLink.Title(rec["FIO"]);
+        string tel = rec["TEL"].Trim();
+        v["tel"] = tel == "0" ? "" : tel;
+        string[] town = BaseLink.TypeAndName(rec["town"], false), street = BaseLink.TypeAndName(rec["street"], true);
+        v["np_tip"] = town[0];
+        v["np"] = town[1];
+        v["ulica_tip"] = street[0];
+        v["ulica"] = street[1];
+        v["dom"] = rec["DOM"];
+        v["korp"] = rec["KOR"];
+        v["kv"] = rec["KV"];
+        return v;
     }
 
     // строка адреса: «д. Боровляны, ул. Лесная, д. 7, корп. 2, кв. 3»; СТ - «СТ «Ромашка», уч. 15»
@@ -16873,6 +17079,7 @@ public class SpravkaForm : Form {
         dirty = false;
         Enable();
         head.Text = "Новая справка";
+        headSub.ForeColor = St.Hint;
         headSub.Text = "Данные прибора учёта для открытия лицевого счёта - заполните или возьмите из договора";
         RefreshState();
     }
@@ -16952,6 +17159,7 @@ public class SpravkaForm : Form {
         dirty = true;
         Enable();
         head.Text = ("Справка " + V("pu1_ls") + " " + Short(V("pu1_fio"))).Trim();
+        headSub.ForeColor = St.Hint;
         headSub.Text = "Заполнено из договора - проверьте и допишите свидетельство (ЕГРНИ), владельцев, регистрацию";
         RefreshState();
     }
@@ -17047,6 +17255,7 @@ public class SpravkaForm : Form {
         dirty = false;
         Enable();
         head.Text = "Справка «" + name + "»" + (savedId != null ? " № " + savedId : "");
+        headSub.ForeColor = St.Hint;
         headSub.Text = "открыта сохранённая (" + Get(d, "сохранена") + ") - исправьте и сохраните заново";
         RefreshState();
     }
@@ -17348,6 +17557,7 @@ public class SpravkaForm : Form {
             savedFile = docx;
             dirty = false;
             head.Text = "Справка «" + Path.GetFileNameWithoutExtension(docx) + "»" + (id != null ? " № " + id : "");
+            headSub.ForeColor = St.Hint;
             headSub.Text = "сохранена " + DateTime.Now.ToString("dd.MM.yyyy HH:mm") + " - " + docx;
             RefreshState();
             if (qrError != null && ask)
@@ -17728,6 +17938,8 @@ public class NaryadForm : Form {
             else if (key == "vid") PrichinaFor("");
             else if (key == "vid2") PrichinaFor("2");
             else if (key == "dva" && V("dva") == "1") OnDva();
+            // лицевой вписан полностью - Ф.И.О., телефон, адрес с сельсоветом из базы
+            if (key == "ls") AskBase();
             RefreshState();
         };
         if (c is Seg) ((Seg)c).Changed += delegate { Enable(); h(c, EventArgs.Empty); };
@@ -17989,6 +18201,56 @@ public class NaryadForm : Form {
         } finally { loading = was; }
     }
 
+    // ---------- лицевой -> база абонентов ----------
+
+    readonly Dictionary<string, string> filled = new Dictionary<string, string>();   // подставлено из базы
+    string asked = "";
+    Timer wait;
+
+    void AskBase() {
+        string d = Digits(V("ls"));
+        if (d.Length != 9 && d.Length != 13) return;
+        string nab = BaseLink.Nab(d);
+        if (nab == asked) return;
+        asked = nab;
+        if (wait == null) {
+            wait = new Timer();
+            wait.Interval = 500;
+            wait.Tick += delegate {
+                wait.Stop();
+                string n = asked;
+                headSub.Text = "Ищу лицевой " + n + " в базе...";
+                headSub.ForeColor = St.Hint;
+                BaseShare.Lookup(this, memory, n, delegate(Dictionary<string, string> rec, string err) { FromBase(n, rec, err); });
+            };
+        }
+        wait.Stop();
+        wait.Start();
+    }
+
+    // ответ базы - в пустые поля и в подставленные из базы раньше (поправленное руками остаётся)
+    void FromBase(string nab, Dictionary<string, string> rec, string err) {
+        if (BaseLink.Nab(Digits(V("ls"))) != nab) return;
+        if (err != null) { headSub.Text = "База недоступна (" + err + ") - Ф.И.О. и адрес впишите сами"; headSub.ForeColor = St.Warn; return; }
+        if (rec == null) { headSub.Text = "Лицевого " + nab + " в базе нет - Ф.И.О. и адрес впишите сами"; headSub.ForeColor = St.Warn; return; }
+        Dictionary<string, string> v = SpravkaForm.BaseValues(rec);
+        v["selsovet"] = rec["ss"];
+        loading = true;
+        try {
+            foreach (KeyValuePair<string, string> kv in v) {
+                string cur = V(kv.Key), before;
+                if (cur.Length == 0 || filled.TryGetValue(kv.Key, out before) && before == cur) SetV(kv.Key, kv.Value);
+                filled[kv.Key] = kv.Value;
+            }
+        } finally { loading = false; }
+        Compose("adres");
+        Compose("potr");
+        dirty = true;
+        RefreshState();
+        headSub.Text = "Из базы: " + rec["text"] + " - проверьте; неверное поправьте руками";
+        headSub.ForeColor = St.Good;
+    }
+
     // ---------- окно ----------
 
     Control BuildNav() {
@@ -18179,6 +18441,7 @@ public class NaryadForm : Form {
         dirty = false;
         Enable();
         head.Text = "Новый наряд";
+        headSub.ForeColor = St.Hint;
         headSub.Text = "Наряд на включение (отключение) - возьмите данные из справки или договора и допишите ТП, ВЛ, опору";
         RefreshState();
     }
@@ -18232,6 +18495,7 @@ public class NaryadForm : Form {
         dirty = true;
         Enable();
         head.Text = ("Наряд " + V("ls") + " " + Short(V("fio"))).Trim();
+        headSub.ForeColor = St.Hint;
         headSub.Text = "Заполнено из договора - допишите место включения (ТП, ВЛ, опора) и проверьте причину";
         RefreshState();
     }
@@ -18268,6 +18532,7 @@ public class NaryadForm : Form {
             // адреса по частям нет (справка прежней версии) - строка адреса справки
             if (V("adres").Length == 0) SetV("adres", Get(d, p + "adres").Length > 0 ? Get(d, p + "adres") : Get(d, "adres"));
             savedFile = null;
+            headSub.ForeColor = St.Hint;
             headSub.Text = "Заполнено из справки" + (n > 1 ? " (прибор учёта 1 из " + n + ")" : "") + (dog != null ? " и договора с тем же лицевым" : "") +
                 " - допишите место включения (ТП, ВЛ, опора)" + (V("selsovet").Length == 0 ? " и сельсовет" : "");
         } finally { loading = false; }
@@ -18357,6 +18622,7 @@ public class NaryadForm : Form {
         dirty = false;
         Enable();
         head.Text = "Наряд «" + name + "»";
+        headSub.ForeColor = St.Hint;
         headSub.Text = "открыт сохранённый (" + Get(d, "сохранён") + ") - исправьте и сохраните заново";
         RefreshState();
     }
@@ -18580,6 +18846,7 @@ public class NaryadForm : Form {
             savedFile = docx;
             dirty = false;
             head.Text = "Наряд «" + name + "»";
+            headSub.ForeColor = St.Hint;
             headSub.Text = "сохранён " + DateTime.Now.ToString("dd.MM.yyyy HH:mm") + " - " + docx;
             RefreshState();
             if (missing.Count > 0)
@@ -22599,7 +22866,9 @@ public static class Qr {
 
 // одна строка отчёта
 public class SealRow {
-    public const int Cols = 7;   // дата, место установки (лицевой), № учёта, № задания, причина, снятая пломба, примечание
+    // дата, адрес, № договора / лицевой, № учёта, причина, снятая пломба, примечание (до 09.11 вместо адреса был «№ задания»:
+    // дата, лицевой, № учёта, № задания... - старые партии перекладываются при чтении, см. SealBatch.Load)
+    public const int Cols = 7;
     public string Number = "";
     public int Index;            // № п/п в партии (с 1)
     public string[] Auto = new string[Cols];     // из договора
@@ -22624,6 +22893,7 @@ public class SealBatch {
     public int Since = 1;        // № п/п, с которого партию ведёт программа (раньше - писали на бумаге)
     public string Issued = "";
     public string Fio = "", Post = "";
+    public int Layout = 2;       // порядок столбцов вписанного: 2 - с адресом (с 09.11), 1 - прежний (с № задания)
     public readonly Dictionary<string, string[]> Hand = new Dictionary<string, string[]>();   // номер -> вписанное
 
     public long FirstValue { get { long v; return long.TryParse(First, out v) ? v : 0; } }
@@ -22645,6 +22915,7 @@ public class SealBatch {
     public static SealBatch Load(string file) {
         SealBatch b = new SealBatch();
         b.File = file;
+        b.Layout = 1;            // нет строки «колонки=2» - партия прежней версии
         foreach (string line in System.IO.File.ReadAllLines(file, Encoding.UTF8)) {
             int eq = line.IndexOf('=');
             if (eq <= 0 || line.StartsWith("#")) continue;
@@ -22656,12 +22927,22 @@ public class SealBatch {
             else if (k == "выдана") b.Issued = v;
             else if (k == "фио") b.Fio = v;
             else if (k == "должность") b.Post = v;
+            else if (k == "колонки") int.TryParse(v, out b.Layout);
             else if (k.StartsWith("пломба.")) {
                 string[] parts = v.Split('|');
                 string[] h = new string[SealRow.Cols];
                 for (int i = 0; i < SealRow.Cols; i++) h[i] = i < parts.Length && parts[i] != "\u0001" ? Memory.Unescape(parts[i].Replace("¦", "|")) : null;
                 b.Hand[k.Substring(7)] = h;
             }
+        }
+        // партия прежней версии: дата, лицевой, № учёта, № задания (больше не нужен), причина, снятая, примечание ->
+        // дата, адрес, лицевой, № учёта, причина, снятая, примечание
+        if (b.Layout < 2) {
+            foreach (string key in new List<string>(b.Hand.Keys)) {
+                string[] o = b.Hand[key];
+                b.Hand[key] = new string[] { o[0], null, o[1], o[2], o[4], o[5], o[6] };
+            }
+            b.Layout = 2;
         }
         return b;
     }
@@ -22676,6 +22957,7 @@ public class SealBatch {
         sb.Append("выдана=").Append(Memory.Escape(Issued)).Append("\r\n");
         sb.Append("фио=").Append(Memory.Escape(Fio)).Append("\r\n");
         sb.Append("должность=").Append(Memory.Escape(Post)).Append("\r\n");
+        sb.Append("колонки=2\r\n");
         List<string> keys = new List<string>(Hand.Keys);
         keys.Sort(StringComparer.Ordinal);
         foreach (string k in keys) {
@@ -22713,7 +22995,7 @@ public static class SealRegistry {
     }
 
     public class Use {
-        public string Number, Date, Ls, Meter, Note, Source;
+        public string Number, Date, Ls, Meter, Note, Source, Address;
         public bool Spravka;
     }
 
@@ -22743,6 +23025,10 @@ public static class SealRegistry {
             foreach (string[] s in Seals.Parse(Get(d, "plomba_drugoe")))
                 foreach (string n in Numbers(s[1])) seals.Add(new string[] { n, s[0] });
             string ls = Get(d, "ls");
+            // адрес: в справке - первого прибора учёта (справки прежних версий - общий), в договоре - адрес объекта без сельсовета
+            string adres = spravki && Get(d, "pu1_adres").Length > 0 ? Get(d, "pu1_adres") : Get(d, "adres");
+            int ss = adres.LastIndexOf(" (");
+            if (ss > 0 && adres.EndsWith(" с/с)")) adres = adres.Substring(0, ss);
             foreach (string[] s in seals) {
                 Use u = new Use();
                 u.Number = s[0];
@@ -22750,6 +23036,7 @@ public static class SealRegistry {
                 u.Date = Get(d, "data");
                 u.Ls = ls.Length > 0 ? BaseLink.Nab(ls) : "";
                 u.Meter = Get(d, "pu1_zav");
+                u.Address = adres;
                 u.Source = name;
                 u.Spravka = spravki;
                 r.Add(u);
@@ -22782,15 +23069,16 @@ public static class SealRegistry {
             if (r.Source.Length > 0) {
                 if (r.Source == u.Source) continue;
                 // справка по тому же лицевому (сделана из договора или пересохранена под другим именем) - та же пломба
-                if ((u.Spravka || r.FromSpravka) && u.Ls == r.Auto[1]) continue;
+                if ((u.Spravka || r.FromSpravka) && u.Ls == r.Auto[2]) continue;
                 r.Conflict = r.Conflict.Length > 0 ? r.Conflict + ", " + u.Source : u.Source;
                 continue;
             }
             r.Source = u.Source;
             r.FromSpravka = u.Spravka;
             r.Auto[0] = u.Date;
-            r.Auto[1] = u.Ls;
-            r.Auto[2] = u.Meter;
+            r.Auto[1] = u.Address;
+            r.Auto[2] = u.Ls;
+            r.Auto[3] = u.Meter;
             r.Auto[6] = u.Note;
         }
         return rows;
@@ -22810,7 +23098,9 @@ public static class SealRegistry {
 public static class SealPrint {
     const string W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
     public const int PerPage = 27;
-    static readonly int[] Widths = { 700, 1300, 1500, 1900, 1800, 1700, 1800, 1700, 1300 };   // твипы, сумма 13700... растягиваются
+    // твипы (растягиваются до ширины листа): №, дата, номер, адрес (с местом бывшего «№ задания»), договор / лицевой, № учёта,
+    // причина снятия, снятая пломба, примечание
+    static readonly int[] Widths = { 650, 1250, 1400, 3600, 1500, 1500, 1700, 1600, 1100 };
 
     public static void Write(SealBatch b, List<SealRow> rows, string path) {
         StringBuilder x = new StringBuilder();
@@ -22898,7 +23188,7 @@ public static class SealPrint {
         foreach (int w in ws) x.Append("<w:gridCol w:w=\"").Append(w).Append("\"/>");
         x.Append("</w:tblGrid>");
         string[] head = { "№ п\\п", "Дата установки пломбы", "Номер установленной пломбы" };
-        string[] cons = { "Место установки", "№ учета", "№ задания, дата вып.работ", "Причина снятия пломбы", "Номер, тип снятой пломбы" };
+        string[] cons = { "Адрес", "№ договора / лицевой", "№ учета", "Причина снятия пломбы", "Номер, тип снятой пломбы" };
         // строка 1
         x.Append("<w:tr><w:trPr><w:tblHeader/></w:trPr>");
         for (int i = 0; i < 3; i++) Cell(x, ws[i], head[i], 9, false, "restart", 0, true);
@@ -22929,7 +23219,8 @@ public static class SealPrint {
                 v[2 + c] = s;
             }
             v[8] = r.Get(6);
-            for (int i = 0; i < 9; i++) Cell(x, ws[i], v[i], 10, false, null, 0, i != 3 && i != 6 && i != 7);
+            // всё по центру; длинное (адрес) - мельче, чтобы влезло в одну строку (строки бланка - точной высоты)
+            for (int i = 0; i < 9; i++) Cell(x, ws[i], v[i], FitSize(v[i], ws[i] - 130), false, null, 0, true);
             x.Append("</w:tr>");
             prev = r;
         }
@@ -22937,6 +23228,13 @@ public static class SealPrint {
         x.Append(Para(Run("Должность: " + b.Post, 12, false, false), null, false, null));
         x.Append(Para(Run("Ф.И.О. " + b.Fio, 12, false, false) + Tab + Run("______________", 12, false, false) + Tab + Run("стр. " + page, 10, false, false), null, false,
             "<w:tabs><w:tab w:val=\"left\" w:pos=\"6800\"/><w:tab w:val=\"right\" w:pos=\"15300\"/></w:tabs>"));
+    }
+
+    // размер шрифта, чтобы текст влез в ширину (твипы) одной строкой: 10, 9, 8, 7 пт
+    static double FitSize(string text, int width) {
+        if (string.IsNullOrEmpty(text)) return 10;
+        for (double pt = 10; pt > 7; pt -= 0.5) if (Fit.Width(text, (float)pt, false) * 20 <= width) return pt;
+        return 7;
     }
 
     static void Cell(StringBuilder x, int w, string text, double pt, bool bold, string vmerge, int span, bool center) {
@@ -22964,7 +23262,7 @@ public class PlombyForm : Form {
     List<SealRow> rows = new List<SealRow>();
     SealBatch cur;
     bool filling;
-    static readonly string[] Heads = { "Дата", "Лицевой", "№ учёта", "№ задания", "Причина снятия", "Снятая пломба", "Место" };
+    static readonly string[] Heads = { "Дата", "Адрес", "№ договора / лицевой", "№ учёта", "Причина снятия", "Снятая пломба", "Место" };
 
     public static string Folder(string here) { return Path.Combine(here, "Пломбы"); }
 
@@ -23092,7 +23390,7 @@ public class PlombyForm : Form {
         grid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
         Col("№", 40, true);
         Col("Пломба", 95, true);
-        int[] fw = { 90, 100, 95, 100, 90, 95, 80 };
+        int[] fw = { 85, 190, 105, 95, 90, 95, 70 };
         for (int i = 0; i < Heads.Length; i++) Col(Heads[i], fw[i], false);
         Col("Откуда", 150, true);
         grid.CellEndEdit += delegate(object s, DataGridViewCellEventArgs e) { Edited(e.RowIndex, e.ColumnIndex); };
