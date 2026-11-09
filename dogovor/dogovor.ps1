@@ -1393,33 +1393,151 @@ public class MeterType {
     }
 }
 
-// Оформление: цвета, шрифты и элементы формы
+// Оформление: цвета, шрифты и элементы формы. Две темы: светлая и тёмная (по умолчанию тёмная - глаза не устают;
+// переключатель в главном меню, меняется при следующем запуске). Цвета - поля, а не константы: тема ставится один раз
+// при запуске (St.Apply), до создания окон.
 public static class St {
-    public static readonly Color Back = Color.FromArgb(242, 244, 247);
-    public static readonly Color Card = Color.White;
-    public static readonly Color Border = Color.FromArgb(221, 226, 233);
-    public static readonly Color InputBorder = Color.FromArgb(196, 204, 214);
-    public static readonly Color Nav = Color.FromArgb(28, 51, 84);
-    public static readonly Color NavHover = Color.FromArgb(39, 67, 106);
-    public static readonly Color NavActive = Color.FromArgb(48, 83, 130);
-    public static readonly Color NavText = Color.FromArgb(196, 211, 230);
-    public static readonly Color NavMark = Color.FromArgb(99, 179, 237);
-    public static readonly Color Accent = Color.FromArgb(35, 99, 178);
-    public static readonly Color AccentHover = Color.FromArgb(28, 84, 153);
-    public static readonly Color Caption = Color.FromArgb(58, 66, 78);
-    public static readonly Color Text = Color.FromArgb(31, 36, 43);
-    public static readonly Color Hint = Color.FromArgb(128, 137, 150);
-    public static readonly Color Missing = Color.FromArgb(255, 222, 222);
-    public static readonly Color MissingBorder = Color.FromArgb(220, 90, 90);
-    public static readonly Color Bad = Color.FromArgb(200, 55, 55);
-    public static readonly Color Good = Color.FromArgb(46, 140, 87);
-    public static readonly Color Box = Color.FromArgb(248, 250, 252);
-    public static readonly Color Disabled = Color.FromArgb(236, 239, 243);
-    // рамка полей ввода - чёрная, чтобы поле не сливалось с фоном; у недоступного - серая
-    public static readonly Color Field = Color.Black;
-    public static readonly Color FieldOff = Color.FromArgb(170, 176, 184);
+    public static bool DarkMode;
+    public static Color Back = Color.FromArgb(242, 244, 247);
+    public static Color Card = Color.White;
+    public static Color Border = Color.FromArgb(221, 226, 233);
+    public static Color InputBorder = Color.FromArgb(196, 204, 214);
+    public static Color Nav = Color.FromArgb(28, 51, 84);
+    public static Color NavHover = Color.FromArgb(39, 67, 106);
+    public static Color NavActive = Color.FromArgb(48, 83, 130);
+    public static Color NavText = Color.FromArgb(196, 211, 230);
+    public static Color NavMark = Color.FromArgb(99, 179, 237);
+    public static Color Accent = Color.FromArgb(35, 99, 178);
+    public static Color AccentHover = Color.FromArgb(28, 84, 153);
+    public static Color Caption = Color.FromArgb(58, 66, 78);
+    public static Color Text = Color.FromArgb(31, 36, 43);
+    public static Color Hint = Color.FromArgb(128, 137, 150);
+    public static Color Missing = Color.FromArgb(255, 222, 222);
+    public static Color MissingBorder = Color.FromArgb(220, 90, 90);
+    public static Color Bad = Color.FromArgb(200, 55, 55);
+    public static Color Good = Color.FromArgb(46, 140, 87);
+    public static Color Box = Color.FromArgb(248, 250, 252);
+    public static Color Disabled = Color.FromArgb(236, 239, 243);
+    // рамка полей ввода - чёрная (в тёмной теме светлая), чтобы поле не сливалось с фоном; у недоступного - серая
+    public static Color Field = Color.Black;
+    public static Color FieldOff = Color.FromArgb(170, 176, 184);
     // поле, в котором курсор
-    public static readonly Color Focus = Color.FromArgb(255, 247, 205);
+    public static Color Focus = Color.FromArgb(255, 247, 205);
+    // фон полей ввода и списков; фон панелей, кнопок, плиток (был белый)
+    public static Color Input = Color.White;
+    public static Color Surface = Color.White;
+    // кнопка под мышью и нажатая; ссылки; оранжевое «проверьте»; жирная линия-разделитель
+    public static Color Hover = Color.FromArgb(236, 242, 250);
+    public static Color Pressed = Color.FromArgb(222, 233, 247);
+    public static Color Link = Color.FromArgb(35, 99, 178);
+    public static Color Warn = Color.FromArgb(190, 105, 0);
+    public static Color RuleLine = Color.Black;
+    // фон строк списков: вернулось/найдено (зелёный), внимание (оранжевый), вписано руками (жёлтый), другое (серый)
+    public static Color RowGood = Color.FromArgb(214, 241, 219);
+    public static Color RowWarn = Color.FromArgb(255, 236, 200);
+    public static Color RowNote = Color.FromArgb(255, 250, 222);
+    public static Color RowOther = Color.FromArgb(240, 240, 240);
+    public static Color Red = Color.FromArgb(205, 30, 30);
+
+    // тёмная тема: тёмно-серый фон, разделы чуть темнее/светлее, поля тёмные со светлой рамкой, текст светлый
+    public static void Apply(bool dark) {
+        DarkMode = dark;
+        if (!dark) return;
+        Back = Color.FromArgb(30, 33, 38);
+        Card = Color.FromArgb(38, 42, 48);
+        Border = Color.FromArgb(66, 72, 82);
+        InputBorder = Color.FromArgb(98, 106, 118);
+        Nav = Color.FromArgb(22, 27, 35);
+        NavHover = Color.FromArgb(34, 42, 54);
+        NavActive = Color.FromArgb(42, 54, 72);
+        NavText = Color.FromArgb(172, 184, 200);
+        Accent = Color.FromArgb(44, 98, 165);
+        AccentHover = Color.FromArgb(54, 114, 188);
+        Caption = Color.FromArgb(172, 180, 192);
+        Text = Color.FromArgb(222, 226, 232);
+        Hint = Color.FromArgb(138, 146, 158);
+        Missing = Color.FromArgb(88, 42, 46);
+        MissingBorder = Color.FromArgb(232, 112, 112);
+        Bad = Color.FromArgb(240, 120, 120);
+        Good = Color.FromArgb(112, 200, 142);
+        Box = Color.FromArgb(44, 48, 55);
+        Disabled = Color.FromArgb(40, 43, 49);
+        Field = Color.FromArgb(150, 160, 172);
+        FieldOff = Color.FromArgb(72, 78, 88);
+        Focus = Color.FromArgb(80, 70, 32);
+        Input = Color.FromArgb(48, 53, 61);
+        Surface = Color.FromArgb(40, 44, 51);
+        Hover = Color.FromArgb(56, 63, 74);
+        Pressed = Color.FromArgb(66, 76, 92);
+        Link = Color.FromArgb(118, 172, 236);
+        Warn = Color.FromArgb(232, 164, 72);
+        RuleLine = Color.FromArgb(160, 168, 180);
+        RowGood = Color.FromArgb(38, 72, 50);
+        RowWarn = Color.FromArgb(84, 64, 34);
+        RowNote = Color.FromArgb(70, 66, 38);
+        RowOther = Color.FromArgb(52, 56, 62);
+        Red = Color.FromArgb(244, 96, 96);
+    }
+
+    // тема из настроек (nastroiki.txt, «ТёмнаяТема»; нет записи - тёмная)
+    public static void Load(string here) {
+        string v = "1";
+        try { v = Memory.For(System.IO.Path.Combine(here, "nastroiki.txt")).Get("ТёмнаяТема", "1"); } catch { }
+        Apply(v == "1");
+    }
+
+    static bool Same(Color a, Color b) { return a.ToArgb() == b.ToArgb(); }
+
+    static bool Light(Color c) { return c.A == 255 && (Same(c, Color.White) || Same(c, SystemColors.Window) || Same(c, SystemColors.Control)); }
+
+    static bool Black(Color c) { return Same(c, Color.Black) || Same(c, SystemColors.ControlText) || Same(c, SystemColors.WindowText); }
+
+    // тёмная тема для окна и всего, что в нём (и что добавится потом): белое и системное светлое - тёмное, чёрный текст - светлый.
+    // Цвета, заданные программой (разделы, кнопки, подсветка), не трогаются
+    public static void Dress(Control c) {
+        if (!DarkMode || c == null) return;
+        if (c is Form) {
+            if (Light(c.BackColor)) c.BackColor = Back;
+            c.ForeColor = Text;
+        } else if (c is TextBox || c is ComboBox || c is ListBox || c is ListView) {
+            if (Light(c.BackColor)) c.BackColor = c is TextBox && ((TextBox)c).ReadOnly ? Surface : Input;
+            if (Black(c.ForeColor)) c.ForeColor = Text;
+            // линии сетки списка Windows рисует светлыми - на тёмном фоне режут глаз
+            if (c is ListView) ((ListView)c).GridLines = false;
+        } else if (c is DataGridView) {
+            DataGridView g = (DataGridView)c;
+            g.BackgroundColor = Input;
+            g.GridColor = Border;
+            g.DefaultCellStyle.BackColor = Input;
+            g.DefaultCellStyle.ForeColor = Text;
+            g.DefaultCellStyle.SelectionBackColor = Accent;
+            g.DefaultCellStyle.SelectionForeColor = Color.White;
+            g.EnableHeadersVisualStyles = false;
+            g.ColumnHeadersDefaultCellStyle.ForeColor = Text;
+            if (Light(g.ColumnHeadersDefaultCellStyle.BackColor)) g.ColumnHeadersDefaultCellStyle.BackColor = Surface;
+            g.RowHeadersDefaultCellStyle.BackColor = Surface;
+            g.RowHeadersDefaultCellStyle.ForeColor = Text;
+        } else {
+            if (Light(c.BackColor)) c.BackColor = Surface;
+            if (Black(c.ForeColor)) c.ForeColor = Text;
+            Button b = c as Button;
+            if (b != null && b.FlatStyle == FlatStyle.Flat && Light(b.FlatAppearance.MouseOverBackColor)) {
+                b.FlatAppearance.MouseOverBackColor = Hover;
+                b.FlatAppearance.MouseDownBackColor = Pressed;
+            }
+        }
+        LinkLabel l = c as LinkLabel;
+        if (l != null && Same(l.LinkColor, Color.FromArgb(35, 99, 178))) l.LinkColor = Link;
+        foreach (Control x in c.Controls) Dress(x);
+        // добавленное потом (строки, приборы учёта, фото) - тоже; подписка один раз на контейнер
+        if (!hooked.ContainsKey(c) && (c is Form || c is Panel || c is UserControl || c is GroupBox || c is TabPage || c is SplitContainer)) {
+            hooked[c] = true;
+            c.ControlAdded += delegate(object s, ControlEventArgs e) { Dress(e.Control); };
+            c.Disposed += delegate { hooked.Remove(c); };
+        }
+    }
+
+    static readonly Dictionary<Control, bool> hooked = new Dictionary<Control, bool>();
 
     // свой цвет у каждого раздела: фон, полоса заголовка, метка (полоска слева, рамка, значок в меню)
     public static Tint TintOf(string card) {
@@ -1446,12 +1564,26 @@ public static class St {
 public class Tint {
     public readonly Color Body, Head, Mark;
     public Tint(int r1, int g1, int b1, int r2, int g2, int b2, int r3, int g3, int b3) {
-        Body = Color.FromArgb(r1, g1, b1);
-        Head = Color.FromArgb(r2, g2, b2);
         Mark = Color.FromArgb(r3, g3, b3);
+        if (St.DarkMode) {
+            // тёмная тема: фон раздела - тёмный с лёгким оттенком его цвета, полоса заголовка - оттенок сильнее
+            Body = Mix(St.Card, Mark, 0.07);
+            Head = Mix(St.Card, Mark, 0.26);
+        } else {
+            Body = Color.FromArgb(r1, g1, b1);
+            Head = Color.FromArgb(r2, g2, b2);
+        }
     }
-    // тёмный оттенок метки - для заголовков
-    public Color Dark { get { return Color.FromArgb(Mark.R * 6 / 10, Mark.G * 6 / 10, Mark.B * 6 / 10); } }
+    static Color Mix(Color a, Color b, double k) {
+        return Color.FromArgb((int)(a.R + (b.R - a.R) * k), (int)(a.G + (b.G - a.G) * k), (int)(a.B + (b.B - a.B) * k));
+    }
+    // оттенок метки для заголовков: в светлой теме темнее, в тёмной - светлее
+    public Color Dark {
+        get {
+            if (St.DarkMode) return Mix(Mark, Color.White, 0.45);
+            return Color.FromArgb(Mark.R * 6 / 10, Mark.G * 6 / 10, Mark.B * 6 / 10);
+        }
+    }
 }
 
 public static class Ui {
@@ -1485,6 +1617,7 @@ public static class Ui {
         t.Font = St.Base;
         t.BorderStyle = BorderStyle.FixedSingle;
         t.ForeColor = St.Text;
+        t.BackColor = St.Input;
         if (lines > 1) {
             t.Multiline = true;
             t.ScrollBars = ScrollBars.Vertical;
@@ -1531,11 +1664,11 @@ public static class Ui {
             b.FlatAppearance.MouseDownBackColor = St.AccentHover;
         } else {
             b.Font = St.Base;
-            b.BackColor = Color.White;
+            b.BackColor = St.Surface;
             b.ForeColor = St.Text;
             b.FlatAppearance.BorderColor = St.InputBorder;
-            b.FlatAppearance.MouseOverBackColor = Color.FromArgb(236, 242, 250);
-            b.FlatAppearance.MouseDownBackColor = Color.FromArgb(222, 233, 247);
+            b.FlatAppearance.MouseOverBackColor = St.Hover;
+            b.FlatAppearance.MouseDownBackColor = St.Pressed;
         }
         return b;
     }
@@ -1545,7 +1678,7 @@ public static class Ui {
         l.Text = text;
         l.AutoSize = true;
         l.Font = St.Small;
-        l.LinkColor = St.Accent;
+        l.LinkColor = St.Link;
         l.ActiveLinkColor = St.AccentHover;
         l.LinkBehavior = LinkBehavior.HoverUnderline;
         l.BackColor = Color.Transparent;
@@ -1610,6 +1743,7 @@ public class Combo : ComboBox {
         DropDownStyle = editable ? ComboBoxStyle.DropDown : ComboBoxStyle.DropDownList;
         FlatStyle = FlatStyle.Flat;
         ForeColor = St.Text;
+        BackColor = St.Input;
         MaxDropDownItems = 14;
         Wrap = wrap;
         if (editable) {
@@ -1682,7 +1816,7 @@ public class Combo : ComboBox {
         if (!Wrap) { base.OnDrawItem(e); return; }
         if (e.Index < 0) return;
         bool sel = (e.State & DrawItemState.Selected) != 0;
-        using (SolidBrush b = new SolidBrush(sel ? St.Accent : Color.White)) e.Graphics.FillRectangle(b, e.Bounds);
+        using (SolidBrush b = new SolidBrush(sel ? St.Accent : St.Input)) e.Graphics.FillRectangle(b, e.Bounds);
         Rectangle r = new Rectangle(e.Bounds.X + 5, e.Bounds.Y + 4, e.Bounds.Width - 10, e.Bounds.Height - 6);
         TextRenderer.DrawText(e.Graphics, Items[e.Index].ToString(), Font, r, sel ? Color.White : St.Text, TextFormatFlags.WordBreak | TextFormatFlags.Left | TextFormatFlags.Top);
         if (!sel) using (Pen p = new Pen(St.Border)) e.Graphics.DrawLine(p, e.Bounds.Left, e.Bounds.Bottom - 1, e.Bounds.Right, e.Bounds.Bottom - 1);
@@ -1732,8 +1866,8 @@ public class Seg : Panel {
             b.FlatStyle = FlatStyle.Flat;
             b.FlatAppearance.BorderSize = 0;
             b.FlatAppearance.CheckedBackColor = St.Accent;
-            b.FlatAppearance.MouseOverBackColor = Color.FromArgb(232, 240, 250);
-            b.BackColor = Color.White;
+            b.FlatAppearance.MouseOverBackColor = St.Hover;
+            b.BackColor = St.Input;
             b.ForeColor = St.Text;
             b.Text = options[i];
             b.TextAlign = ContentAlignment.MiddleCenter;
@@ -1752,7 +1886,7 @@ public class Seg : Panel {
             b.CheckedChanged += delegate(object s, EventArgs e) {
                 RadioButton r = (RadioButton)s;
                 r.ForeColor = r.Checked ? Color.White : St.Text;
-                r.BackColor = r.Checked ? St.Accent : Color.White;
+                r.BackColor = r.Checked ? St.Accent : St.Input;
                 if (r.Checked && Changed != null) Changed(this, EventArgs.Empty);
             };
             buttons[i] = b;
@@ -1830,7 +1964,7 @@ public class BoxPanel : Panel {
     public string Title = "";
     public Color Mark = St.Border;
     public BoxPanel() {
-        BackColor = Color.White;
+        BackColor = St.Surface;
         DoubleBuffered = true;
         SetStyle(ControlStyles.ResizeRedraw, true);
     }
@@ -2104,7 +2238,7 @@ public class Rule : Control {
     }
     protected override void OnPaint(PaintEventArgs e) {
         base.OnPaint(e);
-        using (SolidBrush b = new SolidBrush(Color.Black)) e.Graphics.FillRectangle(b, 0, Height / 2 - 1, Width, 3);
+        using (SolidBrush b = new SolidBrush(St.RuleLine)) e.Graphics.FillRectangle(b, 0, Height / 2 - 1, Width, 3);
     }
 }
 
@@ -2147,6 +2281,8 @@ public class UnfocusFilter : IMessageFilter {
 // Всплывающее окошко под полем: не забирает фокус у поля (можно дальше печатать), закрывается само
 public class Popup : Form {
     public Popup() {
+        // тёмная тема: белое и системное светлое в окне - тёмное (St.Dress)
+        Load += delegate { St.Dress(this); };
         FormBorderStyle = FormBorderStyle.None;
         ShowInTaskbar = false;
         StartPosition = FormStartPosition.Manual;
@@ -2191,10 +2327,11 @@ public class DateBox : Panel {
         };
         box.MouseUp += delegate { if (popup == null || popup.IsDisposed) ShowCalendar(); };
         box.Enter += delegate { box.BackColor = St.Focus; };
-        box.Leave += delegate { box.BackColor = Enabled ? Color.White : St.Disabled; };
+        box.BackColor = St.Input;
+        box.Leave += delegate { box.BackColor = Enabled ? St.Input : St.Disabled; };
         pick.FlatStyle = FlatStyle.Flat;
         pick.FlatAppearance.BorderColor = St.Field;
-        pick.BackColor = Color.White;
+        pick.BackColor = St.Input;
         pick.UseVisualStyleBackColor = false;
         pick.Cursor = Cursors.Hand;
         pick.TabStop = false;
@@ -2302,8 +2439,8 @@ public class Heaters : Panel {
         add.Font = St.Bold;
         add.FlatStyle = FlatStyle.Flat;
         add.FlatAppearance.BorderColor = St.Accent;
-        add.ForeColor = St.Accent;
-        add.BackColor = Color.White;
+        add.ForeColor = St.Link;
+        add.BackColor = St.Surface;
         add.UseVisualStyleBackColor = false;
         add.Cursor = Cursors.Hand;
         add.Click += delegate { AddRow(); Relayout(); rows[rows.Count - 1].Kind.Focus(); };
@@ -2330,7 +2467,7 @@ public class Heaters : Panel {
         r.Power = new Button();
         r.Power.FlatStyle = FlatStyle.Flat;
         r.Power.FlatAppearance.BorderColor = St.Field;
-        r.Power.BackColor = Color.White;
+        r.Power.BackColor = St.Input;
         r.Power.UseVisualStyleBackColor = false;
         r.Power.Font = St.Base;
         r.Power.TextAlign = ContentAlignment.MiddleLeft;
@@ -2341,7 +2478,7 @@ public class Heaters : Panel {
         r.Remove.FlatStyle = FlatStyle.Flat;
         r.Remove.FlatAppearance.BorderColor = St.InputBorder;
         r.Remove.ForeColor = St.Hint;
-        r.Remove.BackColor = Color.White;
+        r.Remove.BackColor = St.Surface;
         r.Remove.UseVisualStyleBackColor = false;
         r.Remove.Cursor = Cursors.Hand;
         r.Remove.TabStop = false;
@@ -2412,7 +2549,7 @@ public class Heaters : Panel {
     // мощность - окошко с вариантами 0,5 ... 25 кВт и полем для своего значения
     void PickPower(Row r) {
         Popup p = new Popup();
-        p.BackColor = Color.White;
+        p.BackColor = St.Surface;
         p.Padding = new Padding(0);
         p.Paint += delegate(object s, PaintEventArgs e) { using (Pen pen = new Pen(St.InputBorder)) e.Graphics.DrawRectangle(pen, 0, 0, p.Width - 1, p.Height - 1); };
         int cols = 10, bw = 52, bh = 30, pad = 8;
@@ -2426,9 +2563,9 @@ public class Heaters : Panel {
             b.Font = St.Base;
             b.FlatStyle = FlatStyle.Flat;
             b.FlatAppearance.BorderColor = St.Border;
-            b.FlatAppearance.MouseOverBackColor = Color.FromArgb(232, 240, 250);
+            b.FlatAppearance.MouseOverBackColor = St.Hover;
             b.UseVisualStyleBackColor = false;
-            b.BackColor = v == r.PowerValue ? St.Accent : Color.White;
+            b.BackColor = v == r.PowerValue ? St.Accent : St.Input;
             b.ForeColor = v == r.PowerValue ? Color.White : St.Text;
             b.Cursor = Cursors.Hand;
             b.SetBounds(pad + ((i - 1) % cols) * bw, 30 + ((i - 1) / cols) * bh, bw - 2, bh - 2);
@@ -2561,8 +2698,8 @@ public class Seals : Panel {
         add.Font = St.Bold;
         add.FlatStyle = FlatStyle.Flat;
         add.FlatAppearance.BorderColor = St.Accent;
-        add.ForeColor = St.Accent;
-        add.BackColor = Color.White;
+        add.ForeColor = St.Link;
+        add.BackColor = St.Surface;
         add.UseVisualStyleBackColor = false;
         add.Cursor = Cursors.Hand;
         add.Click += delegate { AddRow(); Relayout(); rows[rows.Count - 1].Place.Focus(); };
@@ -2590,7 +2727,7 @@ public class Seals : Panel {
         r.Remove.FlatStyle = FlatStyle.Flat;
         r.Remove.FlatAppearance.BorderColor = St.InputBorder;
         r.Remove.ForeColor = St.Hint;
-        r.Remove.BackColor = Color.White;
+        r.Remove.BackColor = St.Surface;
         r.Remove.UseVisualStyleBackColor = false;
         r.Remove.Cursor = Cursors.Hand;
         r.Remove.TabStop = false;
@@ -2609,7 +2746,7 @@ public class Seals : Panel {
         foreach (Control c in new Control[] { r.Place, r.Number }) {
             Control cc = c;
             cc.Enter += delegate { cc.BackColor = St.Focus; };
-            cc.Leave += delegate { cc.BackColor = Color.White; };
+            cc.Leave += delegate { cc.BackColor = St.Input; };
         }
         rows.Add(r);
         Controls.Add(r.Place);
@@ -7452,9 +7589,11 @@ public class PhotoViewer : Form {
     }
 
     public PhotoViewer() {
+        // тёмная тема: белое и системное светлое в окне - тёмное (St.Dress)
+        Load += delegate { St.Dress(this); };
         Text = "Фото документов";
         Font = St.Base;
-        BackColor = Color.White;
+        BackColor = St.Surface;
         ShowInTaskbar = false;
         MinimizeBox = false;
         KeyPreview = true;
@@ -7463,7 +7602,7 @@ public class PhotoViewer : Form {
 
         bar.Dock = DockStyle.Top;
         bar.Height = 50;
-        bar.BackColor = Color.White;
+        bar.BackColor = St.Surface;
         prev = Bar("‹", 40);
         next = Bar("›", 40);
         prev.Font = next.Font = new Font("Segoe UI", 14f, FontStyle.Bold);
@@ -13065,6 +13204,8 @@ public class DogovorForm : Form {
     static readonly object mrzLock = new object();
 
     public DogovorForm(string here) {
+        // тёмная тема: белое и системное светлое в окне - тёмное (St.Dress)
+        Load += delegate { St.Dress(this); };
         this.here = here;
         templateFile = Path.Combine(here, "shablon.docx");
         lists = new Lists(Path.Combine(here, "spravochniki.txt"));
@@ -13256,7 +13397,7 @@ public class DogovorForm : Form {
         // поле, в котором курсор, - светло-жёлтое: видно, где печатаешь
         if (c is TextBox || c is ComboBox) {
             c.Enter += delegate { c.BackColor = St.Focus; };
-            c.Leave += delegate { c.BackColor = c.Enabled ? Color.White : St.Disabled; checkTimer.Stop(); checkTimer.Start(); };
+            c.Leave += delegate { c.BackColor = c.Enabled ? St.Input : St.Disabled; checkTimer.Stop(); checkTimer.Start(); };
         }
         // с заглавной, когда уходим из поля: «боровляны» -> «Боровляны», «иванов пётр» -> «Иванов Пётр»
         if (key == "np" || key == "ulica" || key == "fio" || key == "adres_prozh") c.Leave += delegate {
@@ -13651,7 +13792,7 @@ public class DogovorForm : Form {
         Panel p = new Panel();
         p.Dock = DockStyle.Bottom;
         p.Height = 66;
-        p.BackColor = Color.White;
+        p.BackColor = St.Surface;
         p.Paint += delegate(object s, PaintEventArgs e) {
             using (Pen pen = new Pen(St.Border)) e.Graphics.DrawLine(pen, 0, 0, p.Width, 0);
         };
@@ -13948,7 +14089,7 @@ public class DogovorForm : Form {
     void Enable() {
         bool two = V("schetchikov") != "1 счётчик";
         meter2.Enabled = two;
-        meter2.BackColor = two ? Color.White : St.Disabled;
+        meter2.BackColor = two ? St.Surface : St.Disabled;
         meter2.Invalidate();
         inp["sms_tel"].Enabled = V("sms") == "согласен(а)";
         if (smsFromTel != null) smsFromTel.Enabled = V("sms") == "согласен(а)" && V("telefon").Length > 0;
@@ -14035,7 +14176,7 @@ public class DogovorForm : Form {
         LayoutCards();
     }
 
-    static readonly Color Warn = Color.FromArgb(190, 105, 0);
+    static Color Warn { get { return St.Warn; } }
     // один шрифт на все подсказки (новый шрифт на каждую подсказку - лишние объекты Windows)
     static readonly Font SmallBold = new Font(St.Small, FontStyle.Bold);
 
@@ -14305,7 +14446,7 @@ public class DogovorForm : Form {
             bool m = showMissing && miss.ContainsKey(kv.Key);
             if (kv.Value is Seg) { if (((Seg)kv.Value).Missing != m) ((Seg)kv.Value).Missing = m; }
             else if (kv.Value is TextBox || kv.Value is ComboBox) {
-                Color want = kv.Value.ContainsFocus ? St.Focus : m ? St.Missing : (kv.Value.Enabled ? Color.White : St.Disabled);
+                Color want = kv.Value.ContainsFocus ? St.Focus : m ? St.Missing : (kv.Value.Enabled ? St.Input : St.Disabled);
                 if (kv.Value.BackColor != want) kv.Value.BackColor = want;
             }
         }
@@ -15465,6 +15606,8 @@ public class RequiredDialog : Form {
     readonly Dictionary<string, CheckBox> boxes = new Dictionary<string, CheckBox>();
 
     public RequiredDialog(List<string[]> fields, Dictionary<string, bool> current, string[] defaults) {
+        // тёмная тема: белое и системное светлое в окне - тёмное (St.Dress)
+        Load += delegate { St.Dress(this); };
         Text = "Обязательные поля";
         Font = St.Base;
         BackColor = St.Back;
@@ -15488,7 +15631,7 @@ public class RequiredDialog : Form {
         Panel bottom = new Panel();
         bottom.Dock = DockStyle.Bottom;
         bottom.Height = 56;
-        bottom.BackColor = Color.White;
+        bottom.BackColor = St.Surface;
         Button ok = Ui.Button("Сохранить", true), cancel = Ui.Button("Отмена", false), reset = Ui.Button("Как было сначала", false);
         ok.Size = new Size(140, 34); cancel.Size = new Size(110, 34); reset.Size = new Size(170, 34);
         bottom.Controls.Add(ok); bottom.Controls.Add(cancel); bottom.Controls.Add(reset);
@@ -15576,11 +15719,13 @@ public class SavedDialog : Form {
 
     // kind: 0 - сохранённые договоры, 1 - справки (данные справок), 2 - наряды
     public SavedDialog(string dir, int kind) {
+        // тёмная тема: белое и системное светлое в окне - тёмное (St.Dress)
+        Load += delegate { St.Dress(this); };
         this.kind = kind;
         bool spravki = kind == 1;
         Text = kind == 1 ? "Сохранённые справки" : kind == 2 ? "Сохранённые наряды" : "Сохранённые договоры";
         Font = St.Base;
-        BackColor = Color.White;
+        BackColor = St.Surface;
         StartPosition = FormStartPosition.CenterParent;
         Size = new Size(980, 600);
         MinimizeBox = false;
@@ -15703,6 +15848,10 @@ public class StartMenu : Form {
     SpravkaLogForm log;
 
     public StartMenu(string here, string launch) {
+        // тема окон (тёмная / светлая) - из настроек, до создания элементов
+        St.Load(here);
+        // тёмная тема: белое и системное светлое в окне - тёмное (St.Dress)
+        Load += delegate { St.Dress(this); };
         this.here = here;
         Tag = launch;
         Text = "Оформление договора электроснабжения";
@@ -15776,7 +15925,7 @@ public class StartMenu : Form {
             link.Text = l[0];
             link.Font = St.Base;
             link.AutoSize = true;
-            link.LinkColor = St.Accent;
+            link.LinkColor = St.Link;
             link.Location = new Point(x, 608);
             string what = l[1];
             link.LinkClicked += delegate { OpenPlace(what); };
@@ -15790,6 +15939,23 @@ public class StartMenu : Form {
         keys.AutoSize = true;
         keys.Location = new Point(36, 644);
         Controls.Add(keys);
+        // тема окон: тёмная (по умолчанию) или светлая - меняется при следующем запуске
+        LinkLabel theme = new LinkLabel();
+        theme.Name = "theme";
+        theme.Font = St.Small;
+        theme.AutoSize = true;
+        theme.LinkColor = St.Link;
+        theme.Text = St.DarkMode ? "Тема: тёмная - сделать светлой" : "Тема: светлая - сделать тёмной";
+        theme.Location = new Point(604 - TextRenderer.MeasureText(theme.Text, St.Small).Width, 644);
+        theme.LinkClicked += delegate {
+            Memory m = Memory.For(Settings);
+            m.Values["ТёмнаяТема"] = St.DarkMode ? "0" : "1";
+            m.Save();
+            theme.Text = St.DarkMode ? "будет светлая - после перезапуска" : "будет тёмная - после перезапуска";
+            theme.Left = 604 - TextRenderer.MeasureText(theme.Text, St.Small).Width;
+            MessageBox.Show(this, "Тема сменится при следующем запуске программы.", Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
+        };
+        Controls.Add(theme);
 
         KeyDown += delegate(object s, KeyEventArgs e) {
             if (e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; OpenDogovor(); }
@@ -15968,7 +16134,7 @@ public class Tile : Control {
         Title = title;
         Sub = sub;
         this.mark = mark;
-        BackColor = Color.White;
+        BackColor = St.Surface;
         Cursor = Cursors.Hand;
         TabStop = true;
         DoubleBuffered = true;
@@ -15977,14 +16143,14 @@ public class Tile : Control {
 
     protected override void OnPaint(PaintEventArgs e) {
         Graphics g = e.Graphics;
-        using (SolidBrush b = new SolidBrush(hover ? Color.FromArgb(246, 249, 253) : Color.White)) g.FillRectangle(b, ClientRectangle);
+        using (SolidBrush b = new SolidBrush(hover ? St.Hover : St.Surface)) g.FillRectangle(b, ClientRectangle);
         using (SolidBrush b = new SolidBrush(mark)) g.FillRectangle(b, 0, 0, 8, Height);
         using (Pen p = new Pen(hover || Focused ? St.Accent : St.Border, hover || Focused ? 2f : 1f)) g.DrawRectangle(p, 1, 1, Width - 2, Height - 2);
         // невысокая плитка (меню из шести) - строки плотнее
         bool low = Height < 80;
         TextRenderer.DrawText(g, Title, TitleFont, new Point(28, low ? 6 : 10), St.Text);
         TextRenderer.DrawText(g, Sub, St.Base, new Rectangle(30, low ? 36 : 43, Width - 70, 22), St.Hint, TextFormatFlags.EndEllipsis);
-        if (Note.Length > 0) TextRenderer.DrawText(g, Note, St.Small, new Point(30, low ? 54 : 63), Color.FromArgb(190, 105, 0));
+        if (Note.Length > 0) TextRenderer.DrawText(g, Note, St.Small, new Point(30, low ? 54 : 63), St.Warn);
         // стрелка справа
         using (Pen p = new Pen(St.Accent, 2.5f)) {
             int cx = Width - 30, cy = Height / 2;
@@ -16052,6 +16218,8 @@ public class SpravkaForm : Form {
     public static string DataFolder(string here) { return Path.Combine(Folder(here), "данные"); }
 
     public SpravkaForm(string here) {
+        // тёмная тема: белое и системное светлое в окне - тёмное (St.Dress)
+        Load += delegate { St.Dress(this); };
         this.here = here;
         templateFile = Path.Combine(here, "spravka.docx");
         lists = new Lists(Path.Combine(here, "spravochniki.txt"));
@@ -16150,7 +16318,7 @@ public class SpravkaForm : Form {
         else c.TextChanged += h;
         if (c is TextBox || c is ComboBox) {
             c.Enter += delegate { c.BackColor = St.Focus; };
-            c.Leave += delegate { c.BackColor = c.Enabled ? Color.White : St.Disabled; };
+            c.Leave += delegate { c.BackColor = c.Enabled ? St.Input : St.Disabled; };
         }
     }
 
@@ -16477,7 +16645,7 @@ public class SpravkaForm : Form {
             for (int i = 1; i < l.Length; i++) {
                 Control c = inp[l[i]];
                 c.Enabled = on;
-                c.BackColor = on ? Color.White : St.Disabled;
+                c.BackColor = on ? St.Input : St.Disabled;
             }
         }
     }
@@ -16589,7 +16757,7 @@ public class SpravkaForm : Form {
         Panel p = new Panel();
         p.Dock = DockStyle.Bottom;
         p.Height = 66;
-        p.BackColor = Color.White;
+        p.BackColor = St.Surface;
         p.Paint += delegate(object s, PaintEventArgs e) {
             using (Pen pen = new Pen(St.Border)) e.Graphics.DrawLine(pen, 0, 0, p.Width, 0);
         };
@@ -17398,10 +17566,10 @@ public class MeterBox : Panel {
     public string Number = "1", Info = "";
     public const int Head = 40;
     static readonly Font NumberFont = new Font("Segoe UI", 20f, FontStyle.Bold), TitleFont = new Font("Segoe UI", 11.5f, FontStyle.Bold);
-    static readonly Color Red = Color.FromArgb(205, 30, 30);
+    static Color Red { get { return St.Red; } }
 
     public MeterBox() {
-        BackColor = Color.White;
+        BackColor = St.Surface;
         DoubleBuffered = true;
         SetStyle(ControlStyles.ResizeRedraw, true);
     }
@@ -17466,6 +17634,8 @@ public class NaryadForm : Form {
     public static string DataFolder(string here) { return Path.Combine(Folder(here), "данные"); }
 
     public NaryadForm(string here) {
+        // тёмная тема: белое и системное светлое в окне - тёмное (St.Dress)
+        Load += delegate { St.Dress(this); };
         this.here = here;
         templateFile = Path.Combine(here, "naryad.docx");
         lists = new Lists(Path.Combine(here, "spravochniki.txt"));
@@ -17567,7 +17737,7 @@ public class NaryadForm : Form {
         else c.TextChanged += h;
         if (c is TextBox || c is ComboBox) {
             c.Enter += delegate { c.BackColor = St.Focus; };
-            c.Leave += delegate { c.BackColor = c.Enabled ? Color.White : St.Disabled; };
+            c.Leave += delegate { c.BackColor = c.Enabled ? St.Input : St.Disabled; };
         }
         // с заглавной, когда уходим из поля: «боровляны» -> «Боровляны»
         if (key == "np" || key == "ulica" || key == "fio") c.Leave += delegate { string v = c.Text.Trim(); if (v.Length > 0 && Up(v) != v) c.Text = Up(v); };
@@ -17704,7 +17874,7 @@ public class NaryadForm : Form {
             Control c = inp[k];
             bool on = two && (k != "data2" || V("s_datoy2") == "1");
             c.Enabled = on;
-            if (c is TextBox || c is ComboBox) c.BackColor = on ? Color.White : St.Disabled;
+            if (c is TextBox || c is ComboBox) c.BackColor = on ? St.Input : St.Disabled;
         }
         Control same = Find("sameAsFirst");
         if (same != null) same.Enabled = two;
@@ -17899,7 +18069,7 @@ public class NaryadForm : Form {
         Panel p = new Panel();
         p.Dock = DockStyle.Bottom;
         p.Height = 66;
-        p.BackColor = Color.White;
+        p.BackColor = St.Surface;
         p.Paint += delegate(object s, PaintEventArgs e) {
             using (Pen pen = new Pen(St.Border)) e.Graphics.DrawLine(pen, 0, 0, p.Width, 0);
         };
@@ -18753,7 +18923,7 @@ public class SpravkaLogForm : Form {
     bool busy;
     public bool NoQuestions;                          // для проверки без окон: на вопросы - «да»
 
-    static readonly Color Returned = Color.FromArgb(214, 241, 219);
+    static Color Returned { get { return St.RowGood; } }
 
     class Row {
         public SpravkaRec Rec;
@@ -18764,6 +18934,8 @@ public class SpravkaLogForm : Form {
     readonly List<Row> rows = new List<Row>();
 
     public SpravkaLogForm(string here) {
+        // тёмная тема: белое и системное светлое в окне - тёмное (St.Dress)
+        Load += delegate { St.Dress(this); };
         this.here = here;
         memory = Memory.For(Path.Combine(here, "nastroiki.txt"));
         Text = "Журнал справок";
@@ -18849,7 +19021,7 @@ public class SpravkaLogForm : Form {
         Panel bottom = new Panel();
         bottom.Dock = DockStyle.Bottom;
         bottom.Height = 112;
-        bottom.BackColor = Color.White;
+        bottom.BackColor = St.Surface;
         bottom.Paint += delegate(object s, PaintEventArgs e) { using (Pen pen = new Pen(St.Border)) e.Graphics.DrawLine(pen, 0, 0, bottom.Width, 0); };
         take.SetBounds(24, 14, 260, 40);
         take.Click += delegate { TakeFromPhone(); };
@@ -19063,7 +19235,7 @@ public class SpravkaLogForm : Form {
             if (a.Got.Contains(((Row)it.Tag).Rec.Name)) { it.Selected = true; it.EnsureVisible(); }
     }
 
-    static readonly Color Warn = Color.FromArgb(190, 105, 0);
+    static Color Warn { get { return St.Warn; } }
 
     // ---------- из папки ----------
 
@@ -19447,6 +19619,8 @@ public class JurForm : Form {
     string ReportFile { get { return Path.Combine(here, "otchet_jur.txt"); } }
 
     public JurForm(string here) {
+        // тёмная тема: белое и системное светлое в окне - тёмное (St.Dress)
+        Load += delegate { St.Dress(this); };
         this.here = here;
         memory = Memory.For(Path.Combine(here, "nastroiki.txt"));
         Text = "База юр лиц и правило лицевого";
@@ -19676,6 +19850,7 @@ public class JurForm : Form {
             f.CancelButton = cancel;
             f.PerformLayout();
             f.Size = new Size(861, 480);
+            St.Dress(f);
             if (f.ShowDialog(this) != DialogResult.OK || lv.SelectedItems.Count == 0) return null;
             return (string)lv.SelectedItems[0].Tag;
         }
@@ -19750,7 +19925,7 @@ public class JurForm : Form {
         if (c < 0) { lsOut.Text = "для этого номера контрольной цифры нет (правило даёт 10)"; lsOut.ForeColor = St.Bad; }
         else if (special && !rule.SpecialSure) {
             lsOut.Text = "лицевой: " + d + c + "?   особый случай (сумма даёт 10) - эту цифру возьмите из базы";
-            lsOut.ForeColor = Color.FromArgb(190, 105, 0);
+            lsOut.ForeColor = St.Warn;
         } else {
             lsOut.Text = "лицевой: " + d + c + (special ? "   (особый случай - второй счёт; сверьте с базой)" : "   (сверьте с базой: «формирование лицевых счетов»)");
             lsOut.ForeColor = St.Text;
@@ -21186,9 +21361,13 @@ public class JurPick : Form {
     bool lsOk, filling, fromNear;
     public bool NoQuestions;        // для проверки без окон: на вопросы - «да»
 
-    static readonly Color FlatBack = Color.FromArgb(214, 240, 220), OtherBack = Color.FromArgb(240, 240, 240), Warn = Color.FromArgb(190, 105, 0);
+    static Color FlatBack { get { return St.RowGood; } }
+    static Color OtherBack { get { return St.RowOther; } }
+    static Color Warn { get { return St.Warn; } }
 
     public JurPick(string here) {
+        // тёмная тема: белое и системное светлое в окне - тёмное (St.Dress)
+        Load += delegate { St.Dress(this); };
         memory = Memory.For(Path.Combine(here, "nastroiki.txt"));
         lists = new Lists(Path.Combine(here, "spravochniki.txt"));
         rule = CheckRule.Current(memory.Get("ЛицевойПравило", ""));
@@ -22790,6 +22969,8 @@ public class PlombyForm : Form {
     public static string Folder(string here) { return Path.Combine(here, "Пломбы"); }
 
     public PlombyForm(string here) {
+        // тёмная тема: белое и системное светлое в окне - тёмное (St.Dress)
+        Load += delegate { St.Dress(this); };
         this.here = here;
         dir = Folder(here);
         memory = Memory.For(Path.Combine(here, "nastroiki.txt"));
@@ -22826,7 +23007,7 @@ public class PlombyForm : Form {
         Panel left = new Panel();
         left.Dock = DockStyle.Left;
         left.Width = 330;
-        left.BackColor = Color.White;
+        left.BackColor = St.Surface;
         left.Padding = new Padding(14);
         Label lcap = Ui.Caption("Партии пломб (выданные)");
         lcap.Font = St.Bold;
@@ -22900,7 +23081,7 @@ public class PlombyForm : Form {
         grid.AllowUserToResizeRows = false;
         grid.RowHeadersVisible = false;
         grid.SelectionMode = DataGridViewSelectionMode.CellSelect;
-        grid.BackgroundColor = Color.White;
+        grid.BackgroundColor = St.Input;
         grid.BorderStyle = BorderStyle.FixedSingle;
         grid.Font = St.Base;
         grid.ColumnHeadersDefaultCellStyle.Font = St.Bold;
@@ -23012,12 +23193,12 @@ public class PlombyForm : Form {
                 DataGridViewRow gr = grid.Rows[i];
                 gr.Tag = r;
                 if (gaps.ContainsKey(r)) gr.DefaultCellStyle.BackColor = St.Missing;
-                else if (r.Conflict.Length > 0) gr.DefaultCellStyle.BackColor = Color.FromArgb(255, 236, 200);
-                else if (r.HandOnly) gr.DefaultCellStyle.BackColor = Color.FromArgb(255, 250, 222);
+                else if (r.Conflict.Length > 0) gr.DefaultCellStyle.BackColor = St.RowWarn;
+                else if (r.HandOnly) gr.DefaultCellStyle.BackColor = St.RowNote;
                 else if (r.Paper && !r.Used) { gr.DefaultCellStyle.ForeColor = St.Hint; gr.DefaultCellStyle.BackColor = St.Disabled; }
                 else if (!r.Used) gr.DefaultCellStyle.ForeColor = St.Hint;
                 // вписанное поверх договора - синим
-                for (int c = 0; c < SealRow.Cols; c++) if (r.Hand[c] != null && r.Hand[c] != r.Auto[c] && r.Source.Length > 0) gr.Cells[2 + c].Style.ForeColor = St.Accent;
+                for (int c = 0; c < SealRow.Cols; c++) if (r.Hand[c] != null && r.Hand[c] != r.Auto[c] && r.Source.Length > 0) gr.Cells[2 + c].Style.ForeColor = St.Link;
             }
         } finally { filling = false; }
     }
@@ -23083,7 +23264,7 @@ public class PlombyForm : Form {
         using (Form f = new Form()) {
             f.Text = "С какого номера ведёт программа";
             f.Font = St.Base;
-            f.BackColor = Color.White;
+            f.BackColor = St.Surface;
             f.FormBorderStyle = FormBorderStyle.FixedDialog;
             f.StartPosition = FormStartPosition.CenterParent;
             f.MaximizeBox = f.MinimizeBox = false;
@@ -23104,6 +23285,7 @@ public class PlombyForm : Form {
             f.Controls.AddRange(new Control[] { l, t, ok, cancel });
             f.AcceptButton = ok;
             f.CancelButton = cancel;
+            St.Dress(f);
             if (f.ShowDialog(this) != DialogResult.OK) return;
             int k = cur.IndexOf(t.Text.Trim());
             if (k < 0) { MessageBox.Show(this, "Такого номера нет в партии " + cur.Title + ".", Text); return; }
@@ -23174,9 +23356,11 @@ public class BatchDialog : Form {
     public string SinceNumber { get { return since.Text.Trim(); } }
 
     public BatchDialog(Memory memory, List<string> names) {
+        // тёмная тема: белое и системное светлое в окне - тёмное (St.Dress)
+        Load += delegate { St.Dress(this); };
         Text = "Новая партия пломб";
         Font = St.Base;
-        BackColor = Color.White;
+        BackColor = St.Surface;
         StartPosition = FormStartPosition.CenterParent;
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = MinimizeBox = false;
