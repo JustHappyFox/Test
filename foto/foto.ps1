@@ -120,7 +120,8 @@ public static class Crash {
 // Телефон по кабелю (Android - «Передача файлов», iPhone - «Доверять этому компьютеру») виден в «Этот компьютер» как
 // устройство, а не как диск: обычными файловыми функциями его не прочитать. Работаем через оболочку Windows
 // (Shell.Application, как Проводник), в отдельном потоке STA. Фото ищутся в DCIM (Camera, Screenshots, у iPhone - 100APPLE...)
-// и в Pictures\Screenshots; дата - «Изменён» (как в Проводнике).
+// и в Pictures\Screenshots; дата - «Изменён» (как в Проводнике). У телефона из списка могут быть свои папки (сколько угодно,
+// у каждой - что из неё брать: фото, скрины, видео, и вложенные папки) - тогда берётся только из них.
 
 public delegate object ShellMaker();
 public delegate void TextHandler(string text);
@@ -140,6 +141,59 @@ public class PhoneFile {
     public string Source { get { return Device + ": " + Folder; } }
 }
 
+// своя папка телефона: путь от устройства («Внутренний общий накопитель\DCIM\Camera») и что из неё брать
+public class PhonePath {
+    public string Path = "";
+    public bool Photo = true, Screens = true, Video = true, Sub;    // Sub - и вложенные папки
+
+    public string KindsText {
+        get {
+            List<string> k = new List<string>();
+            if (Photo) k.Add("фото");
+            if (Screens) k.Add("скрины");
+            if (Video) k.Add("видео");
+            if (Sub) k.Add("вложенные");
+            return string.Join(",", k.ToArray());
+        }
+    }
+
+    public PhonePath Copy() {
+        PhonePath p = new PhonePath();
+        p.Path = Path; p.Photo = Photo; p.Screens = Screens; p.Video = Video; p.Sub = Sub;
+        return p;
+    }
+
+    // «путь>фото,видео,вложенные»
+    public static PhonePath Parse(string s) {
+        int k = s.LastIndexOf('>');
+        PhonePath p = new PhonePath();
+        p.Path = Clean(k >= 0 ? s.Substring(0, k) : s);
+        string w = k >= 0 ? s.Substring(k + 1) : "фото,скрины,видео";
+        p.Photo = w.Contains("фото");
+        p.Screens = w.Contains("скрины");
+        p.Video = w.Contains("видео");
+        p.Sub = w.Contains("вложенные");
+        return p;
+    }
+
+    // «Внутренний общий накопитель / DCIM/Camera/» -> «Внутренний общий накопитель\DCIM\Camera»
+    public static string Clean(string s) {
+        List<string> parts = new List<string>();
+        foreach (string x in (s ?? "").Replace('/', '\\').Split('\\')) if (x.Trim().Length > 0) parts.Add(x.Trim());
+        return string.Join("\\", parts.ToArray());
+    }
+
+    // что из этой папки брать: видео - если отмечено; картинка - из папки только скринов - скрин, только фото - фото, обеих - по имени
+    public string KindOf(string kind) {
+        if (kind == null) return null;
+        if (kind == "видео") return Video ? kind : null;
+        if (Photo && Screens) return kind;
+        if (Screens) return "скрин";
+        if (Photo) return "фото";
+        return null;
+    }
+}
+
 // подключённый телефон: имя, путь в оболочке, номер устройства (серийный номер USB; IMEI Windows не видит)
 public class PhoneDevice {
     public string Name = "", Path = "", Id = "";
@@ -147,6 +201,9 @@ public class PhoneDevice {
 
 public class ScanResult {
     public string Error;
+    public int Opened;                                              // сколько папок с фото открылось (0 - телефон заблокирован)
+    public readonly List<string> Missing = new List<string>();      // свои папки телефона, которых на нём нет
+    public readonly List<string> Own = new List<string>();          // телефоны со своими папками
     public readonly List<string> Devices = new List<string>();      // найденные телефоны
     public readonly List<string> DeviceInfo = new List<string>();   // для отчёта: имя и номер устройства
     public readonly List<string> Sources = new List<string>();      // папки с фото («Redmi 8A: ...\DCIM\Camera»)
@@ -170,6 +227,8 @@ public static class PhoneShell {
     // оболочку можно подменить (проверка программы без телефона)
     public static ShellMaker MakeShell = delegate { return Activator.CreateInstance(Type.GetTypeFromProgID("Shell.Application")); };
     public static int StartSeconds = 90;     // сколько ждать, пока файл начнёт появляться
+    // свои папки телефонов: номер устройства -> папки (копия настроек; ставит окно перед просмотром телефона)
+    public static Dictionary<string, List<PhonePath>> DevicePaths = new Dictionary<string, List<PhonePath>>();
     public const string StagingName = "_перенос с телефона";
 
     static readonly string[] PhotoExt = { ".jpg", ".jpeg", ".png", ".heic", ".heif", ".dng", ".webp", ".gif", ".bmp", ".tif", ".tiff" };
@@ -365,6 +424,72 @@ public static class PhoneShell {
         return r;
     }
 
+    // папка для просмотра: путь (как в списке «Откуда»), объект оболочки, своя настройка (null - как ищет программа), глубина
+    class Src {
+        public string Key; public object Folder; public PhonePath Rule; public int Depth;
+        public Src(string k, object f, PhonePath r, int d) { Key = k; Folder = f; Rule = r; Depth = d; }
+    }
+
+    // папка по пути от устройства («Внутренний общий накопитель\DCIM\Camera»); нет - null
+    static object Walk(object dev, string rel) {
+        object cur = Sub(dev);
+        foreach (string part in rel.Split('\\')) {
+            if (part.Length == 0) continue;
+            object next = Named(Items(cur), part);
+            if (next == null) return null;
+            cur = Sub(next);
+        }
+        return cur;
+    }
+
+    // свои папки телефона: одинаковые пути - одной папкой (что брать - всё отмеченное); нет на телефоне - в Missing
+    static List<Src> OwnFolders(object dev, List<PhonePath> paths, string devName, ScanResult r) {
+        List<Src> l = new List<Src>();
+        Dictionary<string, PhonePath> seen = new Dictionary<string, PhonePath>(StringComparer.OrdinalIgnoreCase);
+        foreach (PhonePath p0 in paths) {
+            string key = PhonePath.Clean(p0.Path);
+            if (key.Length == 0) continue;
+            PhonePath had;
+            if (seen.TryGetValue(key, out had)) {
+                had.Photo |= p0.Photo; had.Screens |= p0.Screens; had.Video |= p0.Video; had.Sub |= p0.Sub;
+                continue;
+            }
+            object f = Walk(dev, key);
+            if (f == null) { r.Missing.Add(devName + ": " + key); continue; }
+            PhonePath p = p0.Copy();
+            p.Path = key;
+            seen[key] = p;
+            l.Add(new Src(key, f, p, 0));
+        }
+        return l;
+    }
+
+    // подпапки папки телефона (для выбора папки); телефона или папки нет - null
+    public static List<string> Subfolders(string devicePath, string devName, string rel) {
+        object shell = MakeShell();
+        object dev = null;
+        foreach (object d in Devices(shell)) if (devicePath.Length > 0 ? Str(d, "Path") == devicePath : Str(d, "Name") == devName) { dev = d; break; }
+        if (dev == null) return null;
+        object f = Walk(dev, rel ?? "");
+        if (f == null) return null;
+        List<string> r = new List<string>();
+        foreach (object it in Items(f)) if (Flag(it, "IsFolder")) r.Add(Str(it, "Name"));
+        r.Sort(StringComparer.CurrentCultureIgnoreCase);
+        return r;
+    }
+
+    // папки, где программа ищет сама (для «как ищет программа» в настройке телефона)
+    public static List<string> DefaultFolders(string devicePath, string devName) {
+        object shell = MakeShell();
+        foreach (object d in Devices(shell)) {
+            if (devicePath.Length > 0 ? Str(d, "Path") != devicePath : Str(d, "Name") != devName) continue;
+            List<string> r = new List<string>();
+            foreach (KeyValuePair<string, object> f in PhotoFolders(d)) r.Add(f.Key);
+            return r;
+        }
+        return null;
+    }
+
     static Exception Inner(Exception ex) { return ex is System.Reflection.TargetInvocationException && ex.InnerException != null ? ex.InnerException : ex; }
 
     // какие фото есть на подключённых телефонах
@@ -382,18 +507,39 @@ public static class PhoneShell {
                     "iPhone: на вопрос «Доверять этому компьютеру?» - «Доверять».";
                 return r;
             }
+            Dictionary<string, List<PhonePath>> own = DevicePaths;
             foreach (object dev in devs) {
-                string devName = Str(dev, "Name"), devPath = Str(dev, "Path");
+                string devName = Str(dev, "Name"), devPath = Str(dev, "Path"), id = DeviceId(devPath, devName);
                 r.Devices.Add(devName);
-                r.DeviceInfo.Add(devName + " - номер устройства " + DeviceId(devPath, devName));
+                r.DeviceInfo.Add(devName + " - номер устройства " + id);
                 if (progress != null) progress("Телефон «" + devName + "»: ищу папки с фото...");
-                foreach (KeyValuePair<string, object> f in PhotoFolders(dev)) {
+                // свои папки телефона (из настройки) или как ищет программа: DCIM и Pictures\Screenshots
+                List<PhonePath> mine;
+                List<Src> queue = new List<Src>();
+                Dictionary<string, bool> seen = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+                if (own != null && own.TryGetValue(id, out mine) && mine.Count > 0) {
+                    r.Own.Add(devName);
+                    queue = OwnFolders(dev, mine, devName, r);
+                } else foreach (KeyValuePair<string, object> pf in PhotoFolders(dev)) queue.Add(new Src(pf.Key, pf.Value, null, 0));
+                foreach (Src q in queue) seen[q.Key] = true;
+                for (int qi = 0; qi < queue.Count; qi++) {
+                    Src f = queue[qi];
                     int n = 0;
-                    List<object> items = Items(f.Value);
+                    List<object> items = Items(f.Folder);
+                    if (f.Folder != null) r.Opened++;
                     foreach (object it in items) {
-                        if (Flag(it, "IsFolder")) continue;
+                        if (Flag(it, "IsFolder")) {
+                            // «и вложенные папки»: кроме скрытых (.thumbnails), не глубже 6
+                            string sn = Str(it, "Name");
+                            if (f.Rule != null && f.Rule.Sub && f.Depth < 6 && !sn.StartsWith(".") && !seen.ContainsKey(f.Key + "\\" + sn)) {
+                                seen[f.Key + "\\" + sn] = true;
+                                queue.Add(new Src(f.Key + "\\" + sn, Sub(it), f.Rule, f.Depth + 1));
+                            }
+                            continue;
+                        }
                         string name = FileName(it);
                         string kind = KindOf(name, f.Key);
+                        if (f.Rule != null) kind = f.Rule.KindOf(kind);
                         if (kind == null) continue;
                         PhoneFile p = new PhoneFile();
                         p.Device = devName;
@@ -412,7 +558,12 @@ public static class PhoneShell {
                     if (n > 0) r.Sources.Add(devName + ": " + f.Key);
                 }
             }
-            if (r.Sources.Count == 0)
+            if (r.Sources.Count == 0 && r.Missing.Count > 0 && r.Opened == 0)
+                r.Error = "Свои папки телефона на нём не найдены: " + string.Join("; ", r.Missing.ToArray()) + ". Если телефон заблокирован - " +
+                    "разблокируйте; иначе проверьте папки: «Свои папки телефона…».";
+            else if (r.Sources.Count == 0 && r.Opened > 0 && r.Own.Count > 0)
+                r.Error = "В своих папках телефона фото нет" + (r.Missing.Count > 0 ? " (не найдены: " + string.Join("; ", r.Missing.ToArray()) + ")" : "") + ".";
+            else if (r.Sources.Count == 0)
                 r.Error = "Телефон «" + string.Join("», «", r.Devices.ToArray()) + "» виден, но фото на нём не открываются (или их нет). " +
                     "Разблокируйте телефон: Android - выберите «Передача файлов» и «Разрешить доступ к данным»; iPhone - «Доверять».";
         } catch (Exception ex) {
@@ -426,15 +577,7 @@ public static class PhoneShell {
         object dev = null;
         foreach (object d in Devices(shell)) if (f.DevicePath.Length > 0 ? Str(d, "Path") == f.DevicePath : Str(d, "Name") == f.Device) { dev = d; break; }
         if (dev == null) return null;
-        string path = f.Folder;
-        object cur = Sub(dev);
-        foreach (string part in path.Split('\\')) {
-            if (part.Length == 0) continue;
-            object next = Named(Items(cur), part);
-            if (next == null) return null;
-            cur = Sub(next);
-        }
-        return cur;
+        return Walk(dev, f.Folder);
     }
 
     static Dictionary<string, object> ByName(object folder) {
@@ -545,6 +688,8 @@ public static class PhoneShell {
         sb.Append("Отчёт программы «Фото с телефона» ").Append(DateTime.Now.ToString("dd.MM.yyyy HH:mm")).Append(" (имён файлов здесь нет)\r\n");
         sb.Append("Раскладывать по: ").Append(ByTaken ? "дате съёмки" : "«Изменён»").Append("\r\n");
         foreach (string d in r.DeviceInfo) sb.Append("Телефон: ").Append(d).Append("\r\n");
+        foreach (string d in r.Own) sb.Append("Свои папки (из настройки телефона): ").Append(d).Append("\r\n");
+        foreach (string d in r.Missing) sb.Append("Своей папки нет на телефоне: ").Append(d).Append("\r\n");
         if (r.Error != null) sb.Append("Ошибка: ").Append(r.Error).Append("\r\n");
         foreach (string src in r.Sources) {
             int n = 0, mod = 0, byName = 0, byProp = 0, diff = 0;
@@ -751,12 +896,16 @@ public static class ShellDelete {
 
 // Телефоны для автопереноса: подключили телефон из списка - фото уходят с него сами, по его настройке (какие: все, за сегодня,
 // за вчера, за неделю; что: фото, скрины, видео). Телефон узнаётся по номеру устройства (IMEI по кабелю Windows не видит);
-// IMEI пишется рядом - для себя. Список - telefony.txt рядом с программой.
+// IMEI пишется рядом - для себя. Список - telefony.txt рядом с программой. У телефона могут быть свои папки, откуда брать
+// (сколько угодно; настроили один раз - дальше всегда оттуда, и при автопереносе, и вручную); нет - программа ищет сама.
 public class KnownPhone {
     public string Id = "", Name = "", Imei = "";
     public string Period = "сегодня";            // все, сегодня, вчера, неделя
     public bool Photo = true, Screens = true, Video, On = true;
     public string Last = "";                     // последний автоперенос: когда и сколько
+    public readonly List<PhonePath> Paths = new List<PhonePath>();   // свои папки телефона; пусто - как ищет программа
+
+    public string PathsText { get { return Paths.Count == 0 ? "ищет сама (DCIM)" : "своих папок: " + Paths.Count; } }
 
     public static readonly string[] Periods = { "все", "сегодня", "вчера", "неделя" };
 
@@ -807,6 +956,9 @@ public static class PhoneBook {
                 k.Video = p[4].Contains("видео");
                 k.On = p[5] != "0";
                 k.Last = p.Length > 6 ? p[6] : "";
+                // свои папки: «путь>фото,видео,вложенные|путь>...»
+                if (p.Length > 7)
+                    foreach (string x in p[7].Split('|')) { PhonePath pp = PhonePath.Parse(x); if (pp.Path.Length > 0) k.Paths.Add(pp); }
                 r.Add(k);
             }
         } catch { }
@@ -814,10 +966,15 @@ public static class PhoneBook {
     }
 
     public static void Save(string file, List<KnownPhone> list) {
-        StringBuilder sb = new StringBuilder("# Телефоны для автопереноса (программа «Фото с телефона»): номер устройства, название, IMEI, какие, что, вкл., последний перенос\r\n");
-        foreach (KnownPhone k in list)
+        StringBuilder sb = new StringBuilder("# Телефоны для автопереноса (программа «Фото с телефона»): номер устройства, название, IMEI, какие, что, вкл., " +
+            "последний перенос, свои папки (путь>что брать|...)\r\n");
+        foreach (KnownPhone k in list) {
+            List<string> paths = new List<string>();
+            foreach (PhonePath p in k.Paths) paths.Add(Clean(p.Path).Replace("|", "/").Replace(">", " ") + ">" + p.KindsText);
             sb.Append(Clean(k.Id)).Append('\t').Append(Clean(k.Name)).Append('\t').Append(Clean(k.Imei)).Append('\t').Append(k.Period).Append('\t')
-              .Append(k.KindsText).Append('\t').Append(k.On ? "1" : "0").Append('\t').Append(Clean(k.Last)).Append("\r\n");
+              .Append(k.KindsText).Append('\t').Append(k.On ? "1" : "0").Append('\t').Append(Clean(k.Last)).Append('\t')
+              .Append(string.Join("|", paths.ToArray())).Append("\r\n");
+        }
         File.WriteAllText(file, sb.ToString(), new UTF8Encoding(true));
     }
 
@@ -876,13 +1033,14 @@ public class PhonesDialog : Form {
         list.GridLines = true;
         list.SetBounds(16, 74, 952, 340);
         list.Anchor = AnchorStyles.Left | AnchorStyles.Top | AnchorStyles.Right | AnchorStyles.Bottom;
-        list.Columns.Add("Телефон", 160);
-        list.Columns.Add("IMEI", 140);
-        list.Columns.Add("Что", 150);
-        list.Columns.Add("Какие", 100);
-        list.Columns.Add("Сейчас", 110);
-        list.Columns.Add("Последний перенос", 150);
-        list.Columns.Add("Номер устройства", 200);
+        list.Columns.Add("Телефон", 140);
+        list.Columns.Add("IMEI", 120);
+        list.Columns.Add("Что", 130);
+        list.Columns.Add("Какие", 90);
+        list.Columns.Add("Откуда", 125);
+        list.Columns.Add("Сейчас", 85);
+        list.Columns.Add("Последний перенос", 140);
+        list.Columns.Add("Номер устройства", 170);
         // Windows, создавая список, сама «отмечает» галочки строк - до показа окна это не нажатия; у строки «Список пуст» телефона нет
         list.ItemChecked += delegate(object s, ItemCheckedEventArgs e) {
             if (filling || !ready) return;
@@ -929,14 +1087,16 @@ public class PhonesDialog : Form {
         return b;
     }
 
-    bool IsConnected(KnownPhone k) { foreach (PhoneDevice d in connected) if (d.Id == k.Id) return true; return false; }
+    bool IsConnected(KnownPhone k) { return Device(k) != null; }
+
+    PhoneDevice Device(KnownPhone k) { foreach (PhoneDevice d in connected) if (d.Id == k.Id) return d; return null; }
 
     void Fill() {
         filling = true;
         try {
             list.Items.Clear();
             foreach (KnownPhone k in phones) {
-                ListViewItem it = new ListViewItem(new string[] { k.Name, k.Imei, k.KindsText, KnownPhone.PeriodText(k.Period),
+                ListViewItem it = new ListViewItem(new string[] { k.Name, k.Imei, k.KindsText, KnownPhone.PeriodText(k.Period), k.PathsText,
                     IsConnected(k) ? "подключён" : "", k.Last, k.Id });
                 it.Tag = k;
                 it.Checked = k.On;
@@ -944,7 +1104,7 @@ public class PhonesDialog : Form {
                 list.Items.Add(it);
             }
             if (phones.Count == 0) {
-                ListViewItem it = new ListViewItem(new string[] { "Список пуст", "", "подключите телефон и нажмите «Добавить подключённый»", "", "", "", "" });
+                ListViewItem it = new ListViewItem(new string[] { "Список пуст", "", "подключите телефон и нажмите «Добавить подключённый»", "", "", "", "", "" });
                 it.ForeColor = Color.Gray;
                 list.Items.Add(it);
             }
@@ -979,7 +1139,7 @@ public class PhonesDialog : Form {
         KnownPhone k = new KnownPhone();
         k.Id = d.Id;
         k.Name = d.Name;
-        using (PhoneEditDialog e = new PhoneEditDialog(k, true)) {
+        using (PhoneEditDialog e = new PhoneEditDialog(k, true, d)) {
             if (e.ShowDialog(this) != DialogResult.OK) return;
         }
         phones.Add(k);
@@ -991,7 +1151,7 @@ public class PhonesDialog : Form {
     void Edit() {
         KnownPhone k = Selected();
         if (k == null) return;
-        using (PhoneEditDialog e = new PhoneEditDialog(k, false)) e.ShowDialog(this);
+        using (PhoneEditDialog e = new PhoneEditDialog(k, false, Device(k))) e.ShowDialog(this);
         Fill();
     }
 
@@ -1029,57 +1189,109 @@ public class PhonesDialog : Form {
     }
 }
 
-// Настройка телефона: название, IMEI (для себя), какие фото (одно), что (несколько), включён ли автоперенос
+// Настройка телефона: название, IMEI (для себя), какие фото (одно), что (несколько), включён ли автоперенос; свои папки
+// телефона, откуда брать (сколько угодно: выбрать на телефоне, вписать, взять те, где ищет программа)
 public class PhoneEditDialog : Form {
     readonly TextBox name = new TextBox(), imei = new TextBox();
     readonly RadioButton[] periods = new RadioButton[4];
     readonly CheckBox photo = new CheckBox(), screens = new CheckBox(), video = new CheckBox(), on = new CheckBox();
+    readonly DataGridView grid = new DataGridView();
+    readonly PhoneDevice dev;
 
-    public PhoneEditDialog(KnownPhone k, bool isNew) {
-        Text = isNew ? "Новый телефон для автопереноса" : "Телефон «" + k.Name + "»";
+    public PhoneEditDialog(KnownPhone k, bool isNew, PhoneDevice dev) {
+        this.dev = dev;
+        Text = isNew ? "Новый телефон" : "Телефон «" + k.Name + "»";
         Font = new Font("Segoe UI", 10f);
         BackColor = Color.White;
         StartPosition = FormStartPosition.CenterParent;
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = MinimizeBox = false;
         ShowInTaskbar = false;
-        ClientSize = new Size(560, 430);
-        int y = 14;
-        Label ln = Cap("Название (как вам удобно: чей телефон)", y); y += 22;
-        name.SetBounds(16, y, 528, 26); name.Text = k.Name; y += 36;
-        Label li = Cap("IMEI (для себя - Windows его по кабелю не видит)", y); y += 22;
-        imei.SetBounds(16, y, 260, 26); imei.Text = k.Imei; y += 34;
-        Label lid = Cap("Номер устройства (по нему программа узнаёт телефон): " + k.Id, y); y += 30;
+        ClientSize = new Size(740, 664);
+        Label ln = Cap("Название (как вам удобно: чей телефон)", 10, 340);
+        name.SetBounds(16, 32, 340, 26); name.Text = k.Name;
+        Label li = Cap("IMEI (для себя - Windows его по кабелю не видит)", 10, 340);
+        li.Left = 372;
+        imei.SetBounds(372, 32, 260, 26); imei.Text = k.Imei;
+        Label lid = Cap("Номер устройства (по нему программа узнаёт телефон): " + k.Id + (dev != null ? "  - подключён" : "  - сейчас не подключён"), 64, 708);
         GroupBox gp = new GroupBox();
-        gp.Text = "Какие фото переносить";
-        gp.SetBounds(16, y, 260, 150);
+        gp.Text = "Автоперенос: какие фото";
+        gp.SetBounds(16, 90, 300, 150);
         string[] pt = { "все фото", "за сегодня", "за вчера", "за неделю (сегодня и 6 дней до)" };
         for (int i = 0; i < 4; i++) {
             periods[i] = new RadioButton();
             periods[i].Text = pt[i];
-            periods[i].SetBounds(14, 26 + i * 30, 236, 26);
+            periods[i].SetBounds(14, 26 + i * 30, 276, 26);
             periods[i].Checked = KnownPhone.Periods[i] == k.Period;
             gp.Controls.Add(periods[i]);
         }
         GroupBox gk = new GroupBox();
-        gk.Text = "Что переносить (можно несколько)";
-        gk.SetBounds(290, y, 254, 150);
-        photo.Text = "фото"; photo.Checked = k.Photo; photo.SetBounds(14, 26, 220, 26);
-        screens.Text = "скрины"; screens.Checked = k.Screens; screens.SetBounds(14, 56, 220, 26);
-        video.Text = "видео"; video.Checked = k.Video; video.SetBounds(14, 86, 220, 26);
+        gk.Text = "Автоперенос: что (можно несколько)";
+        gk.SetBounds(330, 90, 280, 150);
+        photo.Text = "фото"; photo.Checked = k.Photo; photo.SetBounds(14, 26, 240, 26);
+        screens.Text = "скрины"; screens.Checked = k.Screens; screens.SetBounds(14, 56, 240, 26);
+        video.Text = "видео"; video.Checked = k.Video; video.SetBounds(14, 86, 240, 26);
         gk.Controls.AddRange(new Control[] { photo, screens, video });
-        y += 160;
-        on.Text = "Переносить сам при подключении";
+        on.Text = "Переносить сам при подключении (автоперенос)";
         on.Checked = k.On;
-        on.SetBounds(16, y, 400, 26);
-        Button ok = new Button(), cancel = new Button();
-        ok.Text = "Сохранить";
-        cancel.Text = "Отмена";
-        ok.SetBounds(316, 384, 110, 34);
-        cancel.SetBounds(434, 384, 110, 34);
+        on.SetBounds(16, 248, 600, 26);
+
+        // свои папки телефона
+        Label lp = new Label();
+        lp.Text = "Откуда брать - свои папки телефона (сколько угодно)";
+        lp.Font = new Font("Segoe UI", 10f, FontStyle.Bold);
+        lp.SetBounds(16, 284, 708, 22);
+        Label hint = Cap("Настроили один раз - с этого телефона фото всегда берутся только из этих папок (и вручную, и автопереносом). " +
+            "Пусто - программа ищет сама (DCIM и Pictures\\Screenshots). Галочки - что брать из папки; «и вложенные» - и из папок внутри неё.", 306, 708);
+        hint.Height = 54;
+        hint.AutoEllipsis = false;
+        grid.SetBounds(16, 362, 708, 198);
+        grid.AllowUserToAddRows = false;
+        grid.AllowUserToResizeRows = false;
+        grid.RowHeadersVisible = false;
+        grid.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
+        grid.BackgroundColor = Color.White;
+        grid.BorderStyle = BorderStyle.FixedSingle;
+        grid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
+        DataGridViewTextBoxColumn cp = new DataGridViewTextBoxColumn();
+        cp.HeaderText = "Папка на телефоне";
+        cp.FillWeight = 400;
+        grid.Columns.Add(cp);
+        foreach (string h in new string[] { "фото", "скрины", "видео", "и вложенные" }) {
+            DataGridViewCheckBoxColumn c = new DataGridViewCheckBoxColumn();
+            c.HeaderText = h;
+            c.FillWeight = h == "и вложенные" ? 95 : 62;
+            grid.Columns.Add(c);
+        }
+        foreach (PhonePath p in k.Paths) AddRow(p);
+        Button pick = Btn("Выбрать на телефоне…"), type = Btn("Вписать вручную"), defs = Btn("Где ищет программа"), del = Btn("Убрать");
+        pick.SetBounds(16, 568, 200, 32);
+        type.SetBounds(224, 568, 150, 32);
+        defs.SetBounds(382, 568, 180, 32);
+        del.SetBounds(570, 568, 154, 32);
+        pick.Click += delegate { PickOnPhone(); };
+        type.Click += delegate {
+            int i = AddRow(new PhonePath());
+            grid.CurrentCell = grid.Rows[i].Cells[0];
+            grid.BeginEdit(true);
+        };
+        defs.Click += delegate { AddDefaults(); };
+        del.Click += delegate {
+            List<DataGridViewRow> sel = new List<DataGridViewRow>();
+            foreach (DataGridViewRow r in grid.SelectedRows) sel.Add(r);
+            foreach (DataGridViewRow r in sel) grid.Rows.Remove(r);
+        };
+
+        Button ok = Btn("Сохранить"), cancel = Btn("Отмена");
+        ok.SetBounds(496, 618, 110, 34);
+        cancel.SetBounds(614, 618, 110, 34);
         cancel.DialogResult = DialogResult.Cancel;
         ok.Click += delegate {
-            if (!photo.Checked && !screens.Checked && !video.Checked) { MessageBox.Show(this, "Отметьте, что переносить: фото, скрины или видео.", Text); return; }
+            if (!photo.Checked && !screens.Checked && !video.Checked) { MessageBox.Show(this, "Отметьте, что переносить автопереносом: фото, скрины или видео.", Text); return; }
+            grid.EndEdit();
+            List<PhonePath> paths = Rows();
+            foreach (PhonePath p in paths)
+                if (!p.Photo && !p.Screens && !p.Video) { MessageBox.Show(this, "У папки «" + p.Path + "» не отмечено, что брать: фото, скрины или видео.", Text); return; }
             k.Name = name.Text.Trim().Length > 0 ? name.Text.Trim() : k.Name;
             k.Imei = imei.Text.Trim();
             for (int i = 0; i < 4; i++) if (periods[i].Checked) k.Period = KnownPhone.Periods[i];
@@ -1087,25 +1299,253 @@ public class PhoneEditDialog : Form {
             k.Screens = screens.Checked;
             k.Video = video.Checked;
             k.On = on.Checked;
+            k.Paths.Clear();
+            k.Paths.AddRange(paths);
             DialogResult = DialogResult.OK;
             Close();
         };
-        AcceptButton = ok;
         CancelButton = cancel;
-        Controls.AddRange(new Control[] { ln, name, li, imei, lid, gp, gk, on, ok, cancel });
+        Controls.AddRange(new Control[] { ln, name, li, imei, lid, gp, gk, on, lp, hint, grid, pick, type, defs, del, ok, cancel });
     }
 
     static readonly Font SmallFont = new Font("Segoe UI", 9f);
 
-    Label Cap(string text, int y) {
+    Label Cap(string text, int y, int w) {
         Label l = new Label();
         l.Text = text;
         l.Font = SmallFont;
         l.ForeColor = Color.FromArgb(100, 110, 125);
-        l.SetBounds(16, y, 528, 20);
+        l.SetBounds(16, y, w, 20);
         l.AutoEllipsis = true;
         return l;
     }
+
+    static Button Btn(string text) {
+        Button b = new Button();
+        b.Text = text;
+        b.FlatStyle = FlatStyle.Flat;
+        b.UseVisualStyleBackColor = false;
+        b.BackColor = Color.White;
+        b.FlatAppearance.BorderColor = Color.FromArgb(150, 160, 175);
+        return b;
+    }
+
+    int AddRow(PhonePath p) {
+        return grid.Rows.Add(new object[] { p.Path, p.Photo, p.Screens, p.Video, p.Sub });
+    }
+
+    static bool Bool(object o) { return o is bool && (bool)o; }
+
+    // папки из таблицы: пустые строки - не в счёт, одинаковые пути - одной строкой
+    public List<PhonePath> Rows() {
+        List<PhonePath> r = new List<PhonePath>();
+        foreach (DataGridViewRow row in grid.Rows) {
+            PhonePath p = new PhonePath();
+            p.Path = PhonePath.Clean(row.Cells[0].Value as string);
+            if (p.Path.Length == 0) continue;
+            p.Photo = Bool(row.Cells[1].Value);
+            p.Screens = Bool(row.Cells[2].Value);
+            p.Video = Bool(row.Cells[3].Value);
+            p.Sub = Bool(row.Cells[4].Value);
+            r.Add(p);
+        }
+        return r;
+    }
+
+    bool Listed(string path) {
+        foreach (PhonePath p in Rows()) if (string.Compare(p.Path, PhonePath.Clean(path), StringComparison.OrdinalIgnoreCase) == 0) return true;
+        return false;
+    }
+
+    // выбрать папку в дереве папок телефона
+    public void PickOnPhone() {
+        if (dev == null) {
+            MessageBox.Show(this, "Телефон сейчас не подключён. Подключите его кабелем и разблокируйте (Android - «Передача файлов», iPhone - «Доверять») " +
+                "или впишите путь вручную, как в Проводнике: «Внутренний общий накопитель\\DCIM\\Camera».", Text);
+            return;
+        }
+        using (FolderPickDialog d = new FolderPickDialog(dev)) {
+            if (d.ShowDialog(this) != DialogResult.OK || d.Chosen == null) return;
+            if (Listed(d.Chosen)) { MessageBox.Show(this, "Папка «" + d.Chosen + "» уже в списке.", Text); return; }
+            PhonePath p = new PhonePath();
+            p.Path = d.Chosen;
+            grid.ClearSelection();
+            grid.Rows[AddRow(p)].Selected = true;
+        }
+    }
+
+    // папки, где программа ищет сама, - в список (дальше можно убрать лишние, добавить свои)
+    public void AddDefaults() {
+        if (dev == null) { MessageBox.Show(this, "Телефон сейчас не подключён - подключите его, и программа покажет папки, где ищет сама.", Text); return; }
+        Cursor = Cursors.WaitCursor;
+        List<string> l;
+        try { l = PhoneShell.DefaultFolders(dev.Path, dev.Name); } catch { l = null; }
+        finally { Cursor = Cursors.Default; }
+        if (l == null || l.Count == 0) { MessageBox.Show(this, "На телефоне не открылись папки с фото - разблокируйте его и нажмите ещё раз.", Text); return; }
+        int n = 0;
+        foreach (string x in l) {
+            if (Listed(x)) continue;
+            PhonePath p = new PhonePath();
+            p.Path = x;
+            AddRow(p);
+            n++;
+        }
+        if (n == 0) MessageBox.Show(this, "Эти папки уже в списке.", Text);
+    }
+
+    // для проверки
+    public void AddPath(string text) { AddRow(PhonePath.Parse(text)); }
+    public string Dump() {
+        StringBuilder sb = new StringBuilder();
+        foreach (PhonePath p in Rows()) sb.Append("\n    ").Append(p.Path).Append(" > ").Append(p.KindsText);
+        return sb.ToString();
+    }
+}
+
+// Выбор папки на телефоне: дерево папок, раскрываются по щелчку (папки читаются с телефона в фоне)
+public class FolderPickDialog : Form {
+    readonly PhoneDevice dev;
+    readonly TreeView tree = new TreeView();
+    readonly Label chosenText = new Label();
+    readonly Button ok = new Button();
+    public string Chosen;
+    readonly List<string> goParts = new List<string>();     // для проверки: раскрыть путь по шагам
+
+    class Node {
+        public string Rel = "";
+        public bool Loaded, Loading;
+    }
+
+    public FolderPickDialog(PhoneDevice dev) {
+        this.dev = dev;
+        Text = "Папка на телефоне «" + dev.Name + "»";
+        Font = new Font("Segoe UI", 10f);
+        BackColor = Color.White;
+        StartPosition = FormStartPosition.CenterParent;
+        ShowInTaskbar = false;
+        MinimizeBox = false;
+        ClientSize = new Size(560, 560);
+        MinimumSize = new Size(420, 360);
+        Label note = new Label();
+        note.Text = "Выберите папку (щелчок по «+» или двойной - раскрыть). Например: Внутренний общий накопитель \\ DCIM \\ Camera, " +
+            "Pictures \\ Telegram, Android \\ media \\ com.whatsapp \\ WhatsApp \\ Media.";
+        note.SetBounds(12, 8, 536, 40);
+        note.Anchor = AnchorStyles.Left | AnchorStyles.Top | AnchorStyles.Right;
+        tree.SetBounds(12, 52, 536, 418);
+        tree.Anchor = AnchorStyles.Left | AnchorStyles.Top | AnchorStyles.Right | AnchorStyles.Bottom;
+        tree.HideSelection = false;
+        tree.BeforeExpand += delegate(object s, TreeViewCancelEventArgs e) { LoadNode(e.Node); };
+        tree.AfterSelect += delegate { ShowChosen(); };
+        tree.NodeMouseDoubleClick += delegate(object s, TreeNodeMouseClickEventArgs e) { if (e.Node != null && e.Node.Level > 0 && e.Node.Nodes.Count == 0) Accept(); };
+        chosenText.SetBounds(12, 476, 536, 40);
+        chosenText.Anchor = AnchorStyles.Left | AnchorStyles.Bottom | AnchorStyles.Right;
+        chosenText.ForeColor = Color.FromArgb(32, 100, 190);
+        ok.Text = "Выбрать";
+        Button cancel = new Button();
+        cancel.Text = "Отмена";
+        foreach (Button b in new Button[] { ok, cancel }) {
+            b.FlatStyle = FlatStyle.Flat;
+            b.UseVisualStyleBackColor = false;
+            b.Anchor = AnchorStyles.Right | AnchorStyles.Bottom;
+        }
+        ok.BackColor = Color.FromArgb(32, 100, 190);
+        ok.ForeColor = Color.White;
+        cancel.BackColor = Color.White;
+        ok.SetBounds(316, 518, 112, 32);
+        cancel.SetBounds(436, 518, 112, 32);
+        ok.Enabled = false;
+        ok.Click += delegate { Accept(); };
+        cancel.DialogResult = DialogResult.Cancel;
+        CancelButton = cancel;
+        Controls.AddRange(new Control[] { note, tree, chosenText, ok, cancel });
+        TreeNode root = new TreeNode(dev.Name);
+        root.Tag = new Node();
+        root.Nodes.Add("…");
+        tree.Nodes.Add(root);
+        Shown += delegate { root.Expand(); };
+    }
+
+    void Post(MethodInvoker m) { try { if (!IsDisposed && IsHandleCreated) BeginInvoke(m); } catch { } }
+
+    // подпапки узла - с телефона, в фоне (оболочка Windows - в потоке STA)
+    void LoadNode(TreeNode n) {
+        Node info = n.Tag as Node;
+        if (info == null || info.Loaded || info.Loading) return;
+        info.Loading = true;
+        n.Nodes.Clear();
+        n.Nodes.Add("читаю папки телефона…");
+        string rel = info.Rel;
+        System.Threading.Thread th = new System.Threading.Thread(delegate() {
+            List<string> subs;
+            try { subs = PhoneShell.Subfolders(dev.Path, dev.Name, rel); } catch { subs = null; }
+            Post(delegate { Loaded(n, subs); });
+        });
+        th.SetApartmentState(System.Threading.ApartmentState.STA);
+        th.IsBackground = true;
+        th.Start();
+    }
+
+    void Loaded(TreeNode n, List<string> subs) {
+        Node info = (Node)n.Tag;
+        info.Loading = false;
+        tree.BeginUpdate();
+        try {
+            n.Nodes.Clear();
+            if (subs == null) { n.Nodes.Add("не открывается - телефон отключён или заблокирован"); info.Loaded = false; }
+            else {
+                info.Loaded = true;
+                foreach (string s in subs) {
+                    TreeNode c = new TreeNode(s);
+                    Node ci = new Node();
+                    ci.Rel = info.Rel.Length > 0 ? info.Rel + "\\" + s : s;
+                    c.Tag = ci;
+                    if (s.StartsWith(".")) c.ForeColor = Color.Gray;     // скрытые (.thumbnails) - серым
+                    c.Nodes.Add("…");
+                    n.Nodes.Add(c);
+                }
+                if (subs.Count == 0) n.Nodes.Add("(папок нет)");
+            }
+        } finally { tree.EndUpdate(); }
+        // раскрытие пути по шагам (проверка)
+        if (goParts.Count > 0) {
+            string part = goParts[0];
+            goParts.RemoveAt(0);
+            foreach (TreeNode c in n.Nodes)
+                if (string.Compare(c.Text, part, StringComparison.OrdinalIgnoreCase) == 0) {
+                    tree.SelectedNode = c;
+                    if (goParts.Count > 0) c.Expand();
+                    break;
+                }
+        }
+    }
+
+    void ShowChosen() {
+        Node info = tree.SelectedNode == null ? null : tree.SelectedNode.Tag as Node;
+        ok.Enabled = info != null && info.Rel.Length > 0;
+        chosenText.Text = info == null ? "" : info.Rel.Length == 0 ? "Выберите папку внутри телефона" : "Папка: " + info.Rel;
+    }
+
+    void Accept() {
+        Node info = tree.SelectedNode == null ? null : tree.SelectedNode.Tag as Node;
+        if (info == null || info.Rel.Length == 0) return;
+        Chosen = info.Rel;
+        DialogResult = DialogResult.OK;
+        Close();
+    }
+
+    // для проверки: раскрыть и выбрать путь «Внутренний общий накопитель\Pictures»
+    public void Go(string rel) {
+        goParts.Clear();
+        goParts.AddRange(PhonePath.Clean(rel).Split('\\'));
+        TreeNode root = tree.Nodes[0];
+        if (((Node)root.Tag).Loaded) {
+            Node info = (Node)root.Tag;
+            info.Loaded = false;
+            root.Collapse();
+        }
+        root.Expand();
+    }
+    public void Ok() { Accept(); }
 }
 
 // Окно программы: куда складывать, календарь (день или период «с ... по»), дни с фото на телефоне (галочками - и отдельные
@@ -1294,6 +1734,13 @@ public class FotoForm : Form {
         ls.Font = Small;
         ls.ForeColor = Hint;
         ls.AutoSize = true;
+        // свои папки телефона: настроить один раз - дальше с этого телефона всегда оттуда
+        LinkLabel own = new LinkLabel();
+        own.Text = "Свои папки телефона… (откуда брать - сколько угодно папок)";
+        own.Font = Small;
+        own.AutoSize = true;
+        own.LinkColor = Accent;
+        own.LinkClicked += delegate { OpenOwnPaths(); };
         sources.CheckOnClick = true;
         sources.IntegralHeight = false;
         sources.BorderStyle = BorderStyle.FixedSingle;
@@ -1333,6 +1780,7 @@ public class FotoForm : Form {
         right.Controls.Add(kScreens);
         right.Controls.Add(kVideo);
         right.Controls.Add(ls);
+        right.Controls.Add(own);
         right.Controls.Add(sources);
         right.Controls.Add(ld);
         right.Controls.Add(days);
@@ -1348,7 +1796,8 @@ public class FotoForm : Form {
             kScreens.Location = new Point(kPhoto.Right + 14, 82);
             kVideo.Location = new Point(kScreens.Right + 14, 82);
             ls.Location = new Point(8, 112);
-            sources.SetBounds(8, 130, w, 74);
+            own.Location = new Point(ls.Right + 14, 112);
+            sources.SetBounds(8, 130, w, 92);
             ld.Location = new Point(8, sources.Bottom + 10);
             chosen.SetBounds(8, right.ClientSize.Height - 30, w, 24);
             days.SetBounds(8, ld.Bottom + 2, w, Math.Max(60, chosen.Top - ld.Bottom - 8));
@@ -1547,6 +1996,7 @@ public class FotoForm : Form {
         Status("Ищу телефон...", Hint);
         phoneText.Text = "Телефон: ищу...";
         phoneText.ForeColor = Hint;
+        PhoneShell.DevicePaths = OwnPaths();
         System.Threading.Thread th = new System.Threading.Thread(delegate() {
             ScanResult r = PhoneShell.Scan(delegate(string t) { Post(delegate { Status(t, Hint); }); });
             Post(delegate { ScanDone(r); });
@@ -1578,6 +2028,8 @@ public class FotoForm : Form {
             phoneText.ForeColor = r.Error == null ? Good : Bad;
         } else { phoneText.Text = "Телефон не найден"; phoneText.ForeColor = Bad; }
         if (r.Error != null) Status(r.Error, Bad);
+        else if (r.Missing.Count > 0) Status("Своих папок нет на телефоне: " + string.Join("; ", r.Missing.ToArray()) + " - проверьте «Свои папки телефона…».",
+            Color.FromArgb(190, 105, 0));
         else Status("Выберите дни в календаре (или галочками в списке) и нажмите «Перенести с телефона».", Hint);
         // отчёт рядом с программой: что видно на телефоне (папки, сколько файлов, по каким дням; без имён файлов)
         try { File.WriteAllText(Path.Combine(here, "otchet.txt"), PhoneShell.Report(r), new UTF8Encoding(true)); } catch { }
@@ -1739,6 +2191,54 @@ public class FotoForm : Form {
         CheckDevices();
     }
 
+    // свои папки телефонов из списка: номер устройства -> копия папок (для просмотра телефона в фоне)
+    Dictionary<string, List<PhonePath>> OwnPaths() {
+        Dictionary<string, List<PhonePath>> d = new Dictionary<string, List<PhonePath>>();
+        foreach (KnownPhone k in phones) {
+            if (k.Paths.Count == 0) continue;
+            List<PhonePath> l = new List<PhonePath>();
+            foreach (PhonePath p in k.Paths) l.Add(p.Copy());
+            d[k.Id] = l;
+        }
+        return d;
+    }
+
+    // «Свои папки телефона…»: настройка подключённого телефона (нет в списке - добавится, автоперенос выключен)
+    void OpenOwnPaths() {
+        if (busy) return;
+        if (present.Count == 0) {
+            if (Messages) MessageBox.Show(this, "Телефон не подключён. Подключите его кабелем и разблокируйте (Android - «Передача файлов», iPhone - «Доверять»).\n\n" +
+                "Папки телефонов, которые сейчас не подключены, - в «Телефоны для автопереноса…» → «Настроить…».", Text);
+            return;
+        }
+        if (present.Count == 1) { EditOwn(present[0]); return; }
+        ContextMenuStrip m = new ContextMenuStrip();
+        foreach (PhoneDevice d in present) {
+            PhoneDevice dd = d;
+            m.Items.Add(d.Name + "  (" + d.Id + ")", null, delegate { EditOwn(dd); });
+        }
+        m.Show(Cursor.Position);
+    }
+
+    void EditOwn(PhoneDevice d) {
+        KnownPhone k = PhoneBook.Find(phones, d.Id);
+        bool isNew = k == null;
+        if (isNew) {
+            k = new KnownPhone();
+            k.Id = d.Id;
+            k.Name = d.Name;
+            k.On = false;
+        }
+        using (PhoneEditDialog e = new PhoneEditDialog(k, isNew, d)) {
+            if (e.ShowDialog(this) != DialogResult.OK) return;
+        }
+        if (isNew) phones.Add(k);
+        SavePhones();
+        UpdateAutoText();
+        // папки поменялись - телефон заново, уже по ним
+        Scan();
+    }
+
     void SavePhones() {
         try { PhoneBook.Save(phonesFile, phones); }
         catch (Exception ex) { if (Messages) MessageBox.Show(this, "Список телефонов не сохранился:\n" + ex.Message, Text); }
@@ -1798,6 +2298,7 @@ public class FotoForm : Form {
         string what = "«" + k.Name + "» (из списка): " + KnownPhone.PeriodText(k.Period) + " - " + k.KindsText;
         Status("Телефон " + what + ". Смотрю телефон...", Accent);
         DateTime today = DateTime.Today;
+        PhoneShell.DevicePaths = OwnPaths();
         System.Threading.Thread th = new System.Threading.Thread(delegate() {
             TextHandler progress = delegate(string t) { Post(delegate { Status("«" + k.Name + "»: " + t, Accent); }); };
             ScanResult s = PhoneShell.Scan(progress, d.Path);
@@ -1813,7 +2314,7 @@ public class FotoForm : Form {
     void AutoDone(PhoneDevice d, KnownPhone k, ScanResult s, List<PhoneFile> pick, MoveResult m, string root) {
         stop = null;
         string head = "Автоперенос «" + k.Name + "» (" + KnownPhone.PeriodText(k.Period) + ", " + k.KindsText + "): ";
-        if (s.Sources.Count == 0) {
+        if (s.Sources.Count == 0 && s.Opened == 0) {
             // телефон заблокирован или не дал доступ - попробуем ещё раз через 20 с
             Status(head + "фото на телефоне не открываются - разблокируйте его (Android - «Передача файлов», iPhone - «Доверять»).", Bad);
             SetBusy(false);
@@ -1968,10 +2469,41 @@ public class FotoForm : Form {
     public string PhonesDump() {
         StringBuilder sb = new StringBuilder(autoText.Text);
         foreach (KnownPhone k in phones) sb.Append("\n  ").Append(k.Name).Append(" | ").Append(k.Imei).Append(" | ").Append(k.Id).Append(" | ")
-            .Append(KnownPhone.PeriodText(k.Period)).Append(" | ").Append(k.KindsText).Append(k.On ? "" : " | выкл.").Append(" | ").Append(k.Last);
+            .Append(KnownPhone.PeriodText(k.Period)).Append(" | ").Append(k.KindsText).Append(k.On ? "" : " | выкл.").Append(" | ").Append(k.Last)
+            .Append(" | ").Append(k.PathsText);
         return sb.ToString();
     }
     public void ShowPhones() { BeginInvoke((MethodInvoker)delegate { OpenPhones(); }); }
+    public void ShowOwnPaths() { BeginInvoke((MethodInvoker)delegate { OpenOwnPaths(); }); }
+    public void ShowOwnPathsFor(string device) {
+        foreach (PhoneDevice d in present) if (d.Name == device) { PhoneDevice dd = d; BeginInvoke((MethodInvoker)delegate { EditOwn(dd); }); return; }
+    }
+    // автоперенос телефона вкл./выкл. и какие фото («все», «сегодня»...)
+    public void SetAuto(string device, bool on, string period) {
+        foreach (PhoneDevice d in present) {
+            if (d.Name != device) continue;
+            KnownPhone k = PhoneBook.Find(phones, d.Id);
+            if (k == null) return;
+            k.On = on;
+            k.Period = period;
+            SavePhones();
+            UpdateAutoText();
+            return;
+        }
+    }
+    // свои папки телефона (подключённого, по имени): «путь>фото,видео|...»; пусто - убрать свои папки
+    public void SetPaths(string device, string spec) {
+        foreach (PhoneDevice d in present) {
+            if (d.Name != device) continue;
+            KnownPhone k = PhoneBook.Find(phones, d.Id);
+            if (k == null) { k = new KnownPhone(); k.Id = d.Id; k.Name = d.Name; k.On = false; phones.Add(k); }
+            k.Paths.Clear();
+            foreach (string x in spec.Split('|')) { PhonePath p = PhonePath.Parse(x); if (p.Path.Length > 0) k.Paths.Add(p); }
+            SavePhones();
+            UpdateAutoText();
+            return;
+        }
+    }
     public void ByTaken(bool on) { if (on) byTaken.Checked = true; else byMod.Checked = true; }
     public void Kinds(bool photo, bool screens, bool video) { kPhoto.Checked = photo; kScreens.Checked = screens; kVideo.Checked = video; }
     public string Dump() {
