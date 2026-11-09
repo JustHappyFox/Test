@@ -23160,19 +23160,18 @@ public static class SealPrint {
     }
 
     static void Page(StringBuilder x, SealBatch b, List<SealRow> rows, int page, bool brk, SealRow before) {
-        // период листа - по датам его строк
-        DateTime? from = null, to = null;
+        // период листа: «по» - последняя дата его строк; «в» (начало) - пустая линия, пишут ручкой (пломбы могли взять раньше)
+        DateTime? to = null;
         foreach (SealRow r in rows) {
             DateTime? d = Parse(r.Get(0));
             if (d == null) continue;
-            if (from == null || d < from) from = d;
             if (to == null || d > to) to = d;
         }
         x.Append(Para(Run("№ пломбы с " + b.First, 12, false, false) + Tab + Run("по " + b.Last, 12, false, false), null, brk,
             "<w:tabs><w:tab w:val=\"left\" w:pos=\"4200\"/></w:tabs>"));
         x.Append(Para(Run("дата выдачи " + (b.Issued.Length > 0 ? b.Issued : "____________"), 12, false, false), null, false, null));
         x.Append(Para(Run("Отчет", 13, false, false), "center", false, null));
-        string f = from != null ? from.Value.ToString("dd.MM.yyyy") : "__________", t = to != null ? to.Value.ToString("dd.MM.yyyy") : "__________";
+        string f = "____________", t = to != null ? to.Value.ToString("dd.MM.yyyy") : "__________";
         x.Append(Para(Run("Об использовании номерных одноразовых пломб в ", 13, false, false) + Run(f, 13, false, true) + Run(" г. по ", 13, false, false) +
             Run(t, 13, false, true) + Run(" г.", 13, false, false), "center", false, null));
         // таблица: две строки шапки (Потребитель - над 6 колонками)
