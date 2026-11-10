@@ -1126,6 +1126,31 @@ class MaxChannelsTests(OnePerChannelTests):
         self.assertNotIn(five["key"], st.get("bad", {}))
 
 
+class OneSortedListTests(OnePerChannelTests):
+    """Владелец 10.11: «добавляй в список все найденные, просто сортируй»."""
+    test_keeps_simplest_of_same_channel = None
+    test_channel_already_posted_is_skipped = None
+
+    def test_fallback_order(self):
+        big_own = self.e(1, 10, [1, 2, 3, 4, 5], days=6)                        # свои страны, 5 каналов
+        ua = {**self.e(2, 20, [2], days=2), "countries": ["UA"]}                # другая страна, кончится раньше
+        c = self.client()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp, "s.json")
+            gf.save_state(path, {"posted": {}, "queue": [], "backup": [ua], "over_cap": [big_own],
+                                 "last_post": (NOW - timedelta(hours=4)).isoformat(),
+                                 "last_search": (NOW - timedelta(minutes=30)).isoformat(), "last_search_added": 0})
+            a = gf.apply_preset(gf.build_parser().parse_args(
+                ["post", "--to", "@mygroup", "--state", str(path), "--no-discover", "--no-aggregators",
+                 "--min-interval-hours", "3.5", "--schedule-ahead", "0", "--countries", "RU,BY,KZ",
+                 "--max-giveaway-channels", "4", "--fallback-other-countries"]))
+            asyncio.run(gf.cmd_post(c, a))
+            st = gf.load_state(path)
+        self.assertEqual(c.forwards, [(10, None)])        # свой с 5 каналами раньше чужой страны
+        self.assertEqual([e["msg_id"] for e in st["backup"]], [20])
+        self.assertEqual(st["over_cap"], [])
+
+
 class BlocklistTests(unittest.TestCase):
     def test_load_blocklist(self):
         with tempfile.TemporaryDirectory() as tmp:

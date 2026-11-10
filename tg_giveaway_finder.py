@@ -1523,6 +1523,8 @@ async def cmd_post_scheduled(client: TelegramClient, args: argparse.Namespace) -
     tz_hours = getattr(args, "tz_offset", 3.0)
     next_at = in_post_window(next_at, window, tz_hours)  # ночью не публикуем — переносим на утро
 
+    allowed = parse_countries(getattr(args, "countries", None))
+
     def fits(e: dict[str, Any], when: datetime) -> bool:
         return (e["key"] not in posted and e["key"] not in scheduled and e["key"] not in bad
                 and datetime.fromisoformat(e["until"]) - when >= min_left)
@@ -1588,12 +1590,12 @@ async def cmd_post_scheduled(client: TelegramClient, args: argparse.Namespace) -
                 skip("чёрный список")
             elif cap and len(g.channel_ids) > cap:
                 skip(f"больше {cap} каналов — в отдельный список")
-                if len(over) < 20 and g.until_date - now >= min_left and filter_giveaways([g], any_country):
+                if g.until_date - now >= min_left and filter_giveaways([g], any_country):
                     e = await queue_entry(client, g, finder)
                     if e:
                         over.append(e)
                         added_over.append(e)
-            elif other and (not fallback or len(backup) >= args.reserve):
+            elif other and not fallback:
                 skip("другие страны")
             elif not filter_giveaways([g], any_country):
                 skip("мал приз")
@@ -1661,15 +1663,19 @@ async def cmd_post_scheduled(client: TelegramClient, args: argparse.Namespace) -
                 if st.get("last_search_added"):
                     continue
                 # ничего нового — повторять поиск в этом запуске бессмысленно
-            if fallback:  # для своих стран нет — берём для других стран
-                backup = sorted((e for e in backup if e["key"] not in posted and e["key"] not in scheduled
-                                 and e["key"] not in bad and datetime.fromisoformat(e["until"]) > now),
-                                key=queue_order)
-                entry = next((e for e in backup if fits(e, next_at)), None)
-                src = backup
+            if fallback or cap:
+                # владелец 10.11: «добавляй в список все найденные, просто сортируй» — когда обычных нет,
+                # берём из остальных по порядку: свои страны с >4 каналами, затем другие страны (≤4, потом >4);
+                # внутри — кто раньше кончится
+                pool = sorted((e for e in backup + over if e["key"] not in posted and e["key"] not in scheduled
+                               and e["key"] not in bad and datetime.fromisoformat(e["until"]) > now),
+                              key=lambda e: (bool(e.get("countries")) and not (set(e["countries"]) & allowed),
+                                             bool(cap) and key_channels(e["key"]) > cap, queue_order(e)))
+                entry = next((e for e in pool if fits(e, next_at)), None)
                 if entry is not None:
-                    log.info("Для своих стран розыгрышей нет — беру запасной для других стран (%s)",
-                             ",".join(entry.get("countries") or []))
+                    src = backup if entry in backup else over
+                    log.info("Обычных розыгрышей нет — беру следующий по списку: страны %s, каналов %d",
+                             ",".join(entry.get("countries") or []) or "все", key_channels(entry["key"]))
             if entry is None:
                 break
         src.remove(entry)
@@ -1733,7 +1739,7 @@ async def cmd_post_scheduled(client: TelegramClient, args: argparse.Namespace) -
               and e["key"] not in bad and datetime.fromisoformat(e["until"]) - now >= min_left]
     over = sorted((e for e in over if e["key"] not in posted and e["key"] not in scheduled
                    and e["key"] not in bad and datetime.fromisoformat(e["until"]) - now >= min_left),
-                  key=queue_order)[:20]
+                  key=queue_order)
     if not args.dry_run:
         st.update(posted=posted, queue=queue, scheduled=list(scheduled.values()), bad=bad, backup=backup,
                   over_cap=over,
