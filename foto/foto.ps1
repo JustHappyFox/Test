@@ -19,6 +19,196 @@ using System.Text;
 using System.Windows.Forms;
 using System;
 
+// Общее оформление программ - как у «Оформления договора»: тёмная тема по умолчанию (глаза меньше устают), светлая - по выбору
+// (переключатель в окне, меняется при следующем запуске). Цвета ставятся один раз при запуске (Look.Apply), до создания окон;
+// Look.Dress(окно) перекрашивает окно и всё, что в нём (и что добавится потом): системное светлое - в цвета темы, кнопки -
+// плоские с рамкой. Цвета, заданные программой нарочно (например, синие окна как в программе базы), не трогаются
+public static class Look {
+    public static bool Dark = true;
+    public static System.Drawing.Color Back, Surface, Input, Header, Border, InputBorder, Text, Caption, Hint, Accent, AccentHover, Hover, Pressed,
+        Link, Good, Bad, Warn, Info, Strong, RowGood, RowWarn, RowBad, RowOther, SelGood, SelBad, SelOther, RowPick;
+    public static readonly System.Drawing.Font Base = new System.Drawing.Font("Segoe UI", 9f), Small = new System.Drawing.Font("Segoe UI", 8.5f),
+        Bold = new System.Drawing.Font("Segoe UI", 9f, System.Drawing.FontStyle.Bold), Title = new System.Drawing.Font("Segoe UI", 15f, System.Drawing.FontStyle.Bold);
+
+    static System.Drawing.Color C(int r, int g, int b) { return System.Drawing.Color.FromArgb(r, g, b); }
+
+    static Look() { Apply(true); }
+
+    public static void Apply(bool dark) {
+        Dark = dark;
+        if (dark) {
+            Back = C(30, 33, 38); Surface = C(40, 44, 51); Input = C(48, 53, 61); Header = C(44, 48, 55);
+            Border = C(66, 72, 82); InputBorder = C(98, 106, 118);
+            Text = C(222, 226, 232); Caption = C(172, 180, 192); Hint = C(138, 146, 158);
+            Accent = C(44, 98, 165); AccentHover = C(54, 114, 188); Hover = C(56, 63, 74); Pressed = C(66, 76, 92);
+            Link = C(118, 172, 236); Good = C(112, 200, 142); Bad = C(240, 120, 120); Warn = C(232, 164, 72); Info = C(130, 182, 240);
+            Strong = C(205, 211, 220);
+            RowGood = C(38, 72, 50); RowWarn = C(84, 64, 34); RowBad = C(88, 42, 46); RowOther = C(52, 56, 62);
+            SelGood = C(46, 120, 70); SelBad = C(150, 50, 56); SelOther = C(84, 90, 100); RowPick = C(38, 60, 92);
+        } else {
+            Back = C(242, 244, 247); Surface = System.Drawing.Color.White; Input = System.Drawing.Color.White; Header = C(232, 236, 241);
+            Border = C(221, 226, 233); InputBorder = C(196, 204, 214);
+            Text = C(31, 36, 43); Caption = C(58, 66, 78); Hint = C(128, 137, 150);
+            Accent = C(35, 99, 178); AccentHover = C(28, 84, 153); Hover = C(236, 242, 250); Pressed = C(222, 233, 247);
+            Link = C(35, 99, 178); Good = C(46, 140, 87); Bad = C(200, 55, 55); Warn = C(190, 105, 0); Info = C(0, 70, 140);
+            Strong = System.Drawing.Color.Black;
+            RowGood = C(214, 241, 219); RowWarn = C(255, 228, 190); RowBad = C(255, 218, 218); RowOther = C(236, 236, 236);
+            SelGood = C(40, 140, 60); SelBad = C(190, 40, 40); SelOther = C(110, 110, 110); RowPick = C(226, 240, 255);
+        }
+    }
+
+    public static string SwitchText { get { return Dark ? "Тема: тёмная - сделать светлой" : "Тема: светлая - сделать тёмной"; } }
+    public static string SwitchedText { get { return Dark ? "будет светлая - после перезапуска" : "будет тёмная - после перезапуска"; } }
+
+    public delegate void SaveTheme(bool dark);
+
+    // ссылка «Тема: ...» - щелчок запоминает другую тему (save), она будет при следующем запуске
+    public static System.Windows.Forms.LinkLabel Switch(SaveTheme save) {
+        System.Windows.Forms.LinkLabel l = new System.Windows.Forms.LinkLabel();
+        l.Text = SwitchText;
+        l.Font = Small;
+        l.AutoSize = true;
+        l.LinkColor = l.ActiveLinkColor = Link;
+        l.LinkBehavior = System.Windows.Forms.LinkBehavior.HoverUnderline;
+        bool next = !Dark;
+        l.LinkClicked += delegate {
+            save(next);
+            l.Text = next == Dark ? SwitchText : SwitchedText;
+            next = !next;
+        };
+        return l;
+    }
+
+    static bool Same(System.Drawing.Color a, System.Drawing.Color b) { return a.ToArgb() == b.ToArgb(); }
+
+    // светлое системное (его и красим)
+    static bool Plain(System.Drawing.Color c) {
+        return c.A == 255 && (Same(c, System.Drawing.Color.White) || Same(c, System.Drawing.SystemColors.Window) || Same(c, System.Drawing.SystemColors.Control)
+            || Same(c, System.Drawing.SystemColors.ControlLight) || Same(c, System.Drawing.SystemColors.ButtonFace) || Same(c, System.Drawing.SystemColors.AppWorkspace));
+    }
+
+    static bool PlainText(System.Drawing.Color c) {
+        return Same(c, System.Drawing.Color.Black) || Same(c, System.Drawing.SystemColors.ControlText) || Same(c, System.Drawing.SystemColors.WindowText);
+    }
+
+    // главная кнопка окна (синяя): AcceptButton окна или Tag «главная»
+    public static void MainButton(System.Windows.Forms.Button b) { b.Tag = "главная"; Button(b); }
+
+    public static void Button(System.Windows.Forms.Button b) {
+        System.Windows.Forms.Form f = b.FindForm();
+        bool main = "главная".Equals(b.Tag) || f != null && f.AcceptButton == b;
+        bool custom = !main && !Plain(b.BackColor) && b.BackColor.A == 255;     // цвет задан программой - оставить
+        b.FlatStyle = System.Windows.Forms.FlatStyle.Flat;
+        b.UseVisualStyleBackColor = false;
+        b.Cursor = System.Windows.Forms.Cursors.Hand;
+        if (main) {
+            b.BackColor = Accent;
+            b.ForeColor = System.Drawing.Color.White;
+            b.FlatAppearance.BorderSize = 0;
+            b.FlatAppearance.MouseOverBackColor = b.FlatAppearance.MouseDownBackColor = AccentHover;
+        } else if (!custom) {
+            b.BackColor = Surface;
+            b.ForeColor = Text;
+            b.FlatAppearance.BorderSize = 1;
+            b.FlatAppearance.BorderColor = InputBorder;
+            b.FlatAppearance.MouseOverBackColor = Hover;
+            b.FlatAppearance.MouseDownBackColor = Pressed;
+        }
+    }
+
+    public static void Grid(System.Windows.Forms.DataGridView g) {
+        g.BackgroundColor = Surface;
+        g.GridColor = Border;
+        g.BorderStyle = System.Windows.Forms.BorderStyle.FixedSingle;
+        g.DefaultCellStyle.BackColor = Input;
+        g.DefaultCellStyle.ForeColor = Text;
+        g.DefaultCellStyle.SelectionBackColor = Accent;
+        g.DefaultCellStyle.SelectionForeColor = System.Drawing.Color.White;
+        g.EnableHeadersVisualStyles = false;
+        g.ColumnHeadersBorderStyle = System.Windows.Forms.DataGridViewHeaderBorderStyle.Single;
+        g.ColumnHeadersDefaultCellStyle.BackColor = Header;
+        g.ColumnHeadersDefaultCellStyle.ForeColor = Text;
+        g.ColumnHeadersDefaultCellStyle.SelectionBackColor = Header;
+        g.ColumnHeadersDefaultCellStyle.SelectionForeColor = Text;
+        g.RowHeadersDefaultCellStyle.BackColor = Header;
+        g.RowHeadersDefaultCellStyle.ForeColor = Text;
+    }
+
+    // окно и всё в нём (и что добавится потом)
+    public static void Dress(System.Windows.Forms.Control c) {
+        if (c == null || "свой цвет".Equals(c.Tag)) return;
+        if (c is System.Windows.Forms.Form) {
+            c.BackColor = Back;
+            c.ForeColor = Text;
+        } else if (c is System.Windows.Forms.TextBoxBase || c is System.Windows.Forms.ComboBox || c is System.Windows.Forms.ListBox
+            || c is System.Windows.Forms.ListView || c is System.Windows.Forms.NumericUpDown || c is System.Windows.Forms.TreeView) {
+            if (Plain(c.BackColor)) c.BackColor = c is System.Windows.Forms.TextBoxBase && ((System.Windows.Forms.TextBoxBase)c).ReadOnly ? Surface : Input;
+            if (PlainText(c.ForeColor)) c.ForeColor = Text;
+            System.Windows.Forms.TextBox t = c as System.Windows.Forms.TextBox;
+            if (t != null && t.BorderStyle == System.Windows.Forms.BorderStyle.Fixed3D) t.BorderStyle = System.Windows.Forms.BorderStyle.FixedSingle;
+            System.Windows.Forms.ComboBox cb = c as System.Windows.Forms.ComboBox;
+            if (cb != null && Dark) cb.FlatStyle = System.Windows.Forms.FlatStyle.Flat;
+            System.Windows.Forms.ListView lv = c as System.Windows.Forms.ListView;
+            if (lv != null && Dark) lv.GridLines = false;           // линии сетки Windows рисует светлыми - на тёмном режут глаз
+        } else if (c is System.Windows.Forms.DataGridView) {
+            Grid((System.Windows.Forms.DataGridView)c);
+        } else if (c is System.Windows.Forms.Button) {
+            Button((System.Windows.Forms.Button)c);
+        } else if (c is System.Windows.Forms.LinkLabel) {
+            System.Windows.Forms.LinkLabel l = (System.Windows.Forms.LinkLabel)c;
+            l.LinkColor = Link;
+            l.ActiveLinkColor = AccentHover;
+            l.VisitedLinkColor = Link;
+            if (PlainText(l.ForeColor)) l.ForeColor = Text;
+        } else if (c is System.Windows.Forms.DateTimePicker) {
+            System.Windows.Forms.DateTimePicker d = (System.Windows.Forms.DateTimePicker)c;
+            d.CalendarMonthBackground = Input;
+            d.CalendarForeColor = Text;
+            d.CalendarTitleBackColor = Accent;
+            d.CalendarTitleForeColor = System.Drawing.Color.White;
+            d.CalendarTrailingForeColor = Hint;
+        } else if (c is System.Windows.Forms.MonthCalendar) {
+            System.Windows.Forms.MonthCalendar m = (System.Windows.Forms.MonthCalendar)c;
+            // календарь Windows в стиле системы свои цвета не берёт - в тёмной теме рисуем его без стиля системы
+            if (Dark) { if (m.IsHandleCreated) Plain(m); else m.HandleCreated += delegate { Plain(m); }; }
+            m.BackColor = Input;
+            m.ForeColor = Text;
+            m.TitleBackColor = Accent;
+            m.TitleForeColor = System.Drawing.Color.White;
+            m.TrailingForeColor = Hint;
+        } else if (c is System.Windows.Forms.ProgressBar) {
+        } else {
+            // подписи, галочки, панели, разделители
+            if (!(c is System.Windows.Forms.Label) && !(c is System.Windows.Forms.CheckBox) && !(c is System.Windows.Forms.RadioButton) && Plain(c.BackColor)) c.BackColor = Back;
+            if (PlainText(c.ForeColor)) c.ForeColor = Text;
+            else if (Same(c.ForeColor, System.Drawing.SystemColors.GrayText)) c.ForeColor = Hint;
+        }
+        foreach (System.Windows.Forms.Control x in c.Controls) Dress(x);
+        if (!hooked.ContainsKey(c) && (c is System.Windows.Forms.ContainerControl || c is System.Windows.Forms.Panel || c is System.Windows.Forms.GroupBox
+            || c is System.Windows.Forms.SplitterPanel || c is System.Windows.Forms.TabPage)) {
+            hooked[c] = true;
+            System.Windows.Forms.Control me = c;
+            c.ControlAdded += delegate(object s, System.Windows.Forms.ControlEventArgs e) { Dress(e.Control); };
+            c.Disposed += delegate { hooked.Remove(me); };
+        }
+    }
+
+    [System.Runtime.InteropServices.DllImport("uxtheme.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+    static extern int SetWindowTheme(System.IntPtr hwnd, string app, string idList);
+
+    static void Plain(System.Windows.Forms.Control c) {
+        if (System.Environment.OSVersion.Platform != System.PlatformID.Win32NT) return;
+        try { SetWindowTheme(c.Handle, "", ""); } catch { }
+    }
+
+    static readonly System.Collections.Generic.Dictionary<System.Windows.Forms.Control, bool> hooked = new System.Collections.Generic.Dictionary<System.Windows.Forms.Control, bool>();
+
+    // окно - в теме при показе (и шрифт программы)
+    public static void Wear(System.Windows.Forms.Form f) {
+        f.Load += delegate { Dress(f); };
+    }
+}
+
 // Ошибки программы: вместо стандартного окна Windows - своё, с подробностями (их можно скопировать),
 // и запись в oshibki.txt рядом с программой - его можно прислать. Номера (лицевые и т.п.) и имена файлов
 // фото в записи скрыты.
@@ -80,7 +270,7 @@ public static class Crash {
             using (Form f = new Form()) {
                 f.Text = "Фото с телефона - ошибка";
                 f.Font = new Font("Segoe UI", 10f);
-                f.BackColor = Color.White;
+                Look.Wear(f);
                 f.StartPosition = FormStartPosition.CenterScreen;
                 f.Size = new Size(760, 480);
                 f.TopMost = true;
@@ -1013,7 +1203,7 @@ public class PhonesDialog : Form {
         this.connected = connected;
         Text = "Телефоны для автопереноса";
         Font = new Font("Segoe UI", 10f);
-        BackColor = Color.White;
+        Look.Wear(this);
         StartPosition = FormStartPosition.CenterParent;
         Size = new Size(1000, 560);
         MinimumSize = new Size(760, 420);
@@ -1081,9 +1271,8 @@ public class PhonesDialog : Form {
         b.Text = text;
         b.FlatStyle = FlatStyle.Flat;
         b.UseVisualStyleBackColor = false;
-        b.BackColor = main ? Color.FromArgb(32, 100, 190) : Color.White;
-        b.ForeColor = main ? Color.White : Color.FromArgb(30, 40, 55);
-        b.FlatAppearance.BorderColor = main ? Color.FromArgb(32, 100, 190) : Color.FromArgb(150, 160, 175);
+        if (main) Look.MainButton(b);
+        else Look.Button(b);
         return b;
     }
 
@@ -1100,12 +1289,12 @@ public class PhonesDialog : Form {
                     IsConnected(k) ? "подключён" : "", k.Last, k.Id });
                 it.Tag = k;
                 it.Checked = k.On;
-                if (IsConnected(k)) it.ForeColor = Color.FromArgb(30, 120, 60);
+                if (IsConnected(k)) it.ForeColor = Look.Good;
                 list.Items.Add(it);
             }
             if (phones.Count == 0) {
                 ListViewItem it = new ListViewItem(new string[] { "Список пуст", "", "подключите телефон и нажмите «Добавить подключённый»", "", "", "", "", "" });
-                it.ForeColor = Color.Gray;
+                it.ForeColor = Look.Hint;
                 list.Items.Add(it);
             }
         } finally { filling = false; }
@@ -1202,7 +1391,7 @@ public class PhoneEditDialog : Form {
         this.dev = dev;
         Text = isNew ? "Новый телефон" : "Телефон «" + k.Name + "»";
         Font = new Font("Segoe UI", 10f);
-        BackColor = Color.White;
+        Look.Wear(this);
         StartPosition = FormStartPosition.CenterParent;
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = MinimizeBox = false;
@@ -1250,7 +1439,7 @@ public class PhoneEditDialog : Form {
         grid.AllowUserToResizeRows = false;
         grid.RowHeadersVisible = false;
         grid.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
-        grid.BackgroundColor = Color.White;
+        Look.Grid(grid);
         grid.BorderStyle = BorderStyle.FixedSingle;
         grid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
         DataGridViewTextBoxColumn cp = new DataGridViewTextBoxColumn();
@@ -1314,7 +1503,7 @@ public class PhoneEditDialog : Form {
         Label l = new Label();
         l.Text = text;
         l.Font = SmallFont;
-        l.ForeColor = Color.FromArgb(100, 110, 125);
+        l.ForeColor = Look.Hint;
         l.SetBounds(16, y, w, 20);
         l.AutoEllipsis = true;
         return l;
@@ -1325,8 +1514,7 @@ public class PhoneEditDialog : Form {
         b.Text = text;
         b.FlatStyle = FlatStyle.Flat;
         b.UseVisualStyleBackColor = false;
-        b.BackColor = Color.White;
-        b.FlatAppearance.BorderColor = Color.FromArgb(150, 160, 175);
+        Look.Button(b);
         return b;
     }
 
@@ -1420,7 +1608,7 @@ public class FolderPickDialog : Form {
         this.dev = dev;
         Text = "Папка на телефоне «" + dev.Name + "»";
         Font = new Font("Segoe UI", 10f);
-        BackColor = Color.White;
+        Look.Wear(this);
         StartPosition = FormStartPosition.CenterParent;
         ShowInTaskbar = false;
         MinimizeBox = false;
@@ -1439,7 +1627,7 @@ public class FolderPickDialog : Form {
         tree.NodeMouseDoubleClick += delegate(object s, TreeNodeMouseClickEventArgs e) { if (e.Node != null && e.Node.Level > 0 && e.Node.Nodes.Count == 0) Accept(); };
         chosenText.SetBounds(12, 476, 536, 40);
         chosenText.Anchor = AnchorStyles.Left | AnchorStyles.Bottom | AnchorStyles.Right;
-        chosenText.ForeColor = Color.FromArgb(32, 100, 190);
+        chosenText.ForeColor = Look.Link;
         ok.Text = "Выбрать";
         Button cancel = new Button();
         cancel.Text = "Отмена";
@@ -1448,9 +1636,8 @@ public class FolderPickDialog : Form {
             b.UseVisualStyleBackColor = false;
             b.Anchor = AnchorStyles.Right | AnchorStyles.Bottom;
         }
-        ok.BackColor = Color.FromArgb(32, 100, 190);
-        ok.ForeColor = Color.White;
-        cancel.BackColor = Color.White;
+        Look.MainButton(ok);
+        Look.Button(cancel);
         ok.SetBounds(316, 518, 112, 32);
         cancel.SetBounds(436, 518, 112, 32);
         ok.Enabled = false;
@@ -1499,7 +1686,7 @@ public class FolderPickDialog : Form {
                     Node ci = new Node();
                     ci.Rel = info.Rel.Length > 0 ? info.Rel + "\\" + s : s;
                     c.Tag = ci;
-                    if (s.StartsWith(".")) c.ForeColor = Color.Gray;     // скрытые (.thumbnails) - серым
+                    if (s.StartsWith(".")) c.ForeColor = Look.Hint;     // скрытые (.thumbnails) - серым
                     c.Nodes.Add("…");
                     n.Nodes.Add(c);
                 }
@@ -1572,8 +1759,12 @@ public class FotoForm : Form {
     readonly ProgressBar bar = new ProgressBar();
     static readonly Font Base = new Font("Segoe UI", 10f), Small = new Font("Segoe UI", 9f), Bold = new Font("Segoe UI", 10f, FontStyle.Bold),
         Big = new Font("Segoe UI", 11f, FontStyle.Bold);
-    static readonly Color Back = Color.FromArgb(243, 245, 248), Good = Color.FromArgb(30, 120, 60), Bad = Color.FromArgb(190, 40, 40),
-        Hint = Color.FromArgb(100, 110, 125), Accent = Color.FromArgb(32, 100, 190);
+    // цвета - общей темы программ (Look: тёмная / светлая, как в «Договоре»)
+    static Color Back { get { return Look.Back; } }
+    static Color Good { get { return Look.Good; } }
+    static Color Bad { get { return Look.Bad; } }
+    static Color Hint { get { return Look.Hint; } }
+    static Color Accent { get { return Look.Link; } }      // синий текст (кнопки - Look.MainButton)
     static readonly DateTime NoDate = DateTime.MinValue;
 
     List<PhoneFile> files = new List<PhoneFile>();
@@ -1587,6 +1778,9 @@ public class FotoForm : Form {
         phonesFile = Path.Combine(here, "telefony.txt");
         phones = PhoneBook.Load(phonesFile);
         LoadSettings();
+        // тема окон (nastroiki.txt «ТёмнаяТема»; нет записи - тёмная) - до создания элементов
+        Look.Apply(Setting("ТёмнаяТема", "1") != "0");
+        Look.Wear(this);
         // программу перенесли в другую папку - запуск при входе в Windows должен вести сюда
         try { if (Autostart.IsOn) Autostart.Set(true, here); } catch { }
         Text = "Фото с телефона - перенос в папки по датам";
@@ -1603,7 +1797,7 @@ public class FotoForm : Form {
         Panel top = new Panel();
         top.Dock = DockStyle.Top;
         top.Height = 70;
-        top.BackColor = Color.White;
+        top.BackColor = Look.Surface;
         Label lp = new Label();
         lp.Text = "Куда складывать (внутри - папки год \\ месяц \\ число, например 2026\\08\\21):";
         lp.Font = Small;
@@ -1621,7 +1815,12 @@ public class FotoForm : Form {
         top.Controls.Add(path);
         top.Controls.Add(pick);
         top.Controls.Add(open);
+        // тема окон - справа вверху, меняется при следующем запуске
+        LinkLabel theme = Look.Switch(delegate(bool dark) { settings["ТёмнаяТема"] = dark ? "1" : "0"; SaveSettings(); });
+        theme.BackColor = Look.Surface;
+        top.Controls.Add(theme);
         top.Resize += delegate {
+            theme.Location = new Point(top.ClientSize.Width - 16 - theme.Width, 8);
             open.SetBounds(top.ClientSize.Width - 16 - 140, 28, 140, 32);
             pick.SetBounds(open.Left - 8 - 110, 28, 110, 32);
             path.SetBounds(16, 31, Math.Max(100, pick.Left - 24), 26);
@@ -1648,7 +1847,7 @@ public class FotoForm : Form {
         byMod.Checked = !PhoneShell.ByTaken;
         byTaken.CheckedChanged += delegate { DateMode(byTaken.Checked); };
         dateNote.Font = Small;
-        dateNote.ForeColor = Color.FromArgb(190, 105, 0);
+        dateNote.ForeColor = Look.Warn;
         dateNote.Location = new Point(16, 74);
         dateNote.Size = new Size(275, 30);
         cal.Location = new Point(16, 106);
@@ -1807,8 +2006,8 @@ public class FotoForm : Form {
         Panel bottom = new Panel();
         bottom.Dock = DockStyle.Bottom;
         bottom.Height = 76;
-        bottom.BackColor = Color.White;
-        bottom.Paint += delegate(object s, PaintEventArgs e) { using (Pen p = new Pen(Color.FromArgb(214, 219, 226))) e.Graphics.DrawLine(p, 0, 0, bottom.Width, 0); };
+        bottom.BackColor = Look.Surface;
+        bottom.Paint += delegate(object s, PaintEventArgs e) { using (Pen p = new Pen(Look.Border)) e.Graphics.DrawLine(p, 0, 0, bottom.Width, 0); };
         moveButton = MakeButton("Перенести с телефона", true);
         moveButton.Font = Big;
         moveButton.Click += delegate { MoveFiles(); };
@@ -1871,9 +2070,8 @@ public class FotoForm : Form {
         b.FlatStyle = FlatStyle.Flat;
         b.Cursor = Cursors.Hand;
         b.UseVisualStyleBackColor = false;
-        b.BackColor = main ? Accent : Color.White;
-        b.ForeColor = main ? Color.White : Color.FromArgb(30, 40, 55);
-        b.FlatAppearance.BorderColor = main ? Accent : Color.FromArgb(150, 160, 175);
+        if (main) Look.MainButton(b);
+        else Look.Button(b);
         return b;
     }
 
@@ -2029,7 +2227,7 @@ public class FotoForm : Form {
         } else { phoneText.Text = "Телефон не найден"; phoneText.ForeColor = Bad; }
         if (r.Error != null) Status(r.Error, Bad);
         else if (r.Missing.Count > 0) Status("Своих папок нет на телефоне: " + string.Join("; ", r.Missing.ToArray()) + " - проверьте «Свои папки телефона…».",
-            Color.FromArgb(190, 105, 0));
+            Look.Warn);
         else Status("Выберите дни в календаре (или галочками в списке) и нажмите «Перенести с телефона».", Hint);
         // отчёт рядом с программой: что видно на телефоне (папки, сколько файлов, по каким дням; без имён файлов)
         try { File.WriteAllText(Path.Combine(here, "otchet.txt"), PhoneShell.Report(r), new UTF8Encoding(true)); } catch { }
@@ -2133,7 +2331,7 @@ public class FotoForm : Form {
                     PhoneShell.Mb(s[3]), root.Length > 0 ? PhoneShell.DayFolder(root, d).Substring(root.TrimEnd('\\').Length).TrimStart('\\') : "" });
                 it.Tag = d;
                 it.Checked = picked.ContainsKey(d);
-                if (it.Checked) { it.BackColor = Color.FromArgb(226, 240, 255); if (first == null) first = it; }
+                if (it.Checked) { it.BackColor = Look.RowPick; if (first == null) first = it; }
                 days.Items.Add(it);
             }
             if (first != null) first.EnsureVisible();
@@ -2156,7 +2354,7 @@ public class FotoForm : Form {
         chosen.ForeColor = c.Count == 0 ? Hint : Accent;
         moveButton.Text = c.Count > 0 ? "Перенести с телефона (" + c.Count + ")" : "Перенести с телефона";
         moveButton.Enabled = !busy && c.Count > 0;
-        foreach (ListViewItem it in days.Items) it.BackColor = it.Checked ? Color.FromArgb(226, 240, 255) : Color.White;
+        foreach (ListViewItem it in days.Items) it.BackColor = it.Checked ? Look.RowPick : Look.Input;
     }
 
     // ---------- телефоны для автопереноса ----------

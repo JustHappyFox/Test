@@ -3451,6 +3451,8 @@ public class DbfViewer : Form {
 
     public DbfViewer(string settingsFile) {
         this.settingsFile = settingsFile;
+        Font = Look.Base;
+        Look.Wear(this);
         Text = "Просмотр базы (только чтение)";
         Size = new Size(1100, 700);
         StartPosition = FormStartPosition.CenterScreen;
@@ -3886,6 +3888,8 @@ public class ScanResults : Form {
     public ScanResults(DbfViewer viewer, string query) {
         this.viewer = viewer;
         this.query = query;
+        Font = Look.Base;
+        Look.Wear(this);
         Text = "Поиск во всех таблицах: " + query;
         Size = new Size(560, 500);
         StartPosition = FormStartPosition.CenterScreen;
@@ -3932,7 +3936,7 @@ public class ScanResults : Form {
     public void AddError(string table, string error) {
         if (IsDisposed) return;
         ListViewItem item = new ListViewItem(new string[] { table, "не открылась", error });
-        item.ForeColor = Color.Gray;
+        item.ForeColor = Look.Hint;
         item.Tag = "error";
         list.Items.Add(item);
     }
@@ -4118,7 +4122,7 @@ public class BaseCard : Form {
         bar.Height = 36;
         bar.WrapContents = false;
         bar.Padding = new Padding(4, 4, 4, 0);
-        bar.BackColor = SystemColors.Control;
+        bar.BackColor = Look.Back;
         prevButton = AddButton("< Пред. (PgUp)", delegate { Step(-1); });
         nextButton = AddButton("След. (PgDn) >", delegate { Step(1); });
         extraButton = AddButton("Доп. сведения (Ctrl+D)", delegate { ToggleExtra(); });
@@ -4139,7 +4143,8 @@ public class BaseCard : Form {
         Button b = new Button();
         b.Text = text;
         b.AutoSize = true;
-        b.UseVisualStyleBackColor = true;
+        b.Font = Look.Base;
+        Look.Button(b);           // кнопки под синим окном - как в остальных окнах программы
         b.Click += click;
         bar.Controls.Add(b);
         return b;
@@ -4573,6 +4578,8 @@ public static class Card {
         object[] values;
         using (MemoReader memo = table.OpenMemo()) values = table.GetRow(row, memo);
         Form card = new Form();
+        card.Font = Look.Base;
+        Look.Wear(card);
         card.Text = "Карточка - " + Path.GetFileName(table.FilePath);
         card.Size = new Size(650, 650);
         card.StartPosition = FormStartPosition.CenterScreen;
@@ -4598,7 +4605,7 @@ public static class Card {
             for (int i = 0; i + 1 < after.Count; i += 2) {
                 int r = g.Rows.Add(after[i], after[i + 1]);
                 if (after[i].StartsWith("---")) {
-                    g.Rows[r].DefaultCellStyle.BackColor = SystemColors.Control;
+                    g.Rows[r].DefaultCellStyle.BackColor = Look.Header;
                     g.Rows[r].DefaultCellStyle.Font = new Font(g.Font, FontStyle.Bold);
                 }
             }
@@ -6133,6 +6140,10 @@ public class AbonentSearch : Form {
 
     public AbonentSearch(string settingsFile, string viewerSettings) {
         this.settingsFile = settingsFile;
+        // тема окон (тёмная / светлая) - седьмая строка poisk.txt, нет - тёмная; до создания элементов
+        Look.Apply(Places.ReadSetting(settingsFile, 6) != "светлая");
+        Font = Look.Base;
+        Look.Wear(this);
         NaryadData.ProgramDir = Dir;     // окна нарядов и обходов (и из карточки) - настройка naryady.txt рядом с программой
         this.viewerSettings = viewerSettings;
         Text = "Поиск абонента (только чтение)";
@@ -6188,7 +6199,7 @@ public class AbonentSearch : Form {
         ssButton.Click += delegate { ShowSelsovety(); };
         row.Controls.Add(ssButton);
         top.Controls.Add(row);
-        Load += delegate { Width = Math.Max(Width, row.PreferredSize.Width + 60); };
+        Load += delegate { Width = Math.Max(Width, row.PreferredSize.Width + 60 + TextRenderer.MeasureText(Look.SwitchText, Look.Small).Width + 20); };
 
         queryBox.Font = new Font(Font.FontFamily, 14f);
         queryBox.Location = new Point(12, 38);
@@ -6205,7 +6216,7 @@ public class AbonentSearch : Form {
         namesLabel.Size = new Size(460, 20);
         namesLabel.Location = new Point(top.Width - 472, 74);
         namesLabel.Anchor = AnchorStyles.Right | AnchorStyles.Top;
-        namesLabel.ForeColor = Color.FromArgb(0, 70, 140);
+        namesLabel.ForeColor = Look.Info;
         top.Controls.Add(queryBox);
         top.Controls.Add(namesLabel);
         top.Controls.Add(hint);
@@ -6236,6 +6247,11 @@ public class AbonentSearch : Form {
         bottom.Controls.Add(BottomButton("Отчёт", delegate { OpenReport(); }));
         bottom.Controls.Add(BottomButton("Все таблицы...", delegate { new DbfViewer(this.viewerSettings).Show(); }));
         bottom.Controls.Add(BottomButton("Где искать...", delegate { ChooseBase(); }));
+        // тема окон - как в «Договоре»: тёмная / светлая, меняется при следующем запуске; справа в первой строке
+        LinkLabel theme = Look.Switch(delegate(bool dark) { themeLine = dark ? "тёмная" : "светлая"; SaveSettings(); });
+        theme.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+        top.Controls.Add(theme);
+        top.Resize += delegate { theme.Location = new Point(top.Width - theme.Width - 12, 10); };
         scanButton.Text = "Искать перебором";
         scanButton.Dock = DockStyle.Right;
         scanButton.Width = 150;
@@ -6341,14 +6357,26 @@ public class AbonentSearch : Form {
         StartSearch();
     }
 
+    // тема окон для poisk.txt (строка 7): выбранная сейчас или та, что уже записана
+    string themeLine;
+    string ThemeLine { get { return themeLine ?? (Places.ReadSetting(settingsFile, 6) ?? (Look.Dark ? "тёмная" : "светлая")); } }
+
     void SaveSettings() {
-        if (folder == null) return;
+        if (folder == null) { if (themeLine != null) SaveTheme(); return; }
         StreetDirectory d = live == null ? null : live.Dir;
         List<string> links = new List<string>();
         if (d != null) foreach (KeyValuePair<string, string> kv in d.Links) links.Add(kv.Key + "=" + kv.Value);
         Places.SaveSettings(settingsFile, new string[] {
             folder, tableName == null ? "" : tableName, ((int)mode).ToString(),
-            d == null ? "" : d.TableName, d == null ? "" : d.KeyField, string.Join(";", links.ToArray()) });
+            d == null ? "" : d.TableName, d == null ? "" : d.KeyField, string.Join(";", links.ToArray()), ThemeLine });
+    }
+
+    // база ещё не открыта - тему всё равно запомнить (остальные строки - как в файле)
+    void SaveTheme() {
+        List<string> lines = new List<string>();
+        for (int i = 0; i < 6; i++) lines.Add(Places.ReadSetting(settingsFile, i) ?? "");
+        lines.Add(themeLine);
+        Places.SaveSettings(settingsFile, lines.ToArray());
     }
 
     void OpenReport() {
@@ -6766,7 +6794,7 @@ public class AbonentSearch : Form {
 
     void NamesLabel(string text, bool problem) {
         namesLabel.Text = text;
-        namesLabel.ForeColor = problem ? Color.FromArgb(190, 0, 0) : Color.FromArgb(0, 70, 140);
+        namesLabel.ForeColor = problem ? Look.Bad : Look.Info;
     }
 
     static string TimeLeft(double seconds) {
@@ -7003,6 +7031,8 @@ public class AbonentSearch : Form {
         host.Size = panel.Size;
         dd.Padding = Padding.Empty;
         dd.Items.Add(host);
+        dd.BackColor = Look.Back;
+        Look.Dress(panel);
         dd.Show(ssButton, new Point(0, ssButton.Height));
         list.Focus();
     }
@@ -7046,6 +7076,8 @@ public class AbonentSearch : Form {
     // Выбор папки и таблицы абонентов, если сама не нашлась или нашлась не та
     void ChooseBase() {
         Form d = new Form();
+        d.Font = Look.Base;
+        Look.Wear(d);
         d.Text = "Где искать абонентов";
         d.Size = new Size(560, 420);
         d.StartPosition = FormStartPosition.CenterParent;
@@ -7114,7 +7146,7 @@ public class AbonentSearch : Form {
         if (string.Compare(newFolder, folder, StringComparison.OrdinalIgnoreCase) != 0 || string.Compare(newTable, tableName, StringComparison.OrdinalIgnoreCase) != 0) {
             folder = newFolder;
             tableName = newTable;
-            Places.SaveSettings(settingsFile, new string[] { folder, tableName, ((int)mode).ToString() });   // справочник искать заново
+            Places.SaveSettings(settingsFile, new string[] { folder, tableName, ((int)mode).ToString(), "", "", "", ThemeLine });   // справочник искать заново
         }
         OpenBase();
     }
@@ -7123,7 +7155,7 @@ public class AbonentSearch : Form {
 // Столбцы списка найденного: тариф (T1, T2...), поля абонента, мощность (из доп. сведений)
 public static class ResultColumns {
     public const int Tariff = -1, Power = -2;
-    public static readonly Color TariffColor = Color.FromArgb(214, 245, 214);
+    public static Color TariffColor { get { return Look.RowGood; } }
 
     public static List<int> Kinds(AbonentQuery q, ExtraInfo x) {
         List<int> list = new List<int>();
@@ -7146,10 +7178,10 @@ public static class ResultColumns {
         return n == "FIO" ? 300 : n == "UL" ? 200 : (n == "NAB" || n == "NCH" || n == "TIPCH") ? 130 : 70;
     }
 
-    public static readonly Color AddedColor = Color.FromArgb(210, 0, 0);
+    public static Color AddedColor { get { return Look.Bad; } }
 
     // строка - другой тариф того же счётчика (её не искали): номер абонента красным
-    public static readonly Color OrangeColor = Color.FromArgb(255, 205, 150);
+    public static Color OrangeColor { get { return Look.RowWarn; } }
 
     public static void Format(SearchResult r, int row, int kind, DataGridViewCellStyle style) {
         if (r.Tariff.ContainsKey(row)) style.BackColor = TariffColor;
@@ -7167,10 +7199,12 @@ public static class ResultColumns {
         e.Paint(e.ClipBounds, DataGridViewPaintParts.All);
         Rectangle b = e.CellBounds;
         const int w = 3;
-        if (prev != cur) e.Graphics.FillRectangle(Brushes.Black, b.Left, b.Top, b.Width, w);
-        if (next != cur) e.Graphics.FillRectangle(Brushes.Black, b.Left, b.Bottom - w, b.Width, w);
-        if (e.ColumnIndex == 0) e.Graphics.FillRectangle(Brushes.Black, b.Left, b.Top, w, b.Height);
-        if (e.ColumnIndex == g.Columns.Count - 1) e.Graphics.FillRectangle(Brushes.Black, b.Right - w, b.Top, w, b.Height);
+        using (SolidBrush frame = new SolidBrush(Look.Strong)) {
+            if (prev != cur) e.Graphics.FillRectangle(frame, b.Left, b.Top, b.Width, w);
+            if (next != cur) e.Graphics.FillRectangle(frame, b.Left, b.Bottom - w, b.Width, w);
+            if (e.ColumnIndex == 0) e.Graphics.FillRectangle(frame, b.Left, b.Top, w, b.Height);
+            if (e.ColumnIndex == g.Columns.Count - 1) e.Graphics.FillRectangle(frame, b.Right - w, b.Top, w, b.Height);
+        }
         e.Handled = true;
     }
 
@@ -7309,6 +7343,8 @@ public class BatchSearch : Form {
     readonly List<int> kinds;
 
     public BatchSearch(LiveBase live, Dictionary<string, bool> selected, SearchMode mode, AbonentQuery query, List<int> kinds) {
+        Font = Look.Base;
+        Look.Wear(this);
         this.kinds = kinds;
         this.live = live;
         this.selected = selected;
@@ -7549,8 +7585,8 @@ public class BatchSearch : Form {
         if (e.RowIndex < 0 || e.RowIndex >= items.Count) return;
         Item it = items[e.RowIndex];
         int kind = it.Kind;
-        if (kind == 2) e.CellStyle.BackColor = Color.FromArgb(255, 220, 220);
-        else if (kind == 1) e.CellStyle.BackColor = Color.FromArgb(255, 245, 200);
+        if (kind == 2) e.CellStyle.BackColor = Look.RowBad;
+        else if (kind == 1) e.CellStyle.BackColor = Look.RowWarn;
         if (it.Res != null && it.Row >= 0 && e.ColumnIndex >= 3 && e.ColumnIndex - 3 < kinds.Count)
             ResultColumns.Format(it.Res, it.Row, kinds[e.ColumnIndex - 3], e.CellStyle);
         else if (it.Res != null && it.Res.Tariff.ContainsKey(it.Row)) e.CellStyle.BackColor = ResultColumns.TariffColor;
@@ -8750,7 +8786,9 @@ public class NaryadForm : Form {
     bool busy;
     volatile bool stop;
 
-    static readonly Color DoneColor = Color.FromArgb(205, 240, 205), OpenColor = Color.FromArgb(255, 205, 205), MissColor = Color.FromArgb(235, 235, 235);
+    static Color DoneColor { get { return Look.RowGood; } }
+    static Color OpenColor { get { return Look.RowBad; } }
+    static Color MissColor { get { return Look.RowOther; } }
     Font bold, headFont;             // «ВЫПОЛНЕН» / «НЕ ВЫПОЛНЕН» - жирным (один шрифт на все ячейки); заголовок нарядов лицевого
 
     public bool Busy { get { return busy || building || pendingRun; } }
@@ -8758,6 +8796,8 @@ public class NaryadForm : Form {
     public NaryadForm(string dir, string folder) : this(dir, folder, null) { }
 
     public NaryadForm(string dir, string folder, LiveBase live) {
+        Font = Look.Base;
+        Look.Wear(this);
         this.live = live;
         if (NaryadData.ProgramDir.Length == 0) NaryadData.ProgramDir = dir;
         this.dir = dir;
@@ -8844,7 +8884,7 @@ public class NaryadForm : Form {
             if (e.RowIndex < 0 || e.RowIndex >= hits.Count) return;
             int st = hits[e.RowIndex].State;
             e.CellStyle.BackColor = st == 0 ? DoneColor : st == 1 ? OpenColor : MissColor;
-            e.CellStyle.SelectionBackColor = st == 0 ? Color.FromArgb(40, 140, 60) : st == 1 ? Color.FromArgb(190, 40, 40) : Color.FromArgb(110, 110, 110);
+            e.CellStyle.SelectionBackColor = st == 0 ? Look.SelGood : st == 1 ? Look.SelBad : Look.SelOther;
             if (e.ColumnIndex == 3 && st <= 1) {
                 if (bold == null) bold = new Font(grid.Font, FontStyle.Bold);
                 e.CellStyle.Font = bold;
@@ -9173,12 +9213,12 @@ public class NaryadForm : Form {
         if (have < years.Count) {
             indexLabel.Text = "Индексы нарядов за " + span + (have > 0 ? " (есть за " + have + " из " + years.Count + " лет)" : "")
                 + " создадутся при первом поиске - один раз, в папке программы; дальше дополняются сами.";
-            indexLabel.ForeColor = Color.FromArgb(160, 90, 0);
+            indexLabel.ForeColor = Look.Warn;
             return;
         }
         indexLabel.Text = "Индексы нарядов за " + span + ": нарядов " + count + ", обновлены " + updated.ToString("dd.MM.yyyy HH:mm")
             + " (дополняются сами при каждом поиске; файлы indeks_naryady_ГГГГ.txt в папке программы)";
-        indexLabel.ForeColor = Color.FromArgb(0, 100, 40);
+        indexLabel.ForeColor = Look.Good;
     }
 
     // в фоне: индексы этих лет - есть: дописать новые наряды; нет (или таблицу пересобрали): создать все недостающие за один проход
@@ -9280,7 +9320,7 @@ public class NaryadForm : Form {
                 foreach (string l in lines) { int y; long n; if (ParseNumber(l, out y, out n) && !years.Contains(y)) years.Add(y); }
                 ready = EnsureAll(years, notes);
                 using (FileStream fs = new FileStream(TablePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 4096, FileOptions.RandomAccess)) {
-                    for (int i = 0; i < lines.Count && !stop; i++) found.AddRange(Look(fs, i + 1, lines[i], ready));
+                    for (int i = 0; i < lines.Count && !stop; i++) found.AddRange(FindLine(fs, i + 1, lines[i], ready));
                 }
             } catch (Exception ex) { err = ex.Message; }
             double seconds = (DateTime.Now - started).TotalSeconds;
@@ -9291,7 +9331,7 @@ public class NaryadForm : Form {
     }
 
     // одна строка списка -> наряды (обычно один)
-    List<NaryadHit> Look(FileStream fs, int line, string text, Dictionary<int, NaryadIndex> ready) {
+    List<NaryadHit> FindLine(FileStream fs, int line, string text, Dictionary<int, NaryadIndex> ready) {
         List<NaryadHit> r = new List<NaryadHit>();
         int year;
         long number;
@@ -9426,7 +9466,7 @@ public class NaryadForm : Form {
         lsHead.TextAlign = ContentAlignment.MiddleLeft;
         headFont = new Font(Font.FontFamily, 10.5f, FontStyle.Bold);
         lsHead.Font = headFont;
-        lsHead.ForeColor = Color.FromArgb(0, 60, 150);
+        lsHead.ForeColor = Look.Info;
         lsHead.Text = "Наряды лицевого - выберите строку итога";
         SplitContainer two = new SplitContainer();
         two.Dock = DockStyle.Fill;
@@ -9460,7 +9500,7 @@ public class NaryadForm : Form {
         obHead.Height = 26;
         obHead.TextAlign = ContentAlignment.MiddleLeft;
         obHead.Font = headFont;
-        obHead.ForeColor = Color.FromArgb(0, 60, 150);
+        obHead.ForeColor = Look.Info;
         obList.Dock = DockStyle.Fill;
         obList.View = View.Details;
         obList.FullRowSelect = true;
@@ -10230,6 +10270,8 @@ public class NaryadSetupDialog : Form {
     public NaryadSetup Result;
 
     public NaryadSetupDialog(List<NaryadGuess> list, NaryadSetup current) {
+        Font = Look.Base;
+        Look.Wear(this);
         this.list = list;
         Text = "Таблица нарядов";
         StartPosition = FormStartPosition.CenterParent;
@@ -10331,6 +10373,196 @@ public class NaryadSetupDialog : Form {
         Result = s;
         DialogResult = DialogResult.OK;
         Close();
+    }
+}
+
+// Общее оформление программ - как у «Оформления договора»: тёмная тема по умолчанию (глаза меньше устают), светлая - по выбору
+// (переключатель в окне, меняется при следующем запуске). Цвета ставятся один раз при запуске (Look.Apply), до создания окон;
+// Look.Dress(окно) перекрашивает окно и всё, что в нём (и что добавится потом): системное светлое - в цвета темы, кнопки -
+// плоские с рамкой. Цвета, заданные программой нарочно (например, синие окна как в программе базы), не трогаются
+public static class Look {
+    public static bool Dark = true;
+    public static System.Drawing.Color Back, Surface, Input, Header, Border, InputBorder, Text, Caption, Hint, Accent, AccentHover, Hover, Pressed,
+        Link, Good, Bad, Warn, Info, Strong, RowGood, RowWarn, RowBad, RowOther, SelGood, SelBad, SelOther, RowPick;
+    public static readonly System.Drawing.Font Base = new System.Drawing.Font("Segoe UI", 9f), Small = new System.Drawing.Font("Segoe UI", 8.5f),
+        Bold = new System.Drawing.Font("Segoe UI", 9f, System.Drawing.FontStyle.Bold), Title = new System.Drawing.Font("Segoe UI", 15f, System.Drawing.FontStyle.Bold);
+
+    static System.Drawing.Color C(int r, int g, int b) { return System.Drawing.Color.FromArgb(r, g, b); }
+
+    static Look() { Apply(true); }
+
+    public static void Apply(bool dark) {
+        Dark = dark;
+        if (dark) {
+            Back = C(30, 33, 38); Surface = C(40, 44, 51); Input = C(48, 53, 61); Header = C(44, 48, 55);
+            Border = C(66, 72, 82); InputBorder = C(98, 106, 118);
+            Text = C(222, 226, 232); Caption = C(172, 180, 192); Hint = C(138, 146, 158);
+            Accent = C(44, 98, 165); AccentHover = C(54, 114, 188); Hover = C(56, 63, 74); Pressed = C(66, 76, 92);
+            Link = C(118, 172, 236); Good = C(112, 200, 142); Bad = C(240, 120, 120); Warn = C(232, 164, 72); Info = C(130, 182, 240);
+            Strong = C(205, 211, 220);
+            RowGood = C(38, 72, 50); RowWarn = C(84, 64, 34); RowBad = C(88, 42, 46); RowOther = C(52, 56, 62);
+            SelGood = C(46, 120, 70); SelBad = C(150, 50, 56); SelOther = C(84, 90, 100); RowPick = C(38, 60, 92);
+        } else {
+            Back = C(242, 244, 247); Surface = System.Drawing.Color.White; Input = System.Drawing.Color.White; Header = C(232, 236, 241);
+            Border = C(221, 226, 233); InputBorder = C(196, 204, 214);
+            Text = C(31, 36, 43); Caption = C(58, 66, 78); Hint = C(128, 137, 150);
+            Accent = C(35, 99, 178); AccentHover = C(28, 84, 153); Hover = C(236, 242, 250); Pressed = C(222, 233, 247);
+            Link = C(35, 99, 178); Good = C(46, 140, 87); Bad = C(200, 55, 55); Warn = C(190, 105, 0); Info = C(0, 70, 140);
+            Strong = System.Drawing.Color.Black;
+            RowGood = C(214, 241, 219); RowWarn = C(255, 228, 190); RowBad = C(255, 218, 218); RowOther = C(236, 236, 236);
+            SelGood = C(40, 140, 60); SelBad = C(190, 40, 40); SelOther = C(110, 110, 110); RowPick = C(226, 240, 255);
+        }
+    }
+
+    public static string SwitchText { get { return Dark ? "Тема: тёмная - сделать светлой" : "Тема: светлая - сделать тёмной"; } }
+    public static string SwitchedText { get { return Dark ? "будет светлая - после перезапуска" : "будет тёмная - после перезапуска"; } }
+
+    public delegate void SaveTheme(bool dark);
+
+    // ссылка «Тема: ...» - щелчок запоминает другую тему (save), она будет при следующем запуске
+    public static System.Windows.Forms.LinkLabel Switch(SaveTheme save) {
+        System.Windows.Forms.LinkLabel l = new System.Windows.Forms.LinkLabel();
+        l.Text = SwitchText;
+        l.Font = Small;
+        l.AutoSize = true;
+        l.LinkColor = l.ActiveLinkColor = Link;
+        l.LinkBehavior = System.Windows.Forms.LinkBehavior.HoverUnderline;
+        bool next = !Dark;
+        l.LinkClicked += delegate {
+            save(next);
+            l.Text = next == Dark ? SwitchText : SwitchedText;
+            next = !next;
+        };
+        return l;
+    }
+
+    static bool Same(System.Drawing.Color a, System.Drawing.Color b) { return a.ToArgb() == b.ToArgb(); }
+
+    // светлое системное (его и красим)
+    static bool Plain(System.Drawing.Color c) {
+        return c.A == 255 && (Same(c, System.Drawing.Color.White) || Same(c, System.Drawing.SystemColors.Window) || Same(c, System.Drawing.SystemColors.Control)
+            || Same(c, System.Drawing.SystemColors.ControlLight) || Same(c, System.Drawing.SystemColors.ButtonFace) || Same(c, System.Drawing.SystemColors.AppWorkspace));
+    }
+
+    static bool PlainText(System.Drawing.Color c) {
+        return Same(c, System.Drawing.Color.Black) || Same(c, System.Drawing.SystemColors.ControlText) || Same(c, System.Drawing.SystemColors.WindowText);
+    }
+
+    // главная кнопка окна (синяя): AcceptButton окна или Tag «главная»
+    public static void MainButton(System.Windows.Forms.Button b) { b.Tag = "главная"; Button(b); }
+
+    public static void Button(System.Windows.Forms.Button b) {
+        System.Windows.Forms.Form f = b.FindForm();
+        bool main = "главная".Equals(b.Tag) || f != null && f.AcceptButton == b;
+        bool custom = !main && !Plain(b.BackColor) && b.BackColor.A == 255;     // цвет задан программой - оставить
+        b.FlatStyle = System.Windows.Forms.FlatStyle.Flat;
+        b.UseVisualStyleBackColor = false;
+        b.Cursor = System.Windows.Forms.Cursors.Hand;
+        if (main) {
+            b.BackColor = Accent;
+            b.ForeColor = System.Drawing.Color.White;
+            b.FlatAppearance.BorderSize = 0;
+            b.FlatAppearance.MouseOverBackColor = b.FlatAppearance.MouseDownBackColor = AccentHover;
+        } else if (!custom) {
+            b.BackColor = Surface;
+            b.ForeColor = Text;
+            b.FlatAppearance.BorderSize = 1;
+            b.FlatAppearance.BorderColor = InputBorder;
+            b.FlatAppearance.MouseOverBackColor = Hover;
+            b.FlatAppearance.MouseDownBackColor = Pressed;
+        }
+    }
+
+    public static void Grid(System.Windows.Forms.DataGridView g) {
+        g.BackgroundColor = Surface;
+        g.GridColor = Border;
+        g.BorderStyle = System.Windows.Forms.BorderStyle.FixedSingle;
+        g.DefaultCellStyle.BackColor = Input;
+        g.DefaultCellStyle.ForeColor = Text;
+        g.DefaultCellStyle.SelectionBackColor = Accent;
+        g.DefaultCellStyle.SelectionForeColor = System.Drawing.Color.White;
+        g.EnableHeadersVisualStyles = false;
+        g.ColumnHeadersBorderStyle = System.Windows.Forms.DataGridViewHeaderBorderStyle.Single;
+        g.ColumnHeadersDefaultCellStyle.BackColor = Header;
+        g.ColumnHeadersDefaultCellStyle.ForeColor = Text;
+        g.ColumnHeadersDefaultCellStyle.SelectionBackColor = Header;
+        g.ColumnHeadersDefaultCellStyle.SelectionForeColor = Text;
+        g.RowHeadersDefaultCellStyle.BackColor = Header;
+        g.RowHeadersDefaultCellStyle.ForeColor = Text;
+    }
+
+    // окно и всё в нём (и что добавится потом)
+    public static void Dress(System.Windows.Forms.Control c) {
+        if (c == null || "свой цвет".Equals(c.Tag)) return;
+        if (c is System.Windows.Forms.Form) {
+            c.BackColor = Back;
+            c.ForeColor = Text;
+        } else if (c is System.Windows.Forms.TextBoxBase || c is System.Windows.Forms.ComboBox || c is System.Windows.Forms.ListBox
+            || c is System.Windows.Forms.ListView || c is System.Windows.Forms.NumericUpDown || c is System.Windows.Forms.TreeView) {
+            if (Plain(c.BackColor)) c.BackColor = c is System.Windows.Forms.TextBoxBase && ((System.Windows.Forms.TextBoxBase)c).ReadOnly ? Surface : Input;
+            if (PlainText(c.ForeColor)) c.ForeColor = Text;
+            System.Windows.Forms.TextBox t = c as System.Windows.Forms.TextBox;
+            if (t != null && t.BorderStyle == System.Windows.Forms.BorderStyle.Fixed3D) t.BorderStyle = System.Windows.Forms.BorderStyle.FixedSingle;
+            System.Windows.Forms.ComboBox cb = c as System.Windows.Forms.ComboBox;
+            if (cb != null && Dark) cb.FlatStyle = System.Windows.Forms.FlatStyle.Flat;
+            System.Windows.Forms.ListView lv = c as System.Windows.Forms.ListView;
+            if (lv != null && Dark) lv.GridLines = false;           // линии сетки Windows рисует светлыми - на тёмном режут глаз
+        } else if (c is System.Windows.Forms.DataGridView) {
+            Grid((System.Windows.Forms.DataGridView)c);
+        } else if (c is System.Windows.Forms.Button) {
+            Button((System.Windows.Forms.Button)c);
+        } else if (c is System.Windows.Forms.LinkLabel) {
+            System.Windows.Forms.LinkLabel l = (System.Windows.Forms.LinkLabel)c;
+            l.LinkColor = Link;
+            l.ActiveLinkColor = AccentHover;
+            l.VisitedLinkColor = Link;
+            if (PlainText(l.ForeColor)) l.ForeColor = Text;
+        } else if (c is System.Windows.Forms.DateTimePicker) {
+            System.Windows.Forms.DateTimePicker d = (System.Windows.Forms.DateTimePicker)c;
+            d.CalendarMonthBackground = Input;
+            d.CalendarForeColor = Text;
+            d.CalendarTitleBackColor = Accent;
+            d.CalendarTitleForeColor = System.Drawing.Color.White;
+            d.CalendarTrailingForeColor = Hint;
+        } else if (c is System.Windows.Forms.MonthCalendar) {
+            System.Windows.Forms.MonthCalendar m = (System.Windows.Forms.MonthCalendar)c;
+            // календарь Windows в стиле системы свои цвета не берёт - в тёмной теме рисуем его без стиля системы
+            if (Dark) { if (m.IsHandleCreated) Plain(m); else m.HandleCreated += delegate { Plain(m); }; }
+            m.BackColor = Input;
+            m.ForeColor = Text;
+            m.TitleBackColor = Accent;
+            m.TitleForeColor = System.Drawing.Color.White;
+            m.TrailingForeColor = Hint;
+        } else if (c is System.Windows.Forms.ProgressBar) {
+        } else {
+            // подписи, галочки, панели, разделители
+            if (!(c is System.Windows.Forms.Label) && !(c is System.Windows.Forms.CheckBox) && !(c is System.Windows.Forms.RadioButton) && Plain(c.BackColor)) c.BackColor = Back;
+            if (PlainText(c.ForeColor)) c.ForeColor = Text;
+            else if (Same(c.ForeColor, System.Drawing.SystemColors.GrayText)) c.ForeColor = Hint;
+        }
+        foreach (System.Windows.Forms.Control x in c.Controls) Dress(x);
+        if (!hooked.ContainsKey(c) && (c is System.Windows.Forms.ContainerControl || c is System.Windows.Forms.Panel || c is System.Windows.Forms.GroupBox
+            || c is System.Windows.Forms.SplitterPanel || c is System.Windows.Forms.TabPage)) {
+            hooked[c] = true;
+            System.Windows.Forms.Control me = c;
+            c.ControlAdded += delegate(object s, System.Windows.Forms.ControlEventArgs e) { Dress(e.Control); };
+            c.Disposed += delegate { hooked.Remove(me); };
+        }
+    }
+
+    [System.Runtime.InteropServices.DllImport("uxtheme.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+    static extern int SetWindowTheme(System.IntPtr hwnd, string app, string idList);
+
+    static void Plain(System.Windows.Forms.Control c) {
+        if (System.Environment.OSVersion.Platform != System.PlatformID.Win32NT) return;
+        try { SetWindowTheme(c.Handle, "", ""); } catch { }
+    }
+
+    static readonly System.Collections.Generic.Dictionary<System.Windows.Forms.Control, bool> hooked = new System.Collections.Generic.Dictionary<System.Windows.Forms.Control, bool>();
+
+    // окно - в теме при показе (и шрифт программы)
+    public static void Wear(System.Windows.Forms.Form f) {
+        f.Load += delegate { Dress(f); };
     }
 }
 '@

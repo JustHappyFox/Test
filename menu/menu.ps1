@@ -42,12 +42,17 @@ public static class MenuApp {
     }
 }
 
-// цвета - как тёмная тема «Договора»
+// цвета - общей темы программ (Look: тёмная / светлая, как в «Договоре»)
 public static class Pal {
-    public static readonly Color Back = Color.FromArgb(30, 33, 38), Tile = Color.FromArgb(40, 44, 51), TileHover = Color.FromArgb(52, 58, 68),
-        Border = Color.FromArgb(66, 72, 82), Text = Color.FromArgb(222, 226, 232), Hint = Color.FromArgb(138, 146, 158),
-        Bad = Color.FromArgb(240, 120, 120), Good = Color.FromArgb(112, 200, 142), Link = Color.FromArgb(120, 170, 235),
-        Accent = Color.FromArgb(44, 98, 165);
+    public static Color Back { get { return Look.Back; } }
+    public static Color Tile { get { return Look.Surface; } }
+    public static Color TileHover { get { return Look.Hover; } }
+    public static Color Border { get { return Look.Border; } }
+    public static Color Text { get { return Look.Text; } }
+    public static Color Hint { get { return Look.Hint; } }
+    public static Color Bad { get { return Look.Bad; } }
+    public static Color Good { get { return Look.Good; } }
+    public static Color Link { get { return Look.Link; } }
     public static readonly Font Title = new Font("Segoe UI", 17f, FontStyle.Bold), Big = new Font("Segoe UI", 13.5f, FontStyle.Bold),
         Base = new Font("Segoe UI", 10f), Small = new Font("Segoe UI", 9f), Number = new Font("Segoe UI", 22f, FontStyle.Bold);
 }
@@ -222,6 +227,7 @@ public class MenuForm : Form {
     readonly CheckBox closeAfter = new CheckBox();
     readonly Label status = new Label();
     readonly LinkLabel shortcut = new LinkLabel(), again = new LinkLabel();
+    LinkLabel theme;
     bool searching;
 
     public delegate void Starter(string file, string args);
@@ -230,6 +236,8 @@ public class MenuForm : Form {
     public MenuForm(string here) {
         this.here = here;
         settings = new MenuSettings(Path.Combine(here, "nastroiki.txt"));
+        // тема (nastroiki.txt «ТёмнаяТема»; нет записи - тёмная) - до создания элементов
+        Look.Apply(settings.Get("ТёмнаяТема") != "0");
         Text = "Программы";
         Font = Pal.Base;
         BackColor = Pal.Back;
@@ -276,6 +284,8 @@ public class MenuForm : Form {
             Controls.Add(l);
         }
         shortcut.LinkClicked += delegate { MakeShortcut(); };
+        theme = Look.Switch(delegate(bool dark) { settings.Values["ТёмнаяТема"] = dark ? "1" : "0"; settings.Save(); ThemePlace(); });
+        Controls.Add(theme);
         again.Text = "Искать программы заново";
         again.LinkClicked += delegate { Search(true); };
         status.Font = Pal.Small;
@@ -304,8 +314,11 @@ public class MenuForm : Form {
     void ShortcutText() {
         shortcut.Text = File.Exists(ShortcutPath) ? "Ярлык «Программы» на рабочем столе есть - обновить" : "Создать ярлык «Программы» на рабочем столе";
         Place(shortcut, 30, 426);
+        ThemePlace();
         Place(again, ClientSize.Width - 28 - TextRenderer.MeasureText(again.Text, Pal.Small).Width - 4, 400);
     }
+
+    void ThemePlace() { if (theme != null) Place(theme, ClientSize.Width - 28 - TextRenderer.MeasureText(theme.Text, Look.Small).Width - 4, 426); }
 
     // плитки: где лежит программа
     void Show2() {
@@ -539,6 +552,196 @@ public static class MenuIcon {
         bmp.Dispose();
         w.Flush();
         return ms.ToArray();
+    }
+}
+
+// Общее оформление программ - как у «Оформления договора»: тёмная тема по умолчанию (глаза меньше устают), светлая - по выбору
+// (переключатель в окне, меняется при следующем запуске). Цвета ставятся один раз при запуске (Look.Apply), до создания окон;
+// Look.Dress(окно) перекрашивает окно и всё, что в нём (и что добавится потом): системное светлое - в цвета темы, кнопки -
+// плоские с рамкой. Цвета, заданные программой нарочно (например, синие окна как в программе базы), не трогаются
+public static class Look {
+    public static bool Dark = true;
+    public static System.Drawing.Color Back, Surface, Input, Header, Border, InputBorder, Text, Caption, Hint, Accent, AccentHover, Hover, Pressed,
+        Link, Good, Bad, Warn, Info, Strong, RowGood, RowWarn, RowBad, RowOther, SelGood, SelBad, SelOther, RowPick;
+    public static readonly System.Drawing.Font Base = new System.Drawing.Font("Segoe UI", 9f), Small = new System.Drawing.Font("Segoe UI", 8.5f),
+        Bold = new System.Drawing.Font("Segoe UI", 9f, System.Drawing.FontStyle.Bold), Title = new System.Drawing.Font("Segoe UI", 15f, System.Drawing.FontStyle.Bold);
+
+    static System.Drawing.Color C(int r, int g, int b) { return System.Drawing.Color.FromArgb(r, g, b); }
+
+    static Look() { Apply(true); }
+
+    public static void Apply(bool dark) {
+        Dark = dark;
+        if (dark) {
+            Back = C(30, 33, 38); Surface = C(40, 44, 51); Input = C(48, 53, 61); Header = C(44, 48, 55);
+            Border = C(66, 72, 82); InputBorder = C(98, 106, 118);
+            Text = C(222, 226, 232); Caption = C(172, 180, 192); Hint = C(138, 146, 158);
+            Accent = C(44, 98, 165); AccentHover = C(54, 114, 188); Hover = C(56, 63, 74); Pressed = C(66, 76, 92);
+            Link = C(118, 172, 236); Good = C(112, 200, 142); Bad = C(240, 120, 120); Warn = C(232, 164, 72); Info = C(130, 182, 240);
+            Strong = C(205, 211, 220);
+            RowGood = C(38, 72, 50); RowWarn = C(84, 64, 34); RowBad = C(88, 42, 46); RowOther = C(52, 56, 62);
+            SelGood = C(46, 120, 70); SelBad = C(150, 50, 56); SelOther = C(84, 90, 100); RowPick = C(38, 60, 92);
+        } else {
+            Back = C(242, 244, 247); Surface = System.Drawing.Color.White; Input = System.Drawing.Color.White; Header = C(232, 236, 241);
+            Border = C(221, 226, 233); InputBorder = C(196, 204, 214);
+            Text = C(31, 36, 43); Caption = C(58, 66, 78); Hint = C(128, 137, 150);
+            Accent = C(35, 99, 178); AccentHover = C(28, 84, 153); Hover = C(236, 242, 250); Pressed = C(222, 233, 247);
+            Link = C(35, 99, 178); Good = C(46, 140, 87); Bad = C(200, 55, 55); Warn = C(190, 105, 0); Info = C(0, 70, 140);
+            Strong = System.Drawing.Color.Black;
+            RowGood = C(214, 241, 219); RowWarn = C(255, 228, 190); RowBad = C(255, 218, 218); RowOther = C(236, 236, 236);
+            SelGood = C(40, 140, 60); SelBad = C(190, 40, 40); SelOther = C(110, 110, 110); RowPick = C(226, 240, 255);
+        }
+    }
+
+    public static string SwitchText { get { return Dark ? "Тема: тёмная - сделать светлой" : "Тема: светлая - сделать тёмной"; } }
+    public static string SwitchedText { get { return Dark ? "будет светлая - после перезапуска" : "будет тёмная - после перезапуска"; } }
+
+    public delegate void SaveTheme(bool dark);
+
+    // ссылка «Тема: ...» - щелчок запоминает другую тему (save), она будет при следующем запуске
+    public static System.Windows.Forms.LinkLabel Switch(SaveTheme save) {
+        System.Windows.Forms.LinkLabel l = new System.Windows.Forms.LinkLabel();
+        l.Text = SwitchText;
+        l.Font = Small;
+        l.AutoSize = true;
+        l.LinkColor = l.ActiveLinkColor = Link;
+        l.LinkBehavior = System.Windows.Forms.LinkBehavior.HoverUnderline;
+        bool next = !Dark;
+        l.LinkClicked += delegate {
+            save(next);
+            l.Text = next == Dark ? SwitchText : SwitchedText;
+            next = !next;
+        };
+        return l;
+    }
+
+    static bool Same(System.Drawing.Color a, System.Drawing.Color b) { return a.ToArgb() == b.ToArgb(); }
+
+    // светлое системное (его и красим)
+    static bool Plain(System.Drawing.Color c) {
+        return c.A == 255 && (Same(c, System.Drawing.Color.White) || Same(c, System.Drawing.SystemColors.Window) || Same(c, System.Drawing.SystemColors.Control)
+            || Same(c, System.Drawing.SystemColors.ControlLight) || Same(c, System.Drawing.SystemColors.ButtonFace) || Same(c, System.Drawing.SystemColors.AppWorkspace));
+    }
+
+    static bool PlainText(System.Drawing.Color c) {
+        return Same(c, System.Drawing.Color.Black) || Same(c, System.Drawing.SystemColors.ControlText) || Same(c, System.Drawing.SystemColors.WindowText);
+    }
+
+    // главная кнопка окна (синяя): AcceptButton окна или Tag «главная»
+    public static void MainButton(System.Windows.Forms.Button b) { b.Tag = "главная"; Button(b); }
+
+    public static void Button(System.Windows.Forms.Button b) {
+        System.Windows.Forms.Form f = b.FindForm();
+        bool main = "главная".Equals(b.Tag) || f != null && f.AcceptButton == b;
+        bool custom = !main && !Plain(b.BackColor) && b.BackColor.A == 255;     // цвет задан программой - оставить
+        b.FlatStyle = System.Windows.Forms.FlatStyle.Flat;
+        b.UseVisualStyleBackColor = false;
+        b.Cursor = System.Windows.Forms.Cursors.Hand;
+        if (main) {
+            b.BackColor = Accent;
+            b.ForeColor = System.Drawing.Color.White;
+            b.FlatAppearance.BorderSize = 0;
+            b.FlatAppearance.MouseOverBackColor = b.FlatAppearance.MouseDownBackColor = AccentHover;
+        } else if (!custom) {
+            b.BackColor = Surface;
+            b.ForeColor = Text;
+            b.FlatAppearance.BorderSize = 1;
+            b.FlatAppearance.BorderColor = InputBorder;
+            b.FlatAppearance.MouseOverBackColor = Hover;
+            b.FlatAppearance.MouseDownBackColor = Pressed;
+        }
+    }
+
+    public static void Grid(System.Windows.Forms.DataGridView g) {
+        g.BackgroundColor = Surface;
+        g.GridColor = Border;
+        g.BorderStyle = System.Windows.Forms.BorderStyle.FixedSingle;
+        g.DefaultCellStyle.BackColor = Input;
+        g.DefaultCellStyle.ForeColor = Text;
+        g.DefaultCellStyle.SelectionBackColor = Accent;
+        g.DefaultCellStyle.SelectionForeColor = System.Drawing.Color.White;
+        g.EnableHeadersVisualStyles = false;
+        g.ColumnHeadersBorderStyle = System.Windows.Forms.DataGridViewHeaderBorderStyle.Single;
+        g.ColumnHeadersDefaultCellStyle.BackColor = Header;
+        g.ColumnHeadersDefaultCellStyle.ForeColor = Text;
+        g.ColumnHeadersDefaultCellStyle.SelectionBackColor = Header;
+        g.ColumnHeadersDefaultCellStyle.SelectionForeColor = Text;
+        g.RowHeadersDefaultCellStyle.BackColor = Header;
+        g.RowHeadersDefaultCellStyle.ForeColor = Text;
+    }
+
+    // окно и всё в нём (и что добавится потом)
+    public static void Dress(System.Windows.Forms.Control c) {
+        if (c == null || "свой цвет".Equals(c.Tag)) return;
+        if (c is System.Windows.Forms.Form) {
+            c.BackColor = Back;
+            c.ForeColor = Text;
+        } else if (c is System.Windows.Forms.TextBoxBase || c is System.Windows.Forms.ComboBox || c is System.Windows.Forms.ListBox
+            || c is System.Windows.Forms.ListView || c is System.Windows.Forms.NumericUpDown || c is System.Windows.Forms.TreeView) {
+            if (Plain(c.BackColor)) c.BackColor = c is System.Windows.Forms.TextBoxBase && ((System.Windows.Forms.TextBoxBase)c).ReadOnly ? Surface : Input;
+            if (PlainText(c.ForeColor)) c.ForeColor = Text;
+            System.Windows.Forms.TextBox t = c as System.Windows.Forms.TextBox;
+            if (t != null && t.BorderStyle == System.Windows.Forms.BorderStyle.Fixed3D) t.BorderStyle = System.Windows.Forms.BorderStyle.FixedSingle;
+            System.Windows.Forms.ComboBox cb = c as System.Windows.Forms.ComboBox;
+            if (cb != null && Dark) cb.FlatStyle = System.Windows.Forms.FlatStyle.Flat;
+            System.Windows.Forms.ListView lv = c as System.Windows.Forms.ListView;
+            if (lv != null && Dark) lv.GridLines = false;           // линии сетки Windows рисует светлыми - на тёмном режут глаз
+        } else if (c is System.Windows.Forms.DataGridView) {
+            Grid((System.Windows.Forms.DataGridView)c);
+        } else if (c is System.Windows.Forms.Button) {
+            Button((System.Windows.Forms.Button)c);
+        } else if (c is System.Windows.Forms.LinkLabel) {
+            System.Windows.Forms.LinkLabel l = (System.Windows.Forms.LinkLabel)c;
+            l.LinkColor = Link;
+            l.ActiveLinkColor = AccentHover;
+            l.VisitedLinkColor = Link;
+            if (PlainText(l.ForeColor)) l.ForeColor = Text;
+        } else if (c is System.Windows.Forms.DateTimePicker) {
+            System.Windows.Forms.DateTimePicker d = (System.Windows.Forms.DateTimePicker)c;
+            d.CalendarMonthBackground = Input;
+            d.CalendarForeColor = Text;
+            d.CalendarTitleBackColor = Accent;
+            d.CalendarTitleForeColor = System.Drawing.Color.White;
+            d.CalendarTrailingForeColor = Hint;
+        } else if (c is System.Windows.Forms.MonthCalendar) {
+            System.Windows.Forms.MonthCalendar m = (System.Windows.Forms.MonthCalendar)c;
+            // календарь Windows в стиле системы свои цвета не берёт - в тёмной теме рисуем его без стиля системы
+            if (Dark) { if (m.IsHandleCreated) Plain(m); else m.HandleCreated += delegate { Plain(m); }; }
+            m.BackColor = Input;
+            m.ForeColor = Text;
+            m.TitleBackColor = Accent;
+            m.TitleForeColor = System.Drawing.Color.White;
+            m.TrailingForeColor = Hint;
+        } else if (c is System.Windows.Forms.ProgressBar) {
+        } else {
+            // подписи, галочки, панели, разделители
+            if (!(c is System.Windows.Forms.Label) && !(c is System.Windows.Forms.CheckBox) && !(c is System.Windows.Forms.RadioButton) && Plain(c.BackColor)) c.BackColor = Back;
+            if (PlainText(c.ForeColor)) c.ForeColor = Text;
+            else if (Same(c.ForeColor, System.Drawing.SystemColors.GrayText)) c.ForeColor = Hint;
+        }
+        foreach (System.Windows.Forms.Control x in c.Controls) Dress(x);
+        if (!hooked.ContainsKey(c) && (c is System.Windows.Forms.ContainerControl || c is System.Windows.Forms.Panel || c is System.Windows.Forms.GroupBox
+            || c is System.Windows.Forms.SplitterPanel || c is System.Windows.Forms.TabPage)) {
+            hooked[c] = true;
+            System.Windows.Forms.Control me = c;
+            c.ControlAdded += delegate(object s, System.Windows.Forms.ControlEventArgs e) { Dress(e.Control); };
+            c.Disposed += delegate { hooked.Remove(me); };
+        }
+    }
+
+    [System.Runtime.InteropServices.DllImport("uxtheme.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+    static extern int SetWindowTheme(System.IntPtr hwnd, string app, string idList);
+
+    static void Plain(System.Windows.Forms.Control c) {
+        if (System.Environment.OSVersion.Platform != System.PlatformID.Win32NT) return;
+        try { SetWindowTheme(c.Handle, "", ""); } catch { }
+    }
+
+    static readonly System.Collections.Generic.Dictionary<System.Windows.Forms.Control, bool> hooked = new System.Collections.Generic.Dictionary<System.Windows.Forms.Control, bool>();
+
+    // окно - в теме при показе (и шрифт программы)
+    public static void Wear(System.Windows.Forms.Form f) {
+        f.Load += delegate { Dress(f); };
     }
 }
 '@
