@@ -247,11 +247,19 @@ def main():
     if total > a.max_duration:
         sys.exit(f"ОШИБКА: ролик {total:.1f} с длиннее {a.max_duration:.0f} с — сократи пояснения или вопросы")
 
-    for prompt, w, h, p, sd_seed in jobs:
+    for j, (prompt, w, h, p, sd_seed) in enumerate(jobs):
         if model_ok and not a.preview:
             painter.paint(prompt, w, h, p, sd_seed, a.steps)
-        elif not p.exists():
-            placeholder(p, w, h, pal["accent"])
+        elif not p.exists():  # заглушка под другим именем, чтобы не принять её потом за готовую картинку
+            stub = p.with_name(p.stem + "_stub.png")
+            placeholder(stub, w, h, pal["accent"])
+            if j == 0:
+                cover = stub
+            else:
+                images[j - 1] = stub
+    for sc in scenes:
+        if sc["type"] == "q":
+            sc["image"] = images[sc["idx"]].resolve().as_uri()
 
     tl = {"fps": 30, "duration": total, "seed": seed % 1000, "palette": pal, "topic": quiz["topic"],
           "hook": quiz["hook"], "cover": cover.resolve().as_uri(), "scenes": scenes,
