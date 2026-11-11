@@ -41,8 +41,8 @@ PALETTES = [
 # Сложность растёт плавно: подписи по номеру вопроса (5 ступеней), цвет от зелёного к красному.
 LEVELS = [("ОЧЕНЬ ЛЕГКО", "#22c55e"), ("ЛЕГКО", "#84cc16"), ("СРЕДНЕ", "#f59e0b"),
           ("СЛОЖНО", "#f97316"), ("ОЧЕНЬ СЛОЖНО", "#ef4444")]
-STYLE = ("vibrant flat vector cartoon illustration, bold clean outlines, playful bright colors, "
-         "simple background, centered composition, high quality, no text, no letters, no words")
+STYLE = ("simple flat vector cartoon drawing, children's book illustration, thick dark outlines, solid bright colors, "
+         "clean simple background, not a photo, no photorealism, no text, no letters, no words")
 
 
 def log(*a):
@@ -168,7 +168,9 @@ def main():
     ap.add_argument("--timer", type=float, default=10.0, help="секунд на размышление")
     ap.add_argument("--min-duration", type=float, default=62.0, help="ролик не короче, с")
     ap.add_argument("--max-duration", type=float, default=90.0, help="ролик не длиннее, с")
-    ap.add_argument("--steps", type=int, default=8)
+    ap.add_argument("--steps", type=int, default=6)
+    ap.add_argument("--image-size", default="512x384", help="картинки вопросов (рисунки, не фото — владелец 11.11)")
+    ap.add_argument("--cover-size", default="512x512")
     ap.add_argument("--threads", type=int, default=4)
     ap.add_argument("--no-images", action="store_true", help="без нейросети: заглушки вместо картинок")
     ap.add_argument("--no-music", action="store_true")
@@ -195,8 +197,10 @@ def main():
         jobs.append((prompt, w, h, p, s))
         return p
 
-    cover = picture(quiz["cover_prompt"], 768, 768, "cover", seed)
-    images = [picture(q["image_prompt"], 768, 576, f"q{i + 1}", seed + q.get("seed_off", i + 1))
+    cw, ch = map(int, a.cover_size.split("x"))
+    qw, qh = map(int, a.image_size.split("x"))
+    cover = picture(quiz["cover_prompt"], cw, ch, "cover", seed)
+    images = [picture(q["image_prompt"], qw, qh, f"q{i + 1}", seed + q.get("seed_off", i + 1))
               for i, q in enumerate(qs)]
 
     # голос и раскладка по времени
