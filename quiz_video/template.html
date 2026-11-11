@@ -1,0 +1,293 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="fonts/rubik-700.css">
+<link rel="stylesheet" href="fonts/rubik-900.css">
+<link rel="stylesheet" href="fonts/russo-one-400.css">
+<style>
+  :root {
+    --bg1: #ff8a3d; --bg2: #ffc145; --accent: #1fb6e8; --accent-dark: #0b6f93;
+    --card: #ffffff; --ink: #1d1b2f; --good: #22c55e; --bad: #ef4444; --deco: rgba(255,255,255,.35);
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { width: 1080px; height: 1920px; overflow: hidden; }
+  body { font-family: 'Rubik', 'Noto Color Emoji', sans-serif; color: var(--ink);
+         background: linear-gradient(160deg, var(--bg1), var(--bg2)); }
+  #deco { position: absolute; inset: 0; overflow: hidden; }
+  .shape { position: absolute; will-change: transform; }
+  .dot { border-radius: 50%; background: var(--deco); }
+  .ring { border-radius: 50%; border: 10px solid var(--deco); }
+  .star { color: var(--deco); font-family: 'Rubik', sans-serif; line-height: 1; }
+  .scene { position: absolute; inset: 0; display: none; }
+  .pop { will-change: transform, opacity; }
+
+  /* общая шапка */
+  .badge { position: absolute; font-family: 'Russo One', sans-serif; font-size: 64px; color: #fff;
+           background: var(--ink); padding: 14px 34px 18px; border-radius: 26px; letter-spacing: 2px;
+           box-shadow: 0 10px 0 rgba(0,0,0,.18); }
+  .pill { font-family: 'Russo One', sans-serif; color: #fff; background: var(--accent);
+          border: 8px solid var(--ink); border-radius: 40px; box-shadow: 0 14px 0 var(--ink);
+          text-align: center; }
+  .card { background: var(--card); border: 8px solid var(--ink); border-radius: 44px;
+          box-shadow: 0 14px 0 var(--ink); }
+  .imgcard { overflow: hidden; background: #fff; }
+  .imgcard img { width: 100%; height: 100%; object-fit: cover; display: block; will-change: transform; }
+
+  /* интро */
+  #intro .badge { right: 70px; top: 120px; }
+  #intro .pill { position: absolute; left: 90px; right: 90px; top: 250px; font-size: 104px; padding: 26px 30px 34px; }
+  #intro .hook { position: absolute; left: 70px; right: 70px; top: 520px; padding: 40px 46px; font-size: 62px;
+                 font-weight: 900; line-height: 1.12; text-align: center; background: var(--accent); color: #fff; }
+  #intro .imgcard { position: absolute; left: 110px; width: 860px; height: 860px; top: 900px; }
+
+  /* вопрос */
+  .q .top { position: absolute; left: 60px; right: 60px; top: 70px; height: 110px; display: flex;
+            align-items: center; justify-content: space-between; }
+  .q .num { font-family: 'Russo One', sans-serif; font-size: 58px; color: #fff; background: var(--ink);
+            padding: 10px 30px 16px; border-radius: 24px; }
+  .q .dots { display: flex; gap: 18px; }
+  .q .dots i { display: block; width: 34px; height: 34px; border-radius: 50%; background: rgba(255,255,255,.45);
+               border: 5px solid var(--ink); }
+  .q .dots i.done { background: var(--good); }
+  .q .dots i.cur { background: #fff; }
+  .q .imgcard { position: absolute; left: 80px; right: 80px; top: 215px; height: 680px; }
+  .q .fact { position: absolute; left: 0; right: 0; bottom: 0; padding: 26px 36px 30px; color: #fff;
+             background: rgba(20,18,40,.86); font-size: 42px; font-weight: 700; line-height: 1.2; }
+  .q .timer { position: absolute; right: 40px; top: 770px; width: 190px; height: 190px; }
+  .q .timer svg { position: absolute; inset: 0; }
+  .q .timer b { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+                font-family: 'Russo One', sans-serif; font-size: 92px; color: var(--ink); padding-bottom: 8px; }
+  .q .body { position: absolute; left: 60px; right: 60px; top: 950px; bottom: 60px; display: flex;
+             flex-direction: column; gap: 30px; }
+  .q .question { padding: 34px 40px 40px; font-size: 56px; font-weight: 900; line-height: 1.13; text-align: center; }
+  .q .opts { display: flex; flex-direction: column; gap: 26px; }
+  .q .opt { display: flex; align-items: center; gap: 26px; padding: 20px 30px 22px 22px; font-size: 50px;
+            font-weight: 700; line-height: 1.1; border-radius: 34px; }
+  .q .opt .l { flex: none; width: 84px; height: 84px; border-radius: 50%; background: var(--accent); color: #fff;
+               display: flex; align-items: center; justify-content: center; font-family: 'Russo One', sans-serif;
+               font-size: 50px; padding-bottom: 5px; border: 6px solid var(--ink); }
+  .q .opt.right { background: var(--good); color: #fff; }
+  .q .opt.right .l { background: #fff; color: var(--good); }
+
+  /* финал */
+  #outro .pill { position: absolute; left: 80px; right: 80px; top: 520px; font-size: 120px; padding: 40px 30px 52px;
+                 line-height: 1.05; }
+  #outro .score { position: absolute; left: 0; right: 0; top: 900px; text-align: center; font-family: 'Russo One', sans-serif;
+                  font-size: 150px; color: #fff; text-shadow: 0 12px 0 var(--ink); }
+  #outro .sub { position: absolute; left: 90px; right: 90px; top: 1180px; padding: 40px; font-size: 64px; font-weight: 900;
+                text-align: center; line-height: 1.15; }
+  .confetti { position: absolute; width: 26px; height: 40px; border-radius: 6px; }
+</style>
+</head>
+<body>
+<div id="deco"></div>
+
+<div class="scene" id="intro">
+  <div class="badge pop" id="i-badge">КВИЗ</div>
+  <div class="pill pop" id="i-title"></div>
+  <div class="card hook pop" id="i-hook"></div>
+  <div class="card imgcard pop" id="i-img"><img id="i-imgel"></div>
+</div>
+
+<div id="questions"></div>
+
+<div class="scene" id="outro">
+  <div id="o-confetti"></div>
+  <div class="pill pop" id="o-title"></div>
+  <div class="score pop" id="o-score"></div>
+  <div class="card sub pop" id="o-sub"></div>
+</div>
+
+<script>
+// Кадр строится только из времени t: без CSS-анимаций, чтобы каждый кадр был детерминирован.
+const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x));
+const prog = (t, t0, d) => clamp((t - t0) / d);
+const easeOut = x => 1 - Math.pow(1 - x, 3);
+const easeBack = x => { const c1 = 1.9, c3 = c1 + 1; return 1 + c3 * Math.pow(x - 1, 3) + c1 * Math.pow(x - 1, 2); };
+let TL = null, shapes = [], confetti = [];
+
+function rnd(seed) { let s = seed >>> 0; return () => ((s = (s * 1664525 + 1013904223) >>> 0) / 4294967296); }
+function esc(s) { return String(s).replace(/[&<>]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;'}[c])); }
+
+// появление: «pop» — пружинистое увеличение, «up» — выезд снизу, «down» — сверху
+function show(el, t, t0, kind = 'pop', d = 0.45) {
+  const p = prog(t, t0, d);
+  let tr = '';
+  if (kind === 'pop') tr = `scale(${0.2 + 0.8 * easeBack(p)})`;
+  else if (kind === 'up') tr = `translateY(${(1 - easeOut(p)) * 260}px)`;
+  else if (kind === 'down') tr = `translateY(${-(1 - easeOut(p)) * 260}px)`;
+  else if (kind === 'left') tr = `translateX(${-(1 - easeOut(p)) * 1100}px)`;
+  el.style.opacity = clamp(p * 2.2);
+  el.dataset.base = tr;
+  el.style.transform = tr;
+}
+
+function fitText(el, maxH, minPx) {
+  let px = parseFloat(getComputedStyle(el).fontSize);
+  while (el.scrollHeight > maxH && px > minPx) { px -= 2; el.style.fontSize = px + 'px'; }
+}
+
+async function setup(tl) {
+  TL = tl;
+  const r = document.documentElement.style;
+  for (const [k, v] of Object.entries(tl.palette)) r.setProperty('--' + k, v);
+
+  // фон: точки, кольца, звёздочки
+  const R = rnd(tl.seed || 7), deco = document.getElementById('deco');
+  for (let i = 0; i < 22; i++) {
+    const el = document.createElement('div'), kind = i % 3, size = 30 + R() * 120;
+    el.className = 'shape ' + ['dot', 'ring', 'star'][kind];
+    if (kind === 2) { el.textContent = '✦'; el.style.fontSize = size + 'px'; }
+    else { el.style.width = el.style.height = size + 'px'; }
+    deco.appendChild(el);
+    shapes.push({el, x: R() * 1080, y: R() * 1920, a: 20 + R() * 40, sp: 0.3 + R() * 0.6, ph: R() * 6.28, rot: (R() - .5) * 40});
+  }
+
+  document.getElementById('i-title').textContent = tl.topic;
+  document.getElementById('i-hook').textContent = tl.hook;
+  document.getElementById('i-imgel').src = tl.cover;
+  document.getElementById('o-title').innerHTML = esc(tl.outro_title);
+  document.getElementById('o-score').textContent = tl.outro_score;
+  document.getElementById('o-sub').textContent = tl.outro_sub;
+
+  const box = document.getElementById('questions');
+  const letters = ['А', 'Б', 'В', 'Г'];
+  tl.scenes.filter(s => s.type === 'q').forEach(s => {
+    const el = document.createElement('div');
+    el.className = 'scene q';
+    el.id = 'q' + s.idx;
+    const dots = Array.from({length: s.total}, (_, i) =>
+      `<i class="${i < s.idx ? 'done' : i === s.idx ? 'cur' : ''}"></i>`).join('');
+    el.innerHTML = `
+      <div class="top"><div class="num pop">ВОПРОС ${s.idx + 1}/${s.total}</div><div class="dots pop">${dots}</div></div>
+      <div class="card imgcard pop img"><img src="${s.image}"><div class="fact pop">💡 ${esc(s.fact)}</div></div>
+      <div class="timer pop"><svg viewBox="0 0 190 190"><circle cx="95" cy="95" r="84" fill="#fff" stroke="var(--ink)" stroke-width="8"/>
+        <circle class="arc" cx="95" cy="95" r="68" fill="none" stroke="var(--accent)" stroke-width="18"
+          stroke-linecap="round" transform="rotate(-90 95 95)"/></svg><b></b></div>
+      <div class="body">
+        <div class="card question pop">${esc(s.q)}</div>
+        <div class="opts">${s.options.map((o, i) =>
+          `<div class="card opt pop"><span class="l">${letters[i]}</span><span>${esc(o)}</span></div>`).join('')}</div>
+      </div>`;
+    box.appendChild(el);
+  });
+
+  const cf = document.getElementById('o-confetti'), RC = rnd(99);
+  const colors = ['#ff4d6d', '#ffd23f', '#3bceac', '#4d5bff', '#ffffff', '#ff8a3d'];
+  for (let i = 0; i < 70; i++) {
+    const el = document.createElement('div');
+    el.className = 'confetti';
+    el.style.background = colors[i % colors.length];
+    cf.appendChild(el);
+    confetti.push({el, x: RC() * 1080, v: 380 + RC() * 520, d: RC() * 0.8, sw: RC() * 6.28, rs: (RC() - .5) * 900});
+  }
+
+  await document.fonts.ready;
+  await Promise.all([...document.images].map(img => img.decode().catch(() => {})));
+
+  // длинный текст — уменьшаем шрифт, чтобы всё влезло
+  for (const q of document.querySelectorAll('.q')) {
+    q.style.display = 'block';
+    const body = q.querySelector('.body'), qq = q.querySelector('.question');
+    let guard = 0;
+    while (body.scrollHeight > body.clientHeight + 2 && guard++ < 40) {
+      for (const el of [qq, ...q.querySelectorAll('.opt')]) {
+        const px = parseFloat(getComputedStyle(el).fontSize);
+        el.style.fontSize = Math.max(30, px - 2) + 'px';
+      }
+    }
+    fitText(q.querySelector('.fact'), 230, 28);
+    q.style.display = 'none';
+  }
+  const intro = document.getElementById('intro');
+  intro.style.display = 'block';
+  fitText(document.getElementById('i-hook'), 360, 36);
+  fitText(document.getElementById('i-title'), 220, 50);
+  intro.style.display = 'none';
+  return true;
+}
+
+function render(t) {
+  for (const s of shapes) {
+    const y = s.y + Math.sin(t * s.sp + s.ph) * s.a - (t * 14 * s.sp) % 1920;
+    const yy = ((y % 2040) + 2040) % 2040 - 60;
+    s.el.style.transform = `translate(${s.x + Math.cos(t * s.sp * .7 + s.ph) * s.a}px, ${yy}px) rotate(${t * s.rot}deg)`;
+  }
+  let active = null;
+  for (const s of TL.scenes) if (t >= s.start && t < s.end) active = s;
+  if (!active) active = TL.scenes[TL.scenes.length - 1];
+  document.querySelectorAll('.scene').forEach(el => el.style.display = 'none');
+  const lt = t - active.start, left = active.end - t;
+  let root;
+  if (active.type === 'intro') {
+    root = document.getElementById('intro');
+    show(document.getElementById('i-badge'), lt, 0.1, 'pop');
+    const b = document.getElementById('i-badge');
+    b.style.transform = b.dataset.base + ` rotate(${-8 + Math.sin(lt * 3) * 3}deg)`;
+    show(document.getElementById('i-title'), lt, 0.25, 'pop', 0.5);
+    show(document.getElementById('i-hook'), lt, 0.6, 'up');
+    const im = document.getElementById('i-img');
+    show(im, lt, 0.9, 'pop', 0.55);
+    im.style.transform = im.dataset.base + ` translateY(${Math.sin(lt * 1.6) * 12}px) rotate(${Math.sin(lt * 1.1) * 1.5}deg)`;
+    document.getElementById('i-imgel').style.transform = `scale(${1.04 + lt * 0.012})`;
+  } else if (active.type === 'q') {
+    root = document.getElementById('q' + active.idx);
+    const q = active;
+    show(root.querySelector('.num'), lt, 0.0, 'down', 0.4);
+    show(root.querySelector('.dots'), lt, 0.05, 'down', 0.4);
+    const im = root.querySelector('.img');
+    show(im, lt, 0.1, 'pop', 0.5);
+    im.style.transform = im.dataset.base + ` translateY(${Math.sin(lt * 1.5) * 8}px)`;
+    im.querySelector('img').style.transform = `scale(${1.05 + lt * 0.01})`;
+    show(root.querySelector('.question'), lt, 0.25, 'left', 0.45);
+    root.querySelectorAll('.opt').forEach((el, i) => {
+      show(el, lt, q.t_opts[i], 'pop', 0.4);
+      el.classList.toggle('right', i === q.answer && lt >= q.t_reveal);
+      if (lt >= q.t_reveal) {
+        if (i === q.answer) {
+          const p = prog(lt, q.t_reveal, 0.5);
+          el.style.transform = `scale(${1 + Math.sin(p * Math.PI) * 0.08})`;
+          el.style.opacity = 1;
+        } else el.style.opacity = 1 - 0.6 * prog(lt, q.t_reveal, 0.3);
+      }
+    });
+    const timer = root.querySelector('.timer');
+    show(timer, lt, q.t_timer - 0.35, 'pop', 0.35);
+    const rest = clamp(q.t_reveal - lt, 0, q.timer);
+    const arc = timer.querySelector('.arc'), L = 2 * Math.PI * 68;
+    arc.setAttribute('stroke-dasharray', `${L * (lt < q.t_timer ? 1 : rest / q.timer)} ${L}`);
+    arc.setAttribute('stroke', rest < 1.5 && lt >= q.t_timer ? 'var(--bad)' : 'var(--accent)');
+    const b = timer.querySelector('b');
+    b.textContent = lt >= q.t_reveal ? '✓' : String(Math.max(1, Math.ceil(lt < q.t_timer ? q.timer : rest)));
+    b.style.color = lt >= q.t_reveal ? 'var(--good)' : 'var(--ink)';
+    if (lt >= q.t_timer) {
+      const frac = (rest % 1), pulse = lt < q.t_reveal ? 1 + 0.12 * Math.pow(frac, 6) : 1;
+      timer.style.transform = timer.dataset.base + ` scale(${pulse})`;
+    }
+    if (lt >= q.t_reveal) timer.style.opacity = 1 - prog(lt, q.t_reveal + 0.2, 0.3);
+    const fact = root.querySelector('.fact');
+    const fp = prog(lt, q.t_fact, 0.4);
+    fact.style.opacity = q.fact ? fp : 0;
+    fact.style.transform = `translateY(${(1 - easeOut(fp)) * 120}%)`;
+  } else {
+    root = document.getElementById('outro');
+    show(document.getElementById('o-title'), lt, 0.1, 'pop', 0.5);
+    show(document.getElementById('o-score'), lt, 0.5, 'pop', 0.5);
+    show(document.getElementById('o-sub'), lt, 0.9, 'up', 0.5);
+    for (const c of confetti) {
+      const tt = lt - c.d;
+      c.el.style.opacity = tt > 0 ? 1 : 0;
+      c.el.style.transform = `translate(${c.x + Math.sin(tt * 3 + c.sw) * 40}px, ${-80 + tt * c.v}px) rotate(${tt * c.rs}deg)`;
+    }
+  }
+  root.style.display = 'block';
+  // мягкая смена сцен
+  const fin = clamp(lt / 0.2), fout = clamp(left / 0.2);
+  root.style.opacity = active === TL.scenes[TL.scenes.length - 1] ? fin : Math.min(fin, fout);
+}
+window.setup = setup;
+window.render = render;
+</script>
+</body>
+</html>
