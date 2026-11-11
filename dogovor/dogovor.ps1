@@ -274,6 +274,8 @@ public static class DocxTemplate {
 
     // значение поля «убрать строку»: абзаца с этим полем в документе не будет (строки справки, отключённые галочкой)
     public const string Drop = "\u0001убрать";
+    // убрать только сам абзац - и в ячейке таблицы (Drop там убирает всю строку таблицы)
+    public const string DropPara = "\u0001убрать абзац";
 
     // values: имя поля -> текст ("\n" - перенос строки, "\t" - табуляция); для флажков "1" - отмечен. Возвращает поля, которых не было в values
     public static List<string> Fill(string template, string output, Dictionary<string, string> values) {
@@ -362,6 +364,7 @@ public static class DocxTemplate {
         foreach (Match d in ms) {
             string dv;
             if (values.TryGetValue(d.Groups[2].Value, out dv) && dv == Drop) { Remove(p); return true; }
+            if (dv == DropPara) { p.ParentNode.RemoveChild(p); return true; }
         }
         bool hasPara = false;
         // с конца: текст перед более ранними полями не меняется, их позиции те же
@@ -15913,7 +15916,8 @@ public class DogovorForm : Form {
         // потребитель по доверенности: п. 28.2 и «(по доверенности)» под его подписью; нет - этих строк нет
         bool dov = V("dov") == "1";
         v["ДОВ_ПОТР"] = dov ? "28.2 По доверенности " + LongDate(V("dov_data")) + " г № " + V("dov_nom").Trim() + "." : "";
-        v["ДОВ_ПОДПИСЬ"] = dov ? "\t(по доверенности)" : "";
+        // строка под подписью в таблице реквизитов: без доверенности убирается только она (не строка таблицы - иначе пропадут реквизиты)
+        v["ДОВ_ПОДПИСЬ"] = dov ? "\t(по доверенности)" : DocxTemplate.DropPara;
 
         bool two = V("schetchikov") != "1 счётчик";
         for (int i = 1; i <= 2; i++) {
