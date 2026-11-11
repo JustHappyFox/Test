@@ -10532,15 +10532,15 @@ public class LiveBase {
     // (для окна и отчёта, без данных абонентов); ok - по нему ищем
     public string AttachNames(string file, out bool ok) {
         ok = false;
-        if (!File.Exists(file)) return "нет файла " + Path.GetFileName(file) + " - «Поиск» ещё не строил индекс ФИО (откройте «Поиск» и подождите, пока построит)";
+        if (!File.Exists(file)) return "нет файла " + Path.GetFileName(file) + " - «Поиск» ещё не строил индекс ФИО (откройте «Поиск» и нажмите «построить» у надписи «Индекс ФИО»)";
         NameIndex n;
         try { n = NameIndex.Load(file, Header, FilePath); }
         catch (Exception ex) { return "не прочитался (" + ex.Message + ") - может, «Поиск» как раз его записывает; попробуйте ещё раз"; }
-        if (n == null) return "не подходит к таблице " + Path.GetFileName(FilePath) + " (другая таблица или «Поиск» другой версии) - откройте «Поиск», он построит заново";
+        if (n == null) return "не подходит к таблице " + Path.GetFileName(FilePath) + " (другая таблица или «Поиск» другой версии) - откройте «Поиск» и нажмите «построить» у надписи «Индекс ФИО»";
         int count;
         using (FileStream fs = OpenTable()) count = NameIndex.RecordCount(fs);
-        if (count < n.Scanned) return "устарел: таблицу абонентов пересобрали - откройте «Поиск», он построит заново";
-        if (count - n.Scanned > 50000) return "недостроен (просмотрено " + n.Scanned + " из " + count + " записей) - откройте «Поиск», он достроит";
+        if (count < n.Scanned) return "устарел: таблицу абонентов пересобрали - откройте «Поиск» и нажмите «построить» у надписи «Индекс ФИО»";
+        if (count - n.Scanned > 50000) return "недостроен (просмотрено " + n.Scanned + " из " + count + " записей) - откройте «Поиск» и нажмите «достроить» у надписи «Индекс ФИО»";
         n.Total = count;
         lock (namesLock) names = n;
         ok = true;

@@ -1695,7 +1695,7 @@ public class NameIndex {
     public int Count;                   // сколько ФИО в индексе
     public int Scanned;                 // сколько записей таблицы просмотрено
     public int Total;                   // записей в таблице, когда смотрели последний раз
-    public DateTime Built = DateTime.Now;   // когда начата сборка (раз в сутки - заново)
+    public DateTime Built = DateTime.Now;   // когда начата сборка (заново - только кнопкой «обновить»)
     public double Seconds;
     readonly int field, fieldLength, headerLength, recordLength, codePage;
     readonly string table;
@@ -1825,7 +1825,7 @@ public class NameIndex {
     }
 
     public string Describe() {
-        return "свой индекс ФИО: " + Count + " ФИО, просмотрено записей " + Scanned + " из " + Total + ", сборка начата " + Built.ToString("dd.MM.yyyy HH:mm");
+        return Count + " ФИО, просмотрено записей " + Scanned + " из " + Total + ", сборка начата " + Built.ToString("dd.MM.yyyy HH:mm");
     }
 
     void TrySave(string file) {
@@ -2425,26 +2425,54 @@ public class LiveBase {
     public NameIndex OpenNames() {
         NameIndex n = null;
         try { if (NamesFile != null && File.Exists(NamesFile)) n = NameIndex.Load(NamesFile, Header, FilePath); }
-        catch (Exception ex) { Report.Line("Свой индекс ФИО не прочитался (" + ex.Message + ") - строю заново"); n = null; }
-        if (n == null) { Report.Line("Свой индекс ФИО: ещё нет - строю в фоне (" + NamesFile + ")"); return new NameIndex(Header, FilePath); }
+        catch (Exception ex) { Report.Line("Свой индекс ФИО не прочитался (" + ex.Message + ") - нужно построить заново (кнопкой)"); n = null; }
+        if (n == null) { Report.Line("Свой индекс ФИО: ещё нет - строится кнопкой «построить» (" + NamesFile + ")"); return new NameIndex(Header, FilePath); }
         int count;
         using (FileStream fs = OpenTable()) count = NameIndex.RecordCount(fs);
-        if (count < n.Scanned) { Report.Line("Свой индекс ФИО: таблицу пересобрали (записей стало меньше) - строю заново"); return new NameIndex(Header, FilePath); }
+        if (count < n.Scanned) { Report.Line("Свой индекс ФИО: таблицу пересобрали (записей стало меньше) - нужно построить заново (кнопкой)"); return new NameIndex(Header, FilePath); }
         n.Total = count;
-        if (count - n.Scanned > 20000) { Report.Line("Свой индекс ФИО: недостроен (" + n.Scanned + " из " + count + ") - достраиваю в фоне"); return n; }
+        if (count - n.Scanned > 20000) { Report.Line("Свой индекс ФИО: недостроен (" + n.Scanned + " из " + count + ") - достраивается кнопкой"); return n; }
         lock (namesLock) names = n;
-        Report.Line("Свой индекс ФИО: " + n.Describe());
-        if ((DateTime.Now - n.Built).TotalHours >= 20) {
-            Report.Line("Свой индекс ФИО собран больше суток назад - пересобираю в фоне (чтобы подхватить исправленные ФИО), пока ищем по старому");
-            return new NameIndex(Header, FilePath);
-        }
+        Report.Line("Свой индекс ФИО: готов, " + n.Describe());
+        // полностью заново сам больше не перестраивается (было - раз в сутки: перечитывалась вся база по сети, минуты, поиск
+        // в это время стоял); новые абоненты дочитываются (CatchUpNames), исправленные Ф.И.О. - кнопкой «обновить»
         return null;
     }
+
+    // полностью заново (кнопка «обновить»: в базе исправляли Ф.И.О.)
+    public NameIndex NewNames() { return new NameIndex(Header, FilePath); }
+
+    public DateTime NamesBuilt { get { lock (namesLock) return names == null ? DateTime.MinValue : names.Built; } }
+
+    // новые записи таблицы (новые абоненты) - дочитать в индекс и сохранить: читается только конец таблицы.
+    // -1 - таблицу пересобрали (записей стало меньше), индекс не годится
+    public int CatchUpNames() {
+        lock (namesLock) {
+            if (names == null) return 0;
+            int added;
+            using (FileStream fs = OpenTable())
+                if (!names.Update(fs, out added)) { names = null; return -1; }
+            if (added > 0 && NamesFile != null) {
+                try { names.Save(NamesFile); } catch (Exception ex) { Report.Line("Свой индекс ФИО не сохранился: " + ex.Message); }
+            }
+            return added;
+        }
+    }
+
+    // сколько поисков идёт сейчас (по всем окнам): сборка индекса ФИО им уступает - иначе поиск ждёт диск/сеть
+    static int activeSearches;
+    public static bool Searching { get { return System.Threading.Thread.VolatileRead(ref activeSearches) > 0; } }
 
     // (до)строить в фоне; готовый становится рабочим и сохраняется. savePartial - сохранять по ходу
     // (первая сборка: прервали - продолжится; при пересборке - нет, чтобы не испортить рабочий файл)
     public void BuildNames(NameIndex n, LoadProgress progress, bool savePartial) {
-        n.Continue(FilePath, progress, savePartial ? NamesFile : null);
+        try { n.Continue(FilePath, progress, savePartial ? NamesFile : null); }
+        catch (OperationCanceledException) {
+            // остановили первую сборку - недостроенное сохраняется, «достроить» (и после перезапуска) продолжит с того же места
+            if (savePartial && NamesFile != null && n.Scanned > 0)
+                try { n.Save(NamesFile); } catch (Exception ex) { Report.Line("Свой индекс ФИО не сохранился: " + ex.Message); }
+            throw;
+        }
         lock (namesLock) {
             names = n;
             try { if (NamesFile != null) n.Save(NamesFile); }
@@ -2460,7 +2488,7 @@ public class LiveBase {
             int added;
             if (!names.Update(fs, out added)) { names = null; how = "свой индекс ФИО устарел (таблицу пересобрали)"; return null; }
             List<int> found = names.Find(words, partial);
-            how = names.Describe() + (added > 0 ? ", дочитано новых записей: " + added : "") + "; совпало " + found.Count;
+            how = "свой индекс ФИО: " + names.Describe() + (added > 0 ? ", дочитано новых записей: " + added : "") + "; совпало " + found.Count;
             return found;
         }
     }
@@ -2493,6 +2521,12 @@ public class LiveBase {
     // Ошибка чтения бывает, если программа базы как раз дописывает индекс - тогда пробуем ещё раз.
     // partial - частичное совпадение (начало номера, похожие слова); иначе - только точное
     public SearchResult Search(string text, SearchMode mode, Dictionary<string, bool> selsovety, int limit, bool partial) {
+        System.Threading.Interlocked.Increment(ref activeSearches);
+        try { return SearchCounted(text, mode, selsovety, limit, partial); }
+        finally { System.Threading.Interlocked.Decrement(ref activeSearches); }
+    }
+
+    SearchResult SearchCounted(string text, SearchMode mode, Dictionary<string, bool> selsovety, int limit, bool partial) {
         SearchResult r = SearchOnce(text, mode, selsovety, limit, partial, false);
         if (r.Error != null) {
             System.Threading.Thread.Sleep(300);
@@ -6095,6 +6129,8 @@ public class AbonentSearch : Form {
     volatile bool cancelScan;
     bool buildingNames;          // строится свой индекс по ФИО (в фоне)
     readonly Label namesLabel = new Label();   // состояние своего индекса по ФИО - видно всегда
+    readonly LinkLabel namesLink = new LinkLabel();   // «обновить» / «построить» / «остановить»
+    NameIndex namesTodo;                 // что (до)строить по кнопке: нет индекса / недостроен
     volatile bool cancelNames;
     int namesPercent;
     string namesLeft = "";
@@ -6219,6 +6255,16 @@ public class AbonentSearch : Form {
         namesLabel.ForeColor = Look.Info;
         top.Controls.Add(queryBox);
         top.Controls.Add(namesLabel);
+        // индекс ФИО: полностью заново - только кнопкой (было - сам раз в сутки, и программа тормозила)
+        namesLink.AutoSize = true;
+        namesLink.Anchor = AnchorStyles.Right | AnchorStyles.Top;
+        namesLink.LinkBehavior = LinkBehavior.HoverUnderline;
+        namesLink.Visible = false;
+        namesLink.LinkClicked += delegate { NamesClick(); };
+        new ToolTip().SetToolTip(namesLink, "Индекс ФИО перечитывает всю базу (минуты; поиск в это время медленнее, но работает).\n" +
+            "Новые абоненты добавляются в него сами; «обновить» нужно, только если в базе исправляли Ф.И.О.");
+        top.Controls.Add(namesLink);
+        top.Resize += delegate { PlaceNames(); };
         top.Controls.Add(hint);
 
         grid.Dock = DockStyle.Fill;
@@ -6521,7 +6567,7 @@ public class AbonentSearch : Form {
                     }
                 Report.Line("Чем ищется: лицевой - " + TagName(b, "NAB", false) + ", Л/С ЕРИП - " + TagName(b, "LS_ERIP", false)
                     + ", счётчик - " + TagName(b, "NCH", false) + ", снятый счётчик - " + TagName(b, "NSC", false)
-                    + ", ФИО - " + TagName(b, "FIO", false) + ", адрес - " + TagName(b, "UL", true));
+                    + ", ФИО - " + (b.NamesNeeded ? "в базе индекса нет - свой индекс indeks_fio.dat" : TagName(b, "FIO", false)) + ", адрес - " + TagName(b, "UL", true));
                 Report.Line("--- поиски (сами слова не записываются) ---");
             } catch (Exception ex) {
                 Report.Line("Проверка индексов прервалась: " + ex.Message);
@@ -6687,7 +6733,6 @@ public class AbonentSearch : Form {
         if (b != live) return;
         if (again || r.Text != queryBox.Text || r.Mode != mode || r.Partial != partialBox.Checked) { again = false; StartSearch(); return; }
         Show(r);
-        if (r.NoIndex && r.Mode == SearchMode.Name && !buildingNames && b.NamesNeeded && !b.NamesReady) StartNames(b);
         if (cardWhenDone) {
             cardWhenDone = false;
             LogSearch();
@@ -6738,51 +6783,105 @@ public class AbonentSearch : Form {
 
     // Свой индекс по ФИО: прочитать файл; нет его, недостроен или старше суток - (до)строить в фоне.
     // Поиск при этом работает; по ФИО до готовности индекса - только с адресом ("Иванов Боровляны").
+    // индекс ФИО при открытии базы: готовый - рабочий сразу, новые абоненты дочитываются (только конец таблицы);
+    // нет / недостроен - строится только по кнопке «построить» («Поиск» больше ничего тяжёлого сам не запускает)
     void StartNames(LiveBase b) {
+        if (buildingNames || b != live) return;
+        buildingNames = true;
+        NamesLabel("Индекс ФИО: открываю...", false, null);
+        System.Threading.Thread th = new System.Threading.Thread(delegate() {
+            string error = null;
+            NameIndex todo = null;
+            int added = 0;
+            try {
+                todo = b.OpenNames();
+                if (b.NamesReady) {
+                    Post(delegate { if (b == live) NamesReadyLabel(b, ""); });
+                    added = b.CatchUpNames();
+                }
+            } catch (Exception ex) {
+                error = ex.Message;
+                Report.Line("Свой индекс ФИО не открылся: " + ex.GetType().Name + ": " + ex.Message);
+            }
+            Post(delegate {
+                buildingNames = false;
+                if (b != live) return;
+                if (added > 0) Report.Line("Свой индекс ФИО: дочитано новых записей " + added);
+                namesTodo = b.NamesReady ? null : todo;
+                if (error != null) NamesLabel("Индекс ФИО: ошибка - " + error, true, "построить");
+                else NamesState(b);
+                if (b.NamesReady && mode == SearchMode.Name && DbfTable.SplitWords(queryBox.Text).Length > 0 && !searching && (current == null || current.NoIndex)) StartSearch();
+                else UpdateStatus();
+            });
+        });
+        th.IsBackground = true;
+        th.Start();
+    }
+
+    // надпись и кнопка по состоянию индекса
+    void NamesState(LiveBase b) {
+        if (b.NamesReady) { NamesReadyLabel(b, ""); return; }
+        if (namesTodo != null && namesTodo.Scanned > 0 && namesTodo.Total > 0)
+            NamesLabel("Индекс ФИО: построен на " + (int)(namesTodo.Scanned * 100L / Math.Max(namesTodo.Total, 1)) + "%", true, "достроить");
+        else NamesLabel("Индекс ФИО: не построен (нужен для поиска по ФИО)", true, "построить");
+    }
+
+    void NamesReadyLabel(LiveBase b, string extra) {
+        DateTime t = b.NamesBuilt;
+        NamesLabel("Индекс ФИО: готов" + (t > DateTime.MinValue ? " (собран " + t.ToString("dd.MM.yyyy") + ")" : "") + extra, false, "обновить");
+    }
+
+    void NamesClick() {
+        LiveBase b = live;
+        if (b == null) return;
+        if (buildingNames) { cancelNames = true; namesLink.Enabled = false; return; }
+        BuildNamesNow(b, b.NamesReady || namesTodo == null ? b.NewNames() : namesTodo);
+    }
+
+    // (до)строить в фоне; уступает поискам (идёт поиск - ждёт) и не гонит диск без передышки
+    void BuildNamesNow(LiveBase b, NameIndex todo) {
         if (buildingNames || b != live) return;
         buildingNames = true;
         cancelNames = false;
         namesPercent = 0;
         namesLeft = "";
-        NamesLabel("Индекс ФИО: открываю...", false);
+        bool update = b.NamesReady;
+        NamesLabel(update ? "Индекс ФИО: обновляется..." : "Индекс ФИО: строится...", false, "остановить");
         System.Threading.Thread th = new System.Threading.Thread(delegate() {
             string error = null;
             try {
-                NameIndex todo = b.OpenNames();
-                if (b.NamesReady) Post(delegate {
-                    if (b != live) return;
-                    NamesLabel("Индекс ФИО: готов", false);
-                    if (mode == SearchMode.Name && DbfTable.SplitWords(queryBox.Text).Length > 0 && (current == null || current.NoIndex)) StartSearch();
-                });
-                if (todo != null) {
-                    bool update = b.NamesReady;
-                    DateTime started = DateTime.Now;
-                    int from = todo.Scanned, shown = -1;
-                    b.BuildNames(todo, delegate(int done, int expected) {
-                        if (cancelNames || b != live) throw new OperationCanceledException();
-                        int pct = (int)(done * 100L / Math.Max(expected, 1));
-                        if (pct == shown) return;
-                        shown = pct;
-                        double spent = (DateTime.Now - started).TotalSeconds;
-                        string left = done - from > 0 && spent > 3 ? TimeLeft(spent * (expected - done) / (done - from)) : "";
-                        Post(delegate {
-                            namesPercent = pct;
-                            namesLeft = left;
-                            NamesLabel((update ? "Индекс ФИО: готов, обновляется в фоне " : "Индекс ФИО: строится ") + pct + "%" + (left.Length > 0 ? ", осталось ~" + left : ""), false);
-                            if (mode == SearchMode.Name && !searching && (current == null || current.NoIndex)) UpdateStatus();
-                        });
-                    }, !b.NamesReady);
-                }
+                DateTime started = DateTime.Now;
+                int from = todo.Scanned, shown = -1;
+                b.BuildNames(todo, delegate(int done, int expected) {
+                    if (cancelNames || b != live) throw new OperationCanceledException();
+                    while (LiveBase.Searching && !cancelNames) System.Threading.Thread.Sleep(50);
+                    System.Threading.Thread.Sleep(15);
+                    int pct = (int)(done * 100L / Math.Max(expected, 1));
+                    if (pct == shown) return;
+                    shown = pct;
+                    double spent = (DateTime.Now - started).TotalSeconds;
+                    string left = done - from > 0 && spent > 3 ? TimeLeft(spent * (expected - done) / (done - from)) : "";
+                    Post(delegate {
+                        namesPercent = pct;
+                        namesLeft = left;
+                        NamesLabel((update ? "Индекс ФИО: готов, обновляется " : "Индекс ФИО: строится ") + pct + "%" + (left.Length > 0 ? ", осталось ~" + left : ""), false, "остановить");
+                        if (mode == SearchMode.Name && !searching && (current == null || current.NoIndex)) UpdateStatus();
+                    });
+                }, !update);
             } catch (OperationCanceledException) {
+                Report.Line("Свой индекс ФИО: сборку остановили");
             } catch (Exception ex) {
                 error = ex.Message;
                 Report.Line("Свой индекс ФИО не построился: " + ex.GetType().Name + ": " + ex.Message);
             }
             Post(delegate {
                 buildingNames = false;
+                namesLink.Enabled = true;
                 if (b != live) return;
-                if (error != null) NamesLabel("Индекс ФИО: ошибка - " + error, true);
-                else if (b.NamesReady) NamesLabel("Индекс ФИО: готов", false);
+                // остановили первую сборку - недостроенное сохранено, «достроить» продолжит с того же места
+                namesTodo = b.NamesReady ? null : todo;
+                if (error != null) NamesLabel("Индекс ФИО: ошибка - " + error, true, b.NamesReady ? "обновить" : "построить");
+                else NamesState(b);
                 if (mode == SearchMode.Name && DbfTable.SplitWords(queryBox.Text).Length > 0 && !searching) StartSearch();
                 else UpdateStatus();
             });
@@ -6792,9 +6891,26 @@ public class AbonentSearch : Form {
         th.Start();
     }
 
-    void NamesLabel(string text, bool problem) {
+    // для проверки
+    internal string NamesText { get { return namesLabel.Text + (namesLink.Visible ? " [" + namesLink.Text + "]" : ""); } }
+    internal void NamesButton() { NamesClick(); }
+    internal bool NamesBusy { get { return buildingNames; } }
+    internal bool SearchBusy { get { return searching; } }
+
+    void PlaceNames() {
+        Control top = namesLabel.Parent;
+        if (top == null) return;
+        int right = top.ClientSize.Width - 12;
+        if (namesLink.Visible) { namesLink.Location = new Point(right - namesLink.Width, 76); right = namesLink.Left - 4; }
+        namesLabel.SetBounds(right - 460, 74, 460, 20);
+    }
+
+    void NamesLabel(string text, bool problem, string action) {
         namesLabel.Text = text;
         namesLabel.ForeColor = problem ? Look.Bad : Look.Info;
+        namesLink.Visible = action != null;
+        if (action != null) namesLink.Text = action;
+        PlaceNames();
     }
 
     static string TimeLeft(double seconds) {
@@ -6842,6 +6958,8 @@ public class AbonentSearch : Form {
             status.Text = "Ошибка при поиске: " + r.Error + "   Нажмите \"Отчёт\" и пришлите его.";
         else if (r.NoIndex && r.Mode == SearchMode.Name && building != null)
             status.Text = building;
+        else if (r.NoIndex && r.Mode == SearchMode.Name && live.NamesNeeded && !live.NamesReady)
+            status.Text = "Индекс ФИО не построен - справа вверху \"" + namesLink.Text + "\" (один раз, минут 5-10; остальной поиск в это время работает). Или допишите населённый пункт: \"Иванов Боровляны\" - найдётся сразу.";
         else if (r.NoIndex && r.Mode == SearchMode.Name)
             status.Text = "Допишите населённый пункт или улицу: \"Иванов Боровляны\" - тогда найдётся сразу. По одной фамилии - только перебором всей базы (кнопка справа, это долго): индекса по ФИО в базе нет.";
         else if (r.NoIndex)
