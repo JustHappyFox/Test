@@ -14721,12 +14721,13 @@ public class DogovorForm : Form {
         "pu_vvod_i=Вводной аппарат: ток, А", "pu_zasch_i=Аппарат защиты: ток, А", "pu_model=Модель счётчика",
         "pu_korpus=Тип корпуса счётчика", "pu_modif=Модификация счётчика", "adres=Адрес объекта (строка в договоре)",
         "pu_tip=Тип счётчика (строка в договоре)", "moshn_otopl=Мощность на отопление и ГВС, кВт",
-        "pu_nagrev=Электронагревательные приборы", "pu_modul=Модуль отображения (сплит-счётчик)" };
+        "pu_nagrev=Электронагревательные приборы", "pu_modul=Модуль отображения (сплит-счётчик)",
+        "dov_nom=№ доверенности потребителя" };
 
     // обязательные сначала - как было до настройки
     static readonly string[] DefaultRequired = {
         "ls", "oformil", "podp_dolzh", "podp_fio", "podp_dov", "podp_inic", "soob_adres", "soob_tel", "fio", "potr_inic", "lichny",
-        "adres_prozh", "obekt", "moshn", "np", "adres", "prochie", "plita", "gaz", "teplo", "gvs", "sms", "sms_tel", "utratil_nom",
+        "adres_prozh", "obekt", "moshn", "np", "adres", "prochie", "plita", "gaz", "teplo", "gvs", "sms", "sms_tel", "utratil_nom", "dov_nom",
         "pu_tip", "pu_zav", "pu_cel", "pu_faz", "pu_askue", "pu_tarif", "pu_gruppa" };
 
     // название поля для метки работы (Crash.Mark): «Тип корпуса счётчика (счётчик 1)»
@@ -14792,7 +14793,7 @@ public class DogovorForm : Form {
         "obekt=34", "moshn=8", "moshn_otopl=8", "np_tip=7", "np=28", "selsovet=18", "kadastr=22", "ulica_tip=7", "ulica=28",
         "dom=8", "korp=6", "kv=6", "dopusk_nom=12", "dopusk_data=14",
         "plomba_vvod=18", "plomba_klemm=18", "plomba_drugoe=36", "plita=12", "gaz=12", "teplo=12", "gvs=12",
-        "sms=22", "sms_tel=18", "utratil_nom=10", "utratil_ot=14",
+        "sms=22", "sms_tel=18", "utratil_nom=10", "utratil_ot=14", "dov_nom=14", "dov_data=14",
         "pu_model=12", "pu_korpus=9", "pu_modif=24", "pu_zav=16", "pu_poverka=11", "pu_pokaz=14", "pu_faz=12", "pu_askue=12",
         "pu_plomba_gp=14", "pu_prinadl=22", "pu_modem=14", "pu_vvod_tip=16", "pu_vvod_i=8", "pu_zasch_tip=16", "pu_zasch_i=8",
         "pu_modul=24" };
@@ -14835,6 +14836,10 @@ public class DogovorForm : Form {
         Cell sameCell = F(" ", same, 1);
         sameCell.W = 16;
         Row(c, F("Адрес проживания (регистрации)", T("adres_prozh", 1, "г.Минск, ул. ..., д. ..., кв. ..."), 2), sameCell, F("Телефон", T("telefon", 1, "необязательно"), 1));
+        // потребитель действует по доверенности: в договоре п. 28.2 «По доверенности 28 мая 2014 г № 7 – 595.» и «(по доверенности)» под подписью
+        Cell dovCell = F(" ", X("dov", "Потребитель по доверенности"), 2);
+        dovCell.W = 30;
+        Row(c, dovCell, F("№ доверенности", T("dov_nom", 1, "например 7 – 595"), 1), F("от", D("dov_data"), 1));
 
         c = NewCard("Объект", "что подключаем и где", 8);
         Row(c, F("Объект электроснабжения", C("obekt", true, false, null), 4), F("Мощность, кВт", T("moshn", 1, "например 10"), 2),
@@ -15350,7 +15355,7 @@ public class DogovorForm : Form {
         for (int i = 1; i <= 2; i++)
             if (photoMeter[i - 1] != null && (key == "pu" + i + "_zav" || key == "pu" + i + "_tip" || key == "pu" + i + "_pokaz" || key == "pu" + i + "_poverka")) MeterNote(i);
         if (key == "adres" || key == "np_tip" || key == "np" || key == "ulica_tip" || key == "ulica" || key == "dom" || key == "korp" || key == "kv") Recheck(false, true);
-        if (key.EndsWith("tarif") || key.EndsWith("vvod_tip") || key == "schetchikov" || key == "sms" || key == "utratil" || key == "plita"
+        if (key.EndsWith("tarif") || key.EndsWith("vvod_tip") || key == "schetchikov" || key == "sms" || key == "utratil" || key == "dov" || key == "plita"
             || key == "telefon" || key.EndsWith("_model") || key.EndsWith("_tip")) Enable();
         RefreshState();
     }
@@ -15365,6 +15370,7 @@ public class DogovorForm : Form {
         PokazCue(1);
         PokazCue(2);
         inp["utratil_nom"].Enabled = inp["utratil_ot"].Enabled = V("utratil") == "1";
+        inp["dov_nom"].Enabled = inp["dov_data"].Enabled = V("dov") == "1";
         for (int i = 1; i <= 2; i++) inp["pu" + i + "_vvod_i"].Enabled = !NoInput(V("pu" + i + "_vvod_tip"));
     }
 
@@ -15818,11 +15824,25 @@ public class DogovorForm : Form {
 
     static string Line(int n, char c) { return new string(c, n); }
 
+    static readonly string[] MonthsOf = { "января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября", "ноября", "декабря" };
+
+    // «28.05.2014» -> «28 мая 2014»
+    static string LongDate(string d) {
+        DateTime t;
+        if (!DateTime.TryParseExact(d.Trim(), "dd.MM.yyyy", CultureInfo.InvariantCulture, DateTimeStyles.None, out t)) return d.Trim();
+        return t.Day + " " + MonthsOf[t.Month - 1] + " " + t.Year;
+    }
+
     // размер шрифта значений в узких ячейках: цель использования в шапке таблицы счётчиков.
     // В бланке там «Бытовое использование» - две строки 10 пт; длинная цель («Бытовое потребление, отопление и
     // горячее водоснабжение») в 10 пт - пять строк, таблица растёт и её конец уезжает на следующую страницу
     public static Dictionary<string, int> Sizes(Dictionary<string, string> v) {
         Dictionary<string, int> r = new Dictionary<string, int>();
+        // длинное название н.п. - мельче, чтобы влезло в свою линию (217 пт)
+        string np;
+        if (v.TryGetValue("НП", out np))
+            for (int hp = 20; hp >= 14; hp--)
+                if (Fit.Width(np, hp / 2f, true) <= 205f || hp == 14) { if (hp < 20) r["НП"] = hp; break; }
         foreach (string k in new string[] { "ПУ1_ЦЕЛЬ", "ПУ2_ЦЕЛЬ" }) {
             string s;
             if (!v.TryGetValue(k, out s) || s.Length == 0) continue;
@@ -15861,11 +15881,7 @@ public class DogovorForm : Form {
         string tip = V("np_tip");
         string np = UpperFirst(V("np"));
         if (tip.ToUpper() == "СТ" || tip.ToLower() == "с/т") np = tip + " «" + np.Trim('«', '»', '"') + "»";
-        // за названием - линия до места, где она кончается в бланке (табуляция с подчёркиванием, 122,7 пт).
-        // Название длиннее линии - без табуляции (иначе дата и номер съедут), а почти такое же - добиваем
-        // подчёркнутыми пробелами, чтобы точно перешло за конец линии
-        if (Fit.Width(np, 12f, true) <= 116f) np += "\t";
-        else while (Fit.Width(np, 12f, true) < 130f) np += "\u00A0";
+        // название - по центру своей линии (линия постоянной длины - табуляции в шаблоне); длинное - мельче (Sizes)
         v["НП"] = np;
         v["АДРЕС_ОБЪЕКТА"] = V("adres");
         v["ПОДП_В_ЛИЦЕ"] = (Flat(V("podp_dolzh")) + " " + Flat(V("podp_fio"))).Trim();
@@ -15884,6 +15900,8 @@ public class DogovorForm : Form {
         bool digits = kad.Length > 0;
         foreach (char ch in kad) if (!char.IsDigit(ch)) digits = false;
         v["КАДАСТР"] = digits ? "к.н." + kad : kad;
+        // кадастрового номера нет, а потребитель по доверенности - пустой строки под 28.1 нет, на её месте 28.2
+        if (kad.Length == 0 && V("dov") == "1") v["КАДАСТР"] = DocxTemplate.Drop;
         v["МОЩНОСТЬ"] = Kw(V("moshn"), "");
         v["МОЩНОСТЬ_ОТОПЛ"] = Kw(V("moshn_otopl"), "0,0");
         v["ДОПУСК"] = V("dopusk_nom").Length == 0 ? "" :
@@ -15892,6 +15910,10 @@ public class DogovorForm : Form {
         if (pr.Length == 0) v["ПРОЧИЕ_УСЛОВИЯ"] = "";
         else if (pr.ToLower() == "отсутствуют") v["ПРОЧИЕ_УСЛОВИЯ"] = " отсутствуют.";
         else v["ПРОЧИЕ_УСЛОВИЯ"] = "«" + char.ToUpper(pr[0]) + pr.Substring(1) + "».";
+        // потребитель по доверенности: п. 28.2 и «(по доверенности)» под его подписью; нет - этих строк нет
+        bool dov = V("dov") == "1";
+        v["ДОВ_ПОТР"] = dov ? "28.2 По доверенности " + LongDate(V("dov_data")) + " г № " + V("dov_nom").Trim() + "." : "";
+        v["ДОВ_ПОДПИСЬ"] = dov ? "\t(по доверенности)" : "";
 
         bool two = V("schetchikov") != "1 счётчик";
         for (int i = 1; i <= 2; i++) {
@@ -15900,19 +15922,19 @@ public class DogovorForm : Form {
                 string dash = Line(42, '-'), shortDash = Line(16, '-');
                 // как в эталонном договоре с одним счётчиком
                 v[f + "НОМ"] = "_";
-                v[f + "НОМ_Т"] = "______" + shortDash;
+                v[f + "НОМ_Т"] = Line(14, '-');           // прочерк - по центру линии (табуляции в шаблоне)
                 v[f + "ЦЕЛЬ"] = shortDash;
                 foreach (string k in new string[] { "ТИП", "ЗАВ", "ПОВЕРКА", "ПЛОМБА_ГП", "ФАЗ", "МЕСТО", "ПРИНАДЛ", "МОДЕМ", "ПОКАЗ", "МОДУЛЬ" }) v[f + k] = dash;
                 foreach (string k in new string[] { "ВВОД_ТИП", "ВВОД_I", "ЗАЩ_ТИП", "ЗАЩ_I" }) v[f + k] = shortDash;
                 v["□" + f + "АСКУЭ_ДА"] = v["□" + f + "АСКУЭ_НЕТ"] = "0";
                 v["□" + f + "ОДНОСТ"] = v["□" + f + "ДИФФ"] = "0";
-                v[f + "ПЕРИОДЫ"] = "__" + shortDash + "_";
+                v[f + "ПЕРИОДЫ"] = Line(14, '-');
                 v[f + "ТАРИФ"] = v[f + "ТАРИФ_Д"] = v[f + "ЗПТ"] = v[f + "ЗПТ_Д"] = "";
                 v[f + "НАГРЕВ"] = v[f + "НАГРЕВ_Д"] = "";
                 continue;
             }
             v[f + "НОМ"] = i.ToString();
-            if (i == 2) v[f + "НОМ_Т"] = "_____2____";
+            if (i == 2) v[f + "НОМ_Т"] = "2";
             v[f + "ЦЕЛЬ"] = V(p + "cel");
             v[f + "ТИП"] = V(p + "tip");
             v[f + "ЗАВ"] = V(p + "zav");
@@ -15935,7 +15957,7 @@ public class DogovorForm : Form {
             bool diff = per.Length > 0;
             v["□" + f + "ОДНОСТ"] = V(p + "tarif") == Tarifs[0] ? "1" : "0";
             v["□" + f + "ДИФФ"] = diff ? "1" : "0";
-            v[f + "ПЕРИОДЫ"] = diff ? per : Line(11, '_');
+            v[f + "ПЕРИОДЫ"] = diff ? per : "";          // нет - пустая линия (её длина - в шаблоне)
             // тарифная группа (жирным, после запятой) и электронагреватели - под выбранным тарифом
             string heat = V(p + "nagrev"), comma = group.Length > 0 ? ", " : "";
             v[f + "ЗПТ"] = diff ? "" : comma;
