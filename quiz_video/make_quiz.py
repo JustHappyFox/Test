@@ -197,7 +197,7 @@ def main():
         return placeholder(p, w, h, pal["accent"])
 
     cover = picture(quiz["cover_prompt"], 768, 768, "cover", seed)
-    images = [picture(q["image_prompt"], 768, 512, f"q{i + 1}", seed + i + 1) for i, q in enumerate(qs)]
+    images = [picture(q["image_prompt"], 768, 576, f"q{i + 1}", seed + i + 1) for i, q in enumerate(qs)]
 
     # голос
     voice = assets / "voices" / f"ru_RU-{a.voice}-medium.onnx"
