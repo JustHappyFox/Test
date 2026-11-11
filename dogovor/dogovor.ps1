@@ -42,6 +42,40 @@ public static class Crash {
         };
     }
 
+    // Метка «программа работает» - rabotaet.txt рядом с программой: при обычном выходе удаляется. Есть при запуске - в прошлый раз
+    // программа не закрылась сама (зависла и её сняли, или Windows закрыл её без сообщения - тогда своего окна ошибки не бывает):
+    // запись в oshibki.txt с последним действием и сообщение при запуске. В метке - только названия полей и окон, без данных
+    static string mark, lastAction = "", startedAt = "";
+    public static string LastRun;          // что было в прошлый раз, если программа закрылась аварийно; иначе null
+    public static bool Ask = true;         // сообщать при запуске (для проверки - нет)
+
+    public static void Begin() {
+        if (log == null) return;
+        mark = Path.Combine(Path.GetDirectoryName(log), "rabotaet.txt");
+        try {
+            if (File.Exists(mark)) {
+                LastRun = File.ReadAllText(mark, Encoding.UTF8).Trim();
+                Write("Прошлый запуск закрылся аварийно, без окна ошибки (завис и его закрыли, или Windows закрыл программу сам). " + LastRun, "прошлый запуск");
+            }
+        } catch { }
+        startedAt = DateTime.Now.ToString("dd.MM.yyyy HH:mm:ss");
+        lastAction = "";
+        Mark("запуск");
+        Application.ApplicationExit += delegate { End(); };
+    }
+
+    // программа закрывается как обычно - метку убрать
+    public static void End() {
+        try { if (mark != null && File.Exists(mark)) File.Delete(mark); } catch { }
+    }
+
+    // что сейчас делается (до самого действия: зависнет на нём - будет видно, на чём)
+    public static void Mark(string action) {
+        if (mark == null || action == lastAction) return;
+        lastAction = action;
+        try { File.WriteAllText(mark, "Запуск " + startedAt + ". Последнее действие (" + DateTime.Now.ToString("dd.MM.yyyy HH:mm:ss") + "): " + action, new UTF8Encoding(true)); } catch { }
+    }
+
     // что за компьютер: Windows, .NET, разрядность, память - без данных абонентов
     public static string Environment2() {
         StringBuilder sb = new StringBuilder();
@@ -1786,9 +1820,31 @@ public class Combo : ComboBox {
         BeginInvoke((MethodInvoker)delegate { try { Select(0, 0); } catch { } });
     }
 
+    // Список нельзя пересоздавать, пока поле само сообщает о выборе: Windows (выпадающий список с автодополнением) в этот момент
+    // ещё работает со старыми строками - программа зависала или вылетала без сообщения (выбор «Тип корпуса», 11.11).
+    // Поэтому: тот же список - не трогаем; другой - кладём после того, как поле закончит (BeginInvoke)
+    int inEvent;
+    List<string> pending;
+
     protected override void OnSelectedIndexChanged(EventArgs e) {
-        base.OnSelectedIndexChanged(e);
-        ShowStart();
+        inEvent++;
+        try { base.OnSelectedIndexChanged(e); ShowStart(); } finally { inEvent--; }
+    }
+
+    protected override void OnTextChanged(EventArgs e) {
+        inEvent++;
+        try { base.OnTextChanged(e); } finally { inEvent--; }
+    }
+
+    protected override void OnSelectionChangeCommitted(EventArgs e) {
+        inEvent++;
+        try { base.OnSelectionChangeCommitted(e); } finally { inEvent--; }
+    }
+
+    // список меняется на ходу (модель / корпус / модификация счётчика) - без автодополнения Windows: оно и ломалось
+    public void NoAutoComplete() {
+        AutoCompleteMode = AutoCompleteMode.None;
+        AutoCompleteSource = AutoCompleteSource.None;
     }
 
     protected override void OnMouseWheel(MouseEventArgs e) {
@@ -1828,15 +1884,44 @@ public class Combo : ComboBox {
     }
 
     public void SetItems(List<string> items) {
+        List<string> want = new List<string>();
+        foreach (string s in items) if (s.Length > 0 && !want.Contains(s)) want.Add(s);
+        if (pending == null && SameItems(want)) return;           // тот же список - ничего не делать
+        if (inEvent > 0 && IsHandleCreated) {
+            bool queued = pending != null;
+            pending = want;
+            if (!queued) BeginInvoke((MethodInvoker)delegate { List<string> w = pending; pending = null; if (w != null && !IsDisposed) Fill(w); });
+            return;
+        }
+        pending = null;
+        Fill(want);
+    }
+
+    public bool SameItems(List<string> want) {
+        if (Items.Count != want.Count) return false;
+        for (int i = 0; i < want.Count; i++) if (Items[i].ToString() != want[i]) return false;
+        return true;
+    }
+
+    // положить список: автодополнение на это время выключается (иначе Windows перестраивает его на каждой строке)
+    public static int Fills;               // сколько раз списки пересоздавались (для проверки)
+
+    void Fill(List<string> want) {
+        if (SameItems(want)) return;
+        Fills++;
         string text = Text;
+        AutoCompleteMode mode = AutoCompleteMode;
+        if (mode != AutoCompleteMode.None) AutoCompleteMode = AutoCompleteMode.None;
         BeginUpdate();
-        Items.Clear();
-        foreach (string s in items) if (s.Length > 0 && !Items.Contains(s)) Items.Add(s);
-        EndUpdate();
+        try {
+            Items.Clear();
+            Items.AddRange(want.ToArray());
+        } finally { EndUpdate(); }
+        if (mode != AutoCompleteMode.None) AutoCompleteMode = mode;
         if (DropDownStyle == ComboBoxStyle.DropDownList) {
             int i = Items.IndexOf(text);
             SelectedIndex = i;
-        } else Text = text;
+        } else if (Text != text) Text = text;
     }
 
     public string Value {
@@ -14644,6 +14729,15 @@ public class DogovorForm : Form {
         "adres_prozh", "obekt", "moshn", "np", "adres", "prochie", "plita", "gaz", "teplo", "gvs", "sms", "sms_tel", "utratil_nom",
         "pu_tip", "pu_zav", "pu_cel", "pu_faz", "pu_askue", "pu_tarif", "pu_gruppa" };
 
+    // название поля для метки работы (Crash.Mark): «Тип корпуса счётчика (счётчик 1)»
+    string FieldTitle(string key) {
+        string k = key, suffix = "";
+        if (key.StartsWith("pu1_") || key.StartsWith("pu2_")) { k = "pu_" + key.Substring(4); suffix = " (счётчик " + key[2] + ")"; }
+        foreach (string[] f in fieldList) if (f[0] == k) return f[1] + suffix;
+        foreach (string n in FieldNames) if (n.StartsWith(k + "=")) return n.Substring(k.Length + 1) + suffix;
+        return key;
+    }
+
     void Field(string key, string caption, string card) {
         Control c;
         if (!inp.TryGetValue(key, out c) || c is CheckBox || c is DateBox) return;
@@ -14828,6 +14922,8 @@ public class DogovorForm : Form {
         parts.PadBottom = 0;
         parts.Row(F("Модель", C(p + "model", true, false, null), 1), F("Тип корпуса", C(p + "korpus", true, false, null), 1),
             F("Модификация", C(p + "modif", true, false, null), 2));
+        // списки модели, корпуса и модификации меняются на ходу - без автодополнения Windows (с ним зависало и вылетало)
+        foreach (string k in new string[] { "model", "korpus", "modif" }) ((Combo)inp[p + k]).NoAutoComplete();
         g.Row(Cell.G(parts, 2));
         foreach (Cell x in parts.Cells()) cardOfLater.Add(x.Ctl);
         g.Row(F("Тип счётчика в договоре (собирается сам, можно поправить)", T(p + "tip", 1, null), 2));
@@ -15199,6 +15295,7 @@ public class DogovorForm : Form {
 
     void Changed(string key) {
         if (loading) return;
+        Crash.Mark("договор, поле «" + FieldTitle(key) + "»");
         dirty = true;
         unsavedAuto = true;
         loading = true;
@@ -15293,6 +15390,7 @@ public class DogovorForm : Form {
 
     // для проверки
     public string BaseText { get { return baseLabel.Text; } }
+    public Control Field(string key) { Control c; return inp.TryGetValue(key, out c) ? c : null; }
 
     void Post(MethodInvoker m) {
         try { if (!IsDisposed && IsHandleCreated) BeginInvoke(m); } catch { }
@@ -17017,11 +17115,14 @@ public static class DogovorApp {
     public static void Run(string here, string launch) {
         // ошибки - в своё окно с подробностями и в oshibki.txt (до создания окон)
         Crash.Install(here);
+        Crash.Begin();
         try { Application.EnableVisualStyles(); } catch { }
         // щелчок мимо полей снимает выделение поля - во всех окнах программы
         Application.AddMessageFilter(new UnfocusFilter());
         // главное меню: «Создать договор», «Создать справку»
         using (StartMenu m = new StartMenu(here, launch)) Application.Run(m);
+        // закрылась как обычно - метку «программа работает» убрать
+        Crash.End();
         // файлы предпросмотра больше не нужны (открытые в Word удалятся в следующий раз)
         DocPreview.Clean(here);
     }
@@ -17157,7 +17258,13 @@ public class StartMenu : Form {
             else if (e.KeyCode == Keys.F2) { e.SuppressKeyPress = true; OpenSpravka(this, null); }
             else if (e.KeyCode == Keys.F3) { e.SuppressKeyPress = true; OpenNaryad(this, null, null); }
         };
-        Shown += delegate { RefreshTiles(); };
+        Shown += delegate {
+            RefreshTiles();
+            // прошлый раз программа закрылась аварийно (зависла / вылетела без окна ошибки) - сказать, запись уже в oshibki.txt
+            if (Crash.LastRun != null && Crash.Ask)
+                MessageBox.Show(this, "В прошлый раз программа закрылась аварийно - зависла или вылетела без сообщения.\n\n" + Crash.LastRun +
+                    "\n\nЭто записано в oshibki.txt рядом с программой - пришлите его.", Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        };
         Activated += delegate { RefreshTiles(); };
         FormClosing += delegate(object s, FormClosingEventArgs e) {
             // выключение Windows - спрашивать некогда: договор уже в автосохранении
@@ -17197,6 +17304,7 @@ public class StartMenu : Form {
     }
 
     public void OpenDogovor() {
+        Crash.Mark("открываю договор");
         if (dog == null || dog.IsDisposed) {
             Cursor = Cursors.WaitCursor;
             try { dog = new DogovorForm(here); dog.Home = this; dog.Tag = Tag; }
@@ -17210,6 +17318,7 @@ public class StartMenu : Form {
 
     // справка; from - окно, куда вернётся «Назад»; data - данные договора (или null - как было)
     public void OpenSpravka(Form from, Dictionary<string, string> data) {
+        Crash.Mark("открываю справку");
         if (spr == null || spr.IsDisposed) { spr = new SpravkaForm(here); spr.Home = this; }
         spr.Back = from;
         if (data != null) spr.FromContract(data);
@@ -17221,6 +17330,7 @@ public class StartMenu : Form {
 
     // наряд на включение/отключение; from - куда вернётся «Назад»; данные договора или справки (или null - как было)
     public void OpenNaryad(Form from, Dictionary<string, string> contract, Dictionary<string, string> spravka) {
+        Crash.Mark("открываю наряд");
         if (nar == null || nar.IsDisposed) { nar = new NaryadForm(here); nar.Home = this; }
         nar.Back = from;
         if (contract != null) nar.FromContract(contract);
@@ -17512,6 +17622,7 @@ public class SpravkaForm : Form {
         c.Name = key;
         EventHandler h = delegate {
             if (loading) return;
+            Crash.Mark("справка, поле " + key);
             dirty = true;
             RefreshState();
         };
@@ -17647,6 +17758,8 @@ public class SpravkaForm : Form {
         m.Grid.Row(MF(m, "zav", "Номер", MT(m, "zav", null), 14), MF(m, "pokaz", "Показания", MT(m, "pokaz", null), 12),
             MF(m, "pov", "Поверка (год-квартал)", MT(m, "pov", "2025-2"), 10));
         m.Pick = new MeterPick(lists, (Combo)m.Ctl["model"], (Combo)m.Ctl["korpus"], (Combo)m.Ctl["modif"], (TextBox)m.Ctl["tip"]);
+        // списки модели, корпуса и модификации меняются на ходу - без автодополнения Windows (с ним зависало и вылетало)
+        foreach (string k in new string[] { "model", "korpus", "modif" }) ((Combo)m.Ctl[k]).NoAutoComplete();
         m.Remove = Ui.Button("× убрать", false);
         m.Remove.Size = new Size(100, 28);
         m.Remove.TabStop = false;
@@ -17725,6 +17838,8 @@ public class SpravkaForm : Form {
         m.Ctl[k] = c;
         EventHandler h = delegate {
             if (loading) return;
+            string cap;
+            Crash.Mark("справка, ПУ " + (meters.IndexOf(m) + 1) + ", поле «" + (m.Caps.TryGetValue(k, out cap) ? cap : k) + "»");
             dirty = true;
             // тип по частям: модель -> корпус -> модификация; адрес - из частей
             if (k == "model") m.Pick.Changed(0);
@@ -19045,6 +19160,7 @@ public class NaryadForm : Form {
         c.Name = key;
         EventHandler h = delegate {
             if (loading) return;
+            Crash.Mark("наряд, поле " + key);
             dirty = true;
             // строки наряда из частей: адрес, потребитель, место
             if (Array.IndexOf(AddrKeys, key) >= 0) Compose("adres");
