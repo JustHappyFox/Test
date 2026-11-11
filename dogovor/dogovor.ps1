@@ -14590,9 +14590,18 @@ public class DogovorForm : Form {
 
     public Dictionary<string, string> Data() {
         Dictionary<string, string> d = new Dictionary<string, string>();
-        foreach (string k in inp.Keys) d[k] = V(k);
+        foreach (string k in inp.Keys) d[k] = SavedV(k);
         return d;
     }
+
+    // лицевой в договоре - целиком: приставка района (5002, 5003...; можно пусто) + номер в базе
+    string LsFull() {
+        string n = V("ls");
+        return n.Length == 0 ? "" : Digits(V("ls_pre")) + n;
+    }
+
+    // в данных договора (файл, автосохранение, справка, наряд, отчёт пломб) «ls» - лицевой целиком, как раньше
+    string SavedV(string key) { return key == "ls" ? LsFull() : V(key); }
 
     public bool Unsaved { get { return dirty; } }
     public bool AskSaveBeforeExit() { return AskSave("Закрыть программу"); }
@@ -14686,6 +14695,8 @@ public class DogovorForm : Form {
         Control c;
         if (!inp.TryGetValue(key, out c)) return;
         v = v ?? "";
+        // лицевой целиком (приставка района + 9 цифр номера в базе) - приставка уходит в своё поле
+        if (key == "ls" && Digits(v).Length == 13) { SetV("ls_pre", Digits(v).Substring(0, 4)); v = Digits(v).Substring(4); }
         if (c is Seg) ((Seg)c).Value = v;
         else if (c is CheckBox) ((CheckBox)c).Checked = v == "1";
         else if (c is DateBox) {
@@ -14725,7 +14736,7 @@ public class DogovorForm : Form {
         "pu_korpus=Тип корпуса счётчика", "pu_modif=Модификация счётчика", "adres=Адрес объекта (строка в договоре)",
         "pu_tip=Тип счётчика (строка в договоре)", "moshn_otopl=Мощность на отопление и ГВС, кВт",
         "pu_nagrev=Электронагревательные приборы", "pu_modul=Модуль отображения (сплит-счётчик)",
-        "dov_nom=№ доверенности потребителя" };
+        "dov_nom=№ доверенности потребителя", "ls_pre=Приставка лицевого счёта (5002...)" };
 
     // обязательные сначала - как было до настройки
     static readonly string[] DefaultRequired = {
@@ -14791,7 +14802,7 @@ public class DogovorForm : Form {
 
     // ширина поля в знаках - по длине значения (у списков - со стрелкой); нет в списке - на всю оставшуюся ширину
     static readonly string[] Widths = {
-        "data=14", "ls=16", "oformil=22", "podp=20", "podp_inic=16", "podp_dov=26", "podp_fio=30", "soob_adres=30", "soob_tel=16",
+        "data=14", "ls_pre=7", "ls=13", "oformil=22", "podp=20", "podp_inic=16", "podp_dov=26", "podp_fio=30", "soob_adres=30", "soob_tel=16",
         "fio=42", "potr_inic=18", "lichny=17", "telefon=18",
         "obekt=34", "moshn=8", "moshn_otopl=8", "np_tip=7", "np=28", "selsovet=18", "kadastr=22", "ulica_tip=7", "ulica=28",
         "dom=8", "korp=6", "kv=6", "dopusk_nom=12", "dopusk_data=14",
@@ -14817,7 +14828,8 @@ public class DogovorForm : Form {
         remember.TabStop = false;
         tip.SetToolTip(remember, "Записать должность, доверенность и подпись в справочник,\nчтобы в следующий раз выбрать подписанта из списка");
         c.AddExtra(remember);
-        Row(c, F("Дата договора", D("data"), 1), F("Лицевой счёт №", T("ls", 1, "номер лицевого счёта"), 1), F("Договор оформил(а)", C("oformil", true, false, "фамилия И.О."), 2));
+        Row(c, F("Дата договора", D("data"), 1), F("Приставка", T("ls_pre", 1, "5002"), 1), F("Лицевой счёт № (номер в базе)", T("ls", 1, "9 цифр"), 1),
+            F("Договор оформил(а)", C("oformil", true, false, "фамилия И.О."), 1));
         Row(c, F(null, lsNote, 4));
         Row(c, F("Исполнитель в лице (подписывает)", C("podp", true, false, "выберите из списка"), 1), F("Подпись подписанта", T("podp_inic", 1, "И.О.Фамилия"), 1),
             F("Доверенность", T("podp_dov", 1, "№ ... от ..."), 2));
@@ -15345,6 +15357,12 @@ public class DogovorForm : Form {
             // вводного аппарата нет - нет и тока
             for (int i = 1; i <= 2; i++)
                 if (key == "pu" + i + "_vvod_tip" && NoInput(V(key))) SetV("pu" + i + "_vvod_i", "");
+            // вписали/вставили лицевой целиком (13 цифр) - приставка уходит в своё поле
+            if (key == "ls" && Digits(V("ls")).Length == 13) {
+                SetV("ls", V("ls"));
+                TextBox t = (TextBox)inp["ls"];
+                t.SelectionStart = t.Text.Length;
+            }
             if (key == "lichny") {
                 TextBox t = (TextBox)inp["lichny"];
                 int pos = t.SelectionStart;
@@ -15462,7 +15480,7 @@ public class DogovorForm : Form {
             foreach (string f in Directory.GetFiles(dataDir, "*.txt")) {
                 if (openedFile != null && string.Compare(Path.GetFullPath(f), Path.GetFullPath(openedFile), StringComparison.OrdinalIgnoreCase) == 0) continue;
                 foreach (string line in File.ReadAllLines(f, Encoding.UTF8))
-                    if (line.StartsWith("ls=")) { if (Digits(line.Substring(3)) == ls) return Path.GetFileNameWithoutExtension(f); break; }
+                    if (line.StartsWith("ls=")) { if (BaseLink.Nab(line.Substring(3)) == BaseLink.Nab(ls)) return Path.GetFileNameWithoutExtension(f); break; }
             }
         } catch { }
         return null;
@@ -15510,7 +15528,7 @@ public class DogovorForm : Form {
     string LsBlockText() {
         string ls = Digits(V("ls"));
         if (ls.Length == 0) return null;
-        if (lsSaved != null) return "Лицевой счёт " + ls + " уже есть в сохранённом договоре «" + lsSaved + "».";
+        if (lsSaved != null) return "Лицевой счёт " + LsFull() + " уже есть в сохранённом договоре «" + lsSaved + "».";
         if (lsChecked == ls && lsInBase.Count > 0)
             return "Лицевой " + BaseLink.Nab(ls) + " уже есть в базе: " + lsInBase[0] + (lsInBase.Count > 1 ? " (и ещё " + (lsInBase.Count - 1) + ")" : "") + ".";
         return null;
@@ -15521,7 +15539,7 @@ public class DogovorForm : Form {
         string block = LsBlockText();
         if (ls.Length == 0) Note(lsNote, "", St.Hint, false);
         else if (block != null) Note(lsNote, block + " Копию лицевого сохранить нельзя - она ломает базу.", St.Bad, true);
-        else if (ls.Length != 13 && ls.Length != 9) Note(lsNote, "Лицевой - 13 цифр: приписка района (5002...) и номер в базе. Сейчас цифр: " + ls.Length, St.Hint, false);
+        else if (ls.Length != 9) Note(lsNote, "Лицевой счёт - 9 цифр номера в базе (приставка района 5002... - в поле «Приставка»). Сейчас цифр: " + ls.Length, St.Hint, false);
         else if (baseLink == null) Note(lsNote, "База не подключена - лицевой по базе не проверен.", St.Hint, false);
         else if (lsError != null && lsChecked == null) Note(lsNote, "Проверить по базе не удалось: " + lsError, Warn, false);
         else if (lsChecked == ls) Note(lsNote, "Лицевого " + BaseLink.Nab(ls) + " в базе нет - можно оформлять.", St.Good, false);
@@ -15716,6 +15734,7 @@ public class DogovorForm : Form {
         if (id.Length > 0 && id.Length != 14) r.Add(new Problem("lichny", "в идентификационном номере " + id.Length + " знаков, обычно 14", false));
         string ls = V("ls");
         foreach (char ch in ls) if (!char.IsDigit(ch)) { r.Add(new Problem("ls", "в лицевом счёте не только цифры", false)); break; }
+        foreach (char ch in V("ls_pre")) if (!char.IsDigit(ch)) { r.Add(new Problem("ls_pre", "в приставке лицевого не только цифры", false)); break; }
         if (V("dopusk_nom").Length == 0) r.Add(new Problem("dopusk_nom", "не указан акт допуска в эксплуатацию", false));
         string g1 = V("pu1_gruppa");
         if (V("plita") == "да" && g1.Contains("НЕ ОБОРУДОВАННЫЙ")) r.Add(new Problem("pu1_gruppa", "плита есть, а тарифная группа - «НЕ оборудованный плитой»", false));
@@ -15880,7 +15899,7 @@ public class DogovorForm : Form {
     public Dictionary<string, string> Compose() {
         Dictionary<string, string> v = new Dictionary<string, string>();
         v["ДАТА"] = V("data");
-        v["ЛС"] = V("ls");
+        v["ЛС"] = LsFull();
         string tip = V("np_tip");
         string np = UpperFirst(V("np"));
         if (tip.ToUpper() == "СТ" || tip.ToLower() == "с/т") np = tip + " «" + np.Trim('«', '»', '"') + "»";
@@ -16591,13 +16610,13 @@ public class DogovorForm : Form {
         string fio = V("fio");
         string[] w = fio.Split(new char[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
         string who = w.Length > 0 ? Short(fio) : "";
-        string name = (V("ls") + " " + who).Trim();
+        string name = (LsFull() + " " + who).Trim();
         if (name.Length == 0) name = "Договор " + DateTime.Now.ToString("yyyy-MM-dd HH-mm");
         foreach (char ch in Path.GetInvalidFileNameChars()) name = name.Replace(ch, '_');
         return name.TrimEnd('.');
     }
 
-    string Title() { return ("Договор " + V("ls") + " " + Short(V("fio"))).Trim(); }
+    string Title() { return ("Договор " + LsFull() + " " + Short(V("fio"))).Trim(); }
 
     // предпросмотр: договор заполняется в папку «Предпросмотр» и открывается в Word только для чтения;
     // в «Договоры» ничего не пишется, фото не переносятся, проверок и вопросов нет
@@ -16717,7 +16736,7 @@ public class DogovorForm : Form {
         StringBuilder sb = new StringBuilder();
         sb.Append("# Данные договора для программы «Оформление договора»\r\n");
         sb.Append("сохранён=").Append(DateTime.Now.ToString("dd.MM.yyyy HH:mm")).Append("\r\n");
-        foreach (KeyValuePair<string, Control> kv in inp) sb.Append(kv.Key).Append('=').Append(Memory.Escape(V(kv.Key))).Append("\r\n");
+        foreach (KeyValuePair<string, Control> kv in inp) sb.Append(kv.Key).Append('=').Append(Memory.Escape(SavedV(kv.Key))).Append("\r\n");
         sb.Append("фото=").Append(Memory.Escape(PhotoRef())).Append("\r\n");
         File.WriteAllText(file, sb.ToString(), new UTF8Encoding(true));
     }
@@ -16758,7 +16777,7 @@ public class DogovorForm : Form {
             sb.Append("# Автосохранение несохранённого договора (программа «Оформление договора»)\r\n");
             sb.Append("автосохранение=").Append(DateTime.Now.ToString("dd.MM.yyyy HH:mm")).Append("\r\n");
             if (openedFile != null) sb.Append("открыт=").Append(Memory.Escape(openedFile)).Append("\r\n");
-            foreach (KeyValuePair<string, Control> kv in inp) sb.Append(kv.Key).Append('=').Append(Memory.Escape(V(kv.Key))).Append("\r\n");
+            foreach (KeyValuePair<string, Control> kv in inp) sb.Append(kv.Key).Append('=').Append(Memory.Escape(SavedV(kv.Key))).Append("\r\n");
             sb.Append("фото=").Append(Memory.Escape(PhotoRef())).Append("\r\n");
             // сначала во временный файл, потом подмена: свет погаснет посреди записи - старое автосохранение цело
             string tmp = autoFile + ".tmp";
@@ -16803,6 +16822,7 @@ public class DogovorForm : Form {
             if (V("soob_tel").Length == 0) SetV("soob_tel", "275-81-38");
             if (V("dopusk_kem").Length == 0) { List<string> k = lists.Get("Кем выдан допуск"); if (k.Count > 0) SetV("dopusk_kem", k[0]); }
             if (V("podp").Length == 0) { List<string[]> s = lists.Signers(); if (s.Count > 0) { SetV("podp", s[0][0]); SetV("podp_dolzh", s[0][1]); SetV("podp_fio", s[0][2]); SetV("podp_dov", s[0][3]); SetV("podp_inic", s[0][4]); } }
+            SetV("ls_pre", "5002");
             SetV("np_tip", "д.");
             SetV("ulica_tip", "ул.");
             SetV("schetchikov", "1 счётчик");
@@ -16871,6 +16891,13 @@ public class DogovorForm : Form {
         loading = true;
         try {
             foreach (KeyValuePair<string, string> kv in d) if (inp.ContainsKey(kv.Key)) SetV(kv.Key, kv.Value);
+            // в файле «ls» - лицевой целиком; приставка - из «ls_pre» (у файлов прежних версий 13 цифр делятся сами)
+            string full, pre;
+            if (d.TryGetValue("ls", out full) && d.TryGetValue("ls_pre", out pre)) {
+                string dg = Digits(full), dp = Digits(pre);
+                SetV("ls_pre", pre);
+                SetV("ls", dp.Length > 0 && dg.Length > dp.Length && dg.StartsWith(dp) ? dg.Substring(dp.Length) : full);
+            }
             autoInic = Initials(V("fio"));
             autoAdres = Address();
             for (int i = 1; i <= 2; i++) {
