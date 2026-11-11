@@ -4,8 +4,13 @@
 
 quiz.json:
   {"topic": "Луна", "hook": "…", "cover_prompt": "англ. описание картинки",
-   "questions": [{"q": "…", "options": ["…", "…", "…"], "answer": 0, "fact": "…", "image_prompt": "…"}],
+   "icons": ["🍫", "🍬"],
+   "questions": [{"level": "Лёгкий|Средний|Сложный", "q": "…", "options": ["…", "…", "…"], "answer": 0,
+                  "explain": "пояснение на обороте карточки", "icons": ["🌱"], "image_prompt": "…",
+                  "q_voice"/"answer_voice"/"explain_voice": "как читать вслух (числа словами)"}],
    "outro_title": "…", "outro_sub": "…", "outro_voice": "…", "palette": 0}
+Сложность растёт: лёгкий → средний → сложный; 10 с на размышление; после ответа карточка переворачивается
+и голос читает пояснение; ролик не короче 62 с (пожелания владельца 11.11).
 
 В ПАПКЕ_С_МОДЕЛЯМИ: models/z_image_turbo-Q4_0.gguf, models/qwen_3_4b-Q8_0.gguf, models/ae-f16.gguf,
 voices/ru_RU-<голос>-medium.onnx (+ .onnx.json). Модели и голоса в репозиторий не кладём — они большие.
@@ -32,6 +37,12 @@ PALETTES = [
     {"bg1": "#2448a8", "bg2": "#3fa9f5", "accent": "#ffb703"},   # синяя
     {"bg1": "#ff5f9e", "bg2": "#ffa58b", "accent": "#4d5bff"},   # розовая
 ]
+LEVELS = {
+    "Лёгкий": {"n": 1, "color": "#22c55e", "say": "Лёгкий вопрос."},
+    "Средний": {"n": 2, "color": "#f59e0b", "say": "Вопрос посложнее."},
+    "Сложный": {"n": 3, "color": "#ef4444", "say": "А теперь сложный вопрос."},
+}
+LEVEL_ORDER = ["Лёгкий", "Средний", "Сложный"]
 STYLE = ("vibrant flat vector cartoon illustration, bold clean outlines, playful bright colors, "
          "simple background, centered composition, high quality, no text, no letters, no words")
 
@@ -94,7 +105,7 @@ def tone(freqs, dur, decay, vol):
 
 
 def tick(high=False):
-    return tone([2200 if high else 1600], 0.05, 70, 0.5)
+    return tone([2200 if high else 1600], 0.05, 70, 0.5 if high else 0.28)
 
 
 def ding():
@@ -156,7 +167,8 @@ def main():
     ap.add_argument("--work", help="рабочая папка (по умолчанию рядом с --out)")
     ap.add_argument("--voice", default="dmitri")
     ap.add_argument("--speed", type=float, default=0.92, help="темп речи Piper: меньше — быстрее")
-    ap.add_argument("--timer", type=float, default=4.0)
+    ap.add_argument("--timer", type=float, default=10.0, help="секунд на размышление")
+    ap.add_argument("--min-duration", type=float, default=62.0, help="ролик не короче, с")
     ap.add_argument("--steps", type=int, default=8)
     ap.add_argument("--threads", type=int, default=4)
     ap.add_argument("--no-images", action="store_true", help="без нейросети: заглушки вместо картинок")
@@ -200,28 +212,39 @@ def main():
     t = scenes[-1]["end"]
 
     for i, q in enumerate(qs):
-        qv = vo(f"Вопрос {i + 1}. {q['q']}", f"q{i + 1}")
+        level_name = q.get("level") or LEVEL_ORDER[min(i * len(LEVEL_ORDER) // len(qs), len(LEVEL_ORDER) - 1)]
+        lvl = LEVELS[level_name]
+        qv = vo(f"{lvl['say']} {q.get('q_voice') or q['q']}", f"q{i + 1}")
         right = q["options"][q["answer"]]
-        av = vo(q.get("answer_voice") or f"Правильный ответ: {right}. {q.get('fact', '')}", f"a{i + 1}")
-        dq, da = len(qv) / SR, len(av) / SR
+        av = vo(q.get("answer_voice") or f"Правильный ответ: {right}.", f"a{i + 1}")
+        ev = vo(q.get("explain_voice") or q["explain"], f"e{i + 1}")
+        dq, da, de = len(qv) / SR, len(av) / SR, len(ev) / SR
         t_timer = 0.5 + dq + 0.35
         t_reveal = t_timer + a.timer
+        t_flip = t_reveal + 0.45 + da + 0.3
         t_opts = [min(0.8 + j * 0.3, t_timer - 0.6 + j * 0.12) for j in range(len(q["options"]))]
         s = {"type": "q", "idx": i, "total": len(qs), "q": q["q"], "options": q["options"], "answer": q["answer"],
-             "fact": q.get("fact", ""), "image": images[i].resolve().as_uri(), "timer": a.timer,
-             "t_opts": t_opts, "t_timer": t_timer, "t_reveal": t_reveal, "t_fact": t_reveal + 0.6,
-             "start": t, "end": t + t_reveal + 0.45 + da + 0.8}
+             "level": level_name, "level_n": lvl["n"], "level_color": lvl["color"],
+             "explain": q["explain"], "explain_title": q.get("explain_title", "Пояснение"),
+             "icons": q.get("icons") or quiz.get("icons") or [],
+             "image": images[i].resolve().as_uri(), "timer": a.timer,
+             "t_opts": t_opts, "t_timer": t_timer, "t_reveal": t_reveal, "t_flip": t_flip,
+             "start": t, "end": t + t_flip + 0.8 + de + 1.3}
         scenes.append(s)
         clips += [(whoosh(i + 2), t), (qv, t + 0.5)]
         clips += [(pop(), t + x) for x in t_opts]
-        clips += [(tick(k == int(a.timer) - 1), t + t_timer + k) for k in range(int(a.timer))]
+        n = int(a.timer)
+        clips += [(tick(k >= n - 3), t + t_timer + k) for k in range(n)]
         clips += [(ding(), t + t_reveal), (av, t + t_reveal + 0.45)]
+        clips += [(whoosh(50 + i), t + t_flip), (ev, t + t_flip + 0.8)]
         t = s["end"]
 
     ov = vo(quiz.get("outro_voice") or "Сколько правильных ответов у тебя? Напиши в комментариях!", "outro")
-    scenes.append({"type": "outro", "start": t, "end": t + 0.4 + len(ov) / SR + 1.8})
+    end = max(t + 0.4 + len(ov) / SR + 1.8, a.min_duration)
+    scenes.append({"type": "outro", "start": t, "end": end, "icons": quiz.get("icons") or []})
     clips += [(whoosh(99), t), (ding(), t + 0.5), (ov, t + 0.4)]
     total = scenes[-1]["end"]
+    scenes[0]["icons"] = quiz.get("icons") or []
 
     tl = {"fps": 30, "duration": total, "seed": seed % 1000, "palette": pal, "topic": quiz["topic"],
           "hook": quiz["hook"], "cover": cover.resolve().as_uri(), "scenes": scenes,
