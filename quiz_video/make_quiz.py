@@ -5,12 +5,13 @@
 quiz.json:
   {"topic": "Луна", "hook": "…", "cover_prompt": "англ. описание картинки",
    "icons": ["🍫", "🍬"],
-   "questions": [{"level": "Лёгкий|Средний|Сложный", "q": "…", "options": ["…", "…", "…"], "answer": 0,
-                  "explain": "пояснение на обороте карточки", "icons": ["🌱"], "image_prompt": "…",
-                  "q_voice"/"answer_voice"/"explain_voice": "как читать вслух (числа словами)"}],
+   "questions": [{"q": "…", "options": ["…", "…", "…"], "answer": 0,
+                  "explain": "пояснение на обороте карточки (история: кто открыл, почему так)", "icons": ["🌱"],
+                  "image_prompt": "…", "q_voice"/"explain_voice": "как читать вслух (числа словами)"}],
    "outro_title": "…", "outro_sub": "…", "outro_voice": "…", "palette": 0}
-Сложность растёт: лёгкий → средний → сложный; 10 с на размышление; после ответа карточка переворачивается
-и голос читает пояснение; ролик не короче 62 с (пожелания владельца 11.11).
+Правила владельца (11.11): 5 вопросов, сложность растёт от «очень легко» до «очень сложно»; 10 с на размышление
+(таймер идёт, пока голос читает вопрос); после ответа карточка переворачивается и голос читает пояснение;
+ролик от 62 до 90 с.
 
 В ПАПКЕ_С_МОДЕЛЯМИ: models/z_image_turbo-Q4_0.gguf, models/qwen_3_4b-Q8_0.gguf, models/ae-f16.gguf,
 voices/ru_RU-<голос>-medium.onnx (+ .onnx.json). Модели и голоса в репозиторий не кладём — они большие.
@@ -37,12 +38,9 @@ PALETTES = [
     {"bg1": "#2448a8", "bg2": "#3fa9f5", "accent": "#ffb703"},   # синяя
     {"bg1": "#ff5f9e", "bg2": "#ffa58b", "accent": "#4d5bff"},   # розовая
 ]
-LEVELS = {
-    "Лёгкий": {"n": 1, "color": "#22c55e", "say": "Лёгкий вопрос."},
-    "Средний": {"n": 2, "color": "#f59e0b", "say": "Вопрос посложнее."},
-    "Сложный": {"n": 3, "color": "#ef4444", "say": "А теперь сложный вопрос."},
-}
-LEVEL_ORDER = ["Лёгкий", "Средний", "Сложный"]
+# Сложность растёт плавно: подписи по номеру вопроса (5 ступеней), цвет от зелёного к красному.
+LEVELS = [("ОЧЕНЬ ЛЕГКО", "#22c55e"), ("ЛЕГКО", "#84cc16"), ("СРЕДНЕ", "#f59e0b"),
+          ("СЛОЖНО", "#f97316"), ("ОЧЕНЬ СЛОЖНО", "#ef4444")]
 STYLE = ("vibrant flat vector cartoon illustration, bold clean outlines, playful bright colors, "
          "simple background, centered composition, high quality, no text, no letters, no words")
 
@@ -88,7 +86,7 @@ def placeholder(out: Path, w: int, h: int, color: str) -> Path:
 def say(text: str, voice: Path, out: Path, speed: float) -> np.ndarray:
     if not out.exists():
         subprocess.run([sys.executable, "-m", "piper", "-m", str(voice), "-f", str(out),
-                        "--length-scale", str(speed), "--sentence-silence", "0.25"],
+                        "--length-scale", str(speed), "--sentence-silence", "0.15"],
                        input=text.encode(), check=True, capture_output=True)
     with wave.open(str(out)) as w:
         assert w.getframerate() == SR, w.getframerate()
@@ -166,9 +164,10 @@ def main():
     ap.add_argument("--assets", required=True, help="папка с models/ и voices/")
     ap.add_argument("--work", help="рабочая папка (по умолчанию рядом с --out)")
     ap.add_argument("--voice", default="dmitri")
-    ap.add_argument("--speed", type=float, default=0.92, help="темп речи Piper: меньше — быстрее")
+    ap.add_argument("--speed", type=float, default=0.9, help="темп речи Piper: меньше — быстрее")
     ap.add_argument("--timer", type=float, default=10.0, help="секунд на размышление")
     ap.add_argument("--min-duration", type=float, default=62.0, help="ролик не короче, с")
+    ap.add_argument("--max-duration", type=float, default=90.0, help="ролик не длиннее, с")
     ap.add_argument("--steps", type=int, default=8)
     ap.add_argument("--threads", type=int, default=4)
     ap.add_argument("--no-images", action="store_true", help="без нейросети: заглушки вместо картинок")
@@ -186,65 +185,73 @@ def main():
     pal.update({"accent-dark": pal["accent"]})
     qs = quiz["questions"]
 
-    # картинки
+    # картинки: пути заранее (рисуем после проверки длины — это долго)
     painter = Painter(assets, a.threads)
     model_ok = not a.no_images and (assets / "models" / "z_image_turbo-Q4_0.gguf").exists()
+    jobs = []
 
     def picture(prompt, w, h, name, s):
         p = work / f"{name}_{hashlib.md5(f'{prompt}|{w}x{h}|{a.steps}|{s}'.encode()).hexdigest()[:8]}.png"
-        if model_ok:
-            return painter.paint(prompt, w, h, p, s, a.steps)
-        return placeholder(p, w, h, pal["accent"])
+        jobs.append((prompt, w, h, p, s))
+        return p
 
     cover = picture(quiz["cover_prompt"], 768, 768, "cover", seed)
-    images = [picture(q["image_prompt"], 768, 576, f"q{i + 1}", seed + i + 1) for i, q in enumerate(qs)]
+    images = [picture(q["image_prompt"], 768, 576, f"q{i + 1}", seed + q.get("seed_off", i + 1))
+              for i, q in enumerate(qs)]
 
-    # голос
+    # голос и раскладка по времени
     voice = assets / "voices" / f"ru_RU-{a.voice}-medium.onnx"
-    vo = lambda text, name: say(text, voice, work / f"{name}_{a.voice}_{hashlib.md5(text.encode()).hexdigest()[:8]}.wav", a.speed)
-    intro_voice = vo(quiz.get("intro_voice") or f"Квиз. {quiz['topic']}. {quiz['hook']}", "intro")
-    letters = "АБВГ"
-    clips, scenes, t = [], [], 0.0
+    vo = lambda text, name: say(text, voice, work / f"{name}_{a.voice}_{hashlib.md5(f'{text}|{a.speed}'.encode()).hexdigest()[:8]}.wav", a.speed)
+    intro_voice = vo(quiz.get("intro_voice") or f"Квиз про {quiz['topic']}! Проверь себя!", "intro")
+    clips, scenes = [], []
 
     d = len(intro_voice) / SR
-    scenes.append({"type": "intro", "start": 0.0, "end": max(0.6 + d + 0.7, 4.5)})
-    clips += [(whoosh(1), 0.05), (pop(), 0.25), (intro_voice, 0.6)]
+    scenes.append({"type": "intro", "start": 0.0, "end": max(0.3 + d + 0.4, 2.5), "icons": quiz.get("icons") or []})
+    clips += [(whoosh(1), 0.05), (pop(), 0.25), (intro_voice, 0.3)]
     t = scenes[-1]["end"]
 
+    report = []
     for i, q in enumerate(qs):
-        level_name = q.get("level") or LEVEL_ORDER[min(i * len(LEVEL_ORDER) // len(qs), len(LEVEL_ORDER) - 1)]
-        lvl = LEVELS[level_name]
-        qv = vo(f"{lvl['say']} {q.get('q_voice') or q['q']}", f"q{i + 1}")
-        right = q["options"][q["answer"]]
-        av = vo(q.get("answer_voice") or f"Правильный ответ: {right}.", f"a{i + 1}")
+        k = round(i * (len(LEVELS) - 1) / max(len(qs) - 1, 1))
+        level_name, level_color = q.get("level") or LEVELS[k][0], LEVELS[k][1]
+        qv = vo(q.get("q_voice") or q["q"], f"q{i + 1}")
         ev = vo(q.get("explain_voice") or q["explain"], f"e{i + 1}")
-        dq, da, de = len(qv) / SR, len(av) / SR, len(ev) / SR
-        t_timer = 0.5 + dq + 0.35
-        t_reveal = t_timer + a.timer
-        t_flip = t_reveal + 0.45 + da + 0.3
-        t_opts = [min(0.8 + j * 0.3, t_timer - 0.6 + j * 0.12) for j in range(len(q["options"]))]
+        dq, de = len(qv) / SR, len(ev) / SR
+        # таймер идёт с появления вопроса, пока голос его читает (владелец 11.11: 10 с, 5 вопросов, ≤ 90 с)
+        t_timer = 0.3
+        t_reveal = max(t_timer + a.timer, 0.3 + dq + 1.5)
+        t_flip = t_reveal + 0.5
+        t_opts = [0.6 + j * 0.25 for j in range(len(q["options"]))]
         s = {"type": "q", "idx": i, "total": len(qs), "q": q["q"], "options": q["options"], "answer": q["answer"],
-             "level": level_name, "level_n": lvl["n"], "level_color": lvl["color"],
+             "level": level_name, "level_n": k + 1, "level_max": len(LEVELS), "level_color": level_color,
              "explain": q["explain"], "explain_title": q.get("explain_title", "Пояснение"),
              "icons": q.get("icons") or quiz.get("icons") or [],
-             "image": images[i].resolve().as_uri(), "timer": a.timer,
+             "image": images[i].resolve().as_uri(), "timer": t_reveal - t_timer,
              "t_opts": t_opts, "t_timer": t_timer, "t_reveal": t_reveal, "t_flip": t_flip,
-             "start": t, "end": t + t_flip + 0.8 + de + 1.3}
+             "start": t, "end": t + t_flip + 0.35 + de + 0.3}
         scenes.append(s)
-        clips += [(whoosh(i + 2), t), (qv, t + 0.5)]
+        report.append(f"вопрос {i + 1}: читается {dq:.1f} с, пояснение {de:.1f} с, всего {s['end'] - t:.1f} с")
+        clips += [(whoosh(i + 2), t), (qv, t + 0.3)]
         clips += [(pop(), t + x) for x in t_opts]
-        n = int(a.timer)
-        clips += [(tick(k >= n - 3), t + t_timer + k) for k in range(n)]
-        clips += [(ding(), t + t_reveal), (av, t + t_reveal + 0.45)]
-        clips += [(whoosh(50 + i), t + t_flip), (ev, t + t_flip + 0.8)]
+        n = int(round(t_reveal - t_timer))
+        clips += [(tick(j >= n - 3), t + t_reveal - n + j) for j in range(n)]
+        clips += [(ding(), t + t_reveal), (whoosh(50 + i), t + t_flip), (ev, t + t_flip + 0.35)]
         t = s["end"]
 
-    ov = vo(quiz.get("outro_voice") or "Сколько правильных ответов у тебя? Напиши в комментариях!", "outro")
-    end = max(t + 0.4 + len(ov) / SR + 1.8, a.min_duration)
+    ov = vo(quiz.get("outro_voice") or "Сколько угадал? Пиши в комментариях!", "outro")
+    end = max(t + 0.3 + len(ov) / SR + 0.7, a.min_duration)
     scenes.append({"type": "outro", "start": t, "end": end, "icons": quiz.get("icons") or []})
-    clips += [(whoosh(99), t), (ding(), t + 0.5), (ov, t + 0.4)]
+    clips += [(whoosh(99), t), (ding(), t + 0.3), (ov, t + 0.3)]
     total = scenes[-1]["end"]
-    scenes[0]["icons"] = quiz.get("icons") or []
+    log(f"длина ролика {total:.1f} с; " + "; ".join(report))
+    if total > a.max_duration:
+        sys.exit(f"ОШИБКА: ролик {total:.1f} с длиннее {a.max_duration:.0f} с — сократи пояснения или вопросы")
+
+    for prompt, w, h, p, sd_seed in jobs:
+        if model_ok and not a.preview:
+            painter.paint(prompt, w, h, p, sd_seed, a.steps)
+        elif not p.exists():
+            placeholder(p, w, h, pal["accent"])
 
     tl = {"fps": 30, "duration": total, "seed": seed % 1000, "palette": pal, "topic": quiz["topic"],
           "hook": quiz["hook"], "cover": cover.resolve().as_uri(), "scenes": scenes,
