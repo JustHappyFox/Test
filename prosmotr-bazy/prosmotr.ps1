@@ -4373,8 +4373,7 @@ public class BaseCard : Form {
             CardValue v = Resolve(tok.Substring(0, comma));
             if (v != null) {
                 if (label.Trim().Length > 0) screen.Label(r, textCol, label, LabelColor);
-                if (v.Mark) screen.Label(r, col, v.Text, MarkColor);
-                else screen.Box(r, col, w, v.Text, v.Right);
+                screen.Box(r, col, w, v.Text, v.Right, v.Mark);
                 placed = true;
             }
             col += w;
@@ -4499,6 +4498,8 @@ public class BaseCard : Form {
         int rows;
         readonly List<KeyValuePair<Point, KeyValuePair<string, Color>>> texts = new List<KeyValuePair<Point, KeyValuePair<string, Color>>>();
         readonly List<KeyValuePair<int, string>> lines = new List<KeyValuePair<int, string>>();
+        // значения полей (для «Копировать всю карточку»)
+        readonly List<KeyValuePair<Point, string>> boxes = new List<KeyValuePair<Point, string>>();
         const int Edge = 2;
 
         public ScreenPanel(Font font) {
@@ -4522,8 +4523,15 @@ public class BaseCard : Form {
             while (Controls.Count > 0) { Control c = Controls[0]; Controls.RemoveAt(0); c.Dispose(); }
             texts.Clear();
             lines.Clear();
+            boxes.Clear();
             rows = 0;
             title = caption;
+            if (ContextMenuStrip == null) {
+                ContextMenuStrip = new ContextMenuStrip();
+                ToolStripMenuItem all = new ToolStripMenuItem("Копировать всю карточку");
+                all.Click += delegate { CopyText.Put(AllText()); };
+                ContextMenuStrip.Items.Add(all);
+            }
         }
 
         public void End() {
@@ -4542,19 +4550,66 @@ public class BaseCard : Form {
             rows = Math.Max(rows, row + 1);
         }
 
-        public void Box(int row, int col, int width, string value, bool right) {
+        public void Box(int row, int col, int width, string value, bool right) { Box(row, col, width, value, right, false); }
+
+        // значение поля: щелчок выделяет его целиком (протянуть мышью - часть), Ctrl+C копирует выделенное, ничего не выделено -
+        // всё поле; правая кнопка - «Копировать «значение»» / «Копировать всю карточку». Красные (mark) - тоже выделяются
+        public void Box(int row, int col, int width, string value, bool right, bool mark) {
             TextBox b = new TextBox();
             b.ReadOnly = true;
             b.BorderStyle = BorderStyle.None;
-            b.BackColor = BoxColor;
-            b.ForeColor = Color.White;
+            b.BackColor = mark ? Back : BoxColor;
+            b.ForeColor = mark ? MarkColor : Color.White;
             b.Font = CellFont;
             b.Text = value;
+            b.MouseUp += delegate(object s, MouseEventArgs e) { if (e.Button == MouseButtons.Left && b.SelectionLength == 0) b.SelectAll(); };
+            b.KeyDown += delegate(object s, KeyEventArgs e) {
+                if (e.Control && (e.KeyCode == Keys.C || e.KeyCode == Keys.Insert)) {
+                    e.Handled = true;
+                    e.SuppressKeyPress = true;
+                    CopyText.Put(b.SelectionLength > 0 ? b.SelectedText.Trim() : b.Text.Trim());
+                }
+            };
+            ContextMenuStrip m = new ContextMenuStrip();
+            string shown = value.Trim().Length > 40 ? value.Trim().Substring(0, 40) + "…" : value.Trim();
+            ToolStripMenuItem one = new ToolStripMenuItem(shown.Length > 0 ? "Копировать «" + shown + "»" : "Копировать значение");
+            one.Enabled = shown.Length > 0;
+            one.Click += delegate { CopyText.Put(b.SelectionLength > 0 && b.SelectionLength < b.TextLength ? b.SelectedText.Trim() : b.Text.Trim()); };
+            ToolStripMenuItem all = new ToolStripMenuItem("Копировать всю карточку");
+            all.Click += delegate { CopyText.Put(AllText()); };
+            m.Items.Add(one);
+            m.Items.Add(all);
+            m.Opening += delegate { b.Focus(); if (b.SelectionLength == 0) b.SelectAll(); };
+            b.ContextMenuStrip = m;
+            boxes.Add(new KeyValuePair<Point, string>(new Point(col, row), value));
             b.TextAlign = right ? HorizontalAlignment.Right : HorizontalAlignment.Left;
             b.Width = (int)Math.Ceiling(width * charW) + 3;
             b.Location = new Point(X(col) - 1, Y(row) + (lineH - b.Height) / 2);
             Controls.Add(b);
             rows = Math.Max(rows, row + 1);
+        }
+
+        // вся карточка текстом: строка экрана - строка текста (надписи и значения на своих местах), черта - «-----»
+        public string AllText() {
+            List<char[]> rowsText = new List<char[]>();
+            for (int i = 0; i < rows; i++) { char[] c = new char[Cols + 40]; for (int k = 0; k < c.Length; k++) c[k] = ' '; rowsText.Add(c); }
+            foreach (KeyValuePair<Point, KeyValuePair<string, Color>> t in texts) Put(rowsText, t.Key.Y, t.Key.X, t.Value.Key);
+            foreach (KeyValuePair<Point, string> b in boxes) Put(rowsText, b.Key.Y, b.Key.X, b.Value);
+            foreach (KeyValuePair<int, string> l in lines) {
+                string bar = new string('-', Cols);
+                if (l.Value != null) { string cap = " " + l.Value + " "; int at = Math.Max(0, (Cols - cap.Length) / 2); bar = bar.Substring(0, at) + cap + bar.Substring(Math.Min(Cols, at + cap.Length)); }
+                Put(rowsText, l.Key, 0, bar);
+            }
+            StringBuilder sb = new StringBuilder();
+            if (title.Length > 0) sb.Append(title).Append("\r\n");
+            foreach (char[] c in rowsText) sb.Append(new string(c).TrimEnd()).Append("\r\n");
+            return sb.ToString().TrimEnd();
+        }
+
+        static void Put(List<char[]> rowsText, int row, int col, string text) {
+            if (row < 0 || row >= rowsText.Count || text == null) return;
+            char[] c = rowsText[row];
+            for (int k = 0; k < text.Length && col + k < c.Length; k++) if (col + k >= 0) c[col + k] = text[k];
         }
 
         protected override void OnScroll(ScrollEventArgs se) {
