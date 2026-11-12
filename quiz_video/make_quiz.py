@@ -29,7 +29,7 @@ from pathlib import Path
 import numpy as np
 
 HERE = Path(__file__).resolve().parent
-SR = 22050  # частота голосов Piper medium
+SR = 44100  # частота звуковой дорожки (Piper даёт 22050 — пересчитываем)
 
 PALETTES = [
     {"bg1": "#ff8a3d", "bg2": "#ffc145", "accent": "#1fb6e8"},   # оранжевая
@@ -85,16 +85,20 @@ def placeholder(out: Path, w: int, h: int, color: str) -> Path:
 # ---------- голос ----------
 def say(text: str, voice: Path, out: Path, speed: float) -> np.ndarray:
     if not out.exists():
-        subprocess.run([sys.executable, "-m", "piper", "-m", str(voice), "-f", str(out),
+        raw = out.with_name(out.stem + "_raw.wav")
+        subprocess.run([sys.executable, "-m", "piper", "-m", str(voice), "-f", str(raw),
                         "--length-scale", str(speed), "--sentence-silence", "0.15"],
                        input=text.encode(), check=True, capture_output=True)
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(raw), "-ar", str(SR), str(out)], check=True)
     return read_voice(out)
 
 
-def read_voice(path: Path) -> np.ndarray:
+def read_voice(path: Path, peak_norm: bool = True) -> np.ndarray:
     with wave.open(str(path)) as w:
         assert w.getframerate() == SR, w.getframerate()
         a = np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16).astype(np.float32) / 32768
+    if not peak_norm:
+        return a
     peak = float(np.abs(a).max()) or 1.0
     return a * (0.85 / peak)
 
@@ -102,23 +106,16 @@ def read_voice(path: Path) -> np.ndarray:
 AUDIO_EXT = {".ogg", ".oga", ".opus", ".mp3", ".m4a", ".wav", ".aac", ".flac", ".mp4", ".webm"}
 
 
-def own_voice(src: Path, work: Path, name: str, pitch: float, tempo: float) -> np.ndarray:
-    """Живой голос из записи (голосовое Telegram и т.п.): чистим шум и тишину по краям, слегка меняем голос.
-
-    pitch — сдвиг в полутонах вместе с тембром (голос узнаётся хуже, но звучит естественно), tempo — скорость."""
-    key = hashlib.md5(f"{src.resolve()}|{src.stat().st_size}|{pitch}|{tempo}".encode()).hexdigest()[:8]
+def own_voice(src: Path, work: Path, name: str, opts: dict) -> np.ndarray:
+    """Живой голос из записи (голосовое Telegram и т.п.) — обработка voice_fx.py: шумы, тишина по краям,
+    лёгкий автотюн, немного другой голос (высота и тембр), ровная громкость."""
+    import voice_fx
+    code = hashlib.md5(Path(voice_fx.__file__).read_bytes()).hexdigest()[:6]  # правки обработки — пересобрать
+    key = hashlib.md5(f"{src.resolve()}|{src.stat().st_size}|{sorted(opts.items())}|{code}".encode()).hexdigest()[:8]
     out = work / f"{name}_own_{key}.wav"
     if not out.exists():
-        trim = "silenceremove=start_periods=1:start_threshold=-40dB:start_silence=0.08"
-        af = ["highpass=f=70", "afftdn=nf=-25", trim, "areverse", trim, "areverse"]
-        if pitch:
-            af.append(f"rubberband=pitch={2 ** (pitch / 12):.4f}")
-        if tempo != 1:
-            af.append(f"atempo={tempo}")
-        af.append("acompressor=threshold=-20dB:ratio=3:attack=5:release=120")
-        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(src), "-af", ",".join(af),
-                        "-ac", "1", "-ar", str(SR), "-c:a", "pcm_s16le", str(out)], check=True)
-    return read_voice(out)
+        voice_fx.process(src, out, SR, **opts)
+    return read_voice(out, peak_norm=False)  # громкость уже выровнена по RMS
 
 
 # ---------- звуки ----------
@@ -176,6 +173,62 @@ def music(total: float) -> np.ndarray:
     return out
 
 
+def music_calm(total: float) -> np.ndarray:
+    """Спокойная тихая подложка (владелец 12.11): мягкие аккорды Cmaj7–Am7–Fmaj7–G6 по 4 с и редкие
+    «капельки» на сильные доли. Без ударных, без резких атак."""
+    n = int(SR * (total + 2))
+    out = np.zeros(n, np.float32)
+    chords = [[48, 55, 59, 64], [45, 52, 55, 60], [41, 48, 52, 57], [43, 50, 52, 59]]
+    bar = 4.0
+    rng = np.random.default_rng(7)
+    k = 0
+    while k * bar < total + 1:
+        ch = chords[k % 4]
+        dur = bar + 1.5  # с перекрытием — аккорды перетекают
+        t = np.arange(int(SR * dur)) / SR
+        env = np.minimum(1, t / 0.9) * np.minimum(1, np.maximum(0, (dur - t) / 1.4))
+        pad = np.zeros_like(t)
+        for m in ch:
+            f = 440 * 2 ** ((m - 69) / 12)
+            for det in (-0.0015, 0.0015):  # лёгкая расстройка — «тёплый» пэд
+                ph = rng.uniform(0, 2 * np.pi)
+                pad += np.sin(2 * np.pi * f * (1 + det) * t + ph) + 0.12 * np.sin(4 * np.pi * f * (1 + det) * t)
+        a = int(k * bar * SR)
+        seg = (pad * env / (len(ch) * 2)).astype(np.float32)
+        out[a:a + len(seg)] += seg[:max(0, n - a)]
+        for beat in (0, 2):  # «капельки»: тоны аккорда октавой выше, тихо
+            m = ch[(k + beat) % len(ch)] + 24
+            f = 440 * 2 ** ((m - 69) / 12)
+            tt = np.arange(int(SR * 1.6)) / SR
+            drop = (np.sin(2 * np.pi * f * tt) * np.exp(-tt * 3.2) * np.minimum(1, tt / 0.01) * 0.35).astype(np.float32)
+            b = int((k * bar + beat) * SR)
+            out[b:b + len(drop)] += drop[:max(0, n - b)]
+        k += 1
+    end = int(SR * total)
+    fade = int(SR * 2.0)
+    out[end - fade:end] *= np.linspace(1, 0, fade)
+    out[end:] = 0
+    out[:int(SR * 1.0)] *= np.linspace(0, 1, int(SR * 1.0))
+    return out
+
+
+def duck(music: np.ndarray, voice: np.ndarray, depth_db: float) -> np.ndarray:
+    """Музыка тише, пока звучит голос (плавно: атака ~80 мс, отпускание ~500 мс)."""
+    w = int(SR * 0.02)
+    n = len(voice) // w
+    rms = np.sqrt(np.mean(voice[:n * w].reshape(n, w) ** 2, axis=1))
+    on = (rms > 10 ** (-40 / 20)).astype(np.float32)
+    env = np.zeros_like(on)
+    up, down = 1 - np.exp(-1 / 4), 1 - np.exp(-1 / 25)  # в окнах по 20 мс
+    v = 0.0
+    for i, x in enumerate(on):
+        v += (x - v) * (up if x > v else down)
+        env[i] = v
+    g = np.repeat(10 ** (-depth_db * env / 20), w)
+    g = np.concatenate([g, np.full(max(0, len(music) - len(g)), g[-1] if len(g) else 1.0)])[:len(music)]
+    return music * g.astype(np.float32)
+
+
 def mix(track: np.ndarray, clip: np.ndarray, at: float):
     a = int(at * SR)
     b = min(len(track), a + len(clip))
@@ -194,7 +247,9 @@ def main():
     ap.add_argument("--voice-files", help="папка с записями живого голоса по порядку: вступление, вопрос 1, "
                                           "пояснение 1, …, вопрос N, пояснение N, концовка (клиент 12.11)")
     ap.add_argument("--voice-pitch", type=float, default=-1.5, help="сдвиг живого голоса, полутона (0 — без изменений)")
-    ap.add_argument("--voice-tempo", type=float, default=1.0, help="скорость живого голоса (1.1 — на 10%% быстрее)")
+    ap.add_argument("--voice-tune", type=float, default=0.4, help="«автотюн»: доля подтяжки к нотам (0 — выкл., 1 — робот)")
+    ap.add_argument("--voice-formant", type=float, default=1.0, help="тембр живого голоса (<1 — ниже; сдвиг тембра хуже для разборчивости — проверка 12.11)")
+    ap.add_argument("--voice-tempo", type=float, default=1.0, help="скорость пояснений и концовки живым голосом (1.1 — на 10%% быстрее)")
     ap.add_argument("--timer", type=float, default=10.0, help="секунд на размышление")
     ap.add_argument("--min-duration", type=float, default=62.0, help="ролик не короче, с")
     ap.add_argument("--max-duration", type=float, default=90.0, help="ролик не длиннее, с")
@@ -204,7 +259,13 @@ def main():
     ap.add_argument("--threads", type=int, default=4)
     ap.add_argument("--no-images", action="store_true", help="без нейросети: заглушки вместо картинок")
     ap.add_argument("--no-music", action="store_true")
+    ap.add_argument("--music", choices=["calm", "box"], default="calm",
+                    help="calm — спокойная подложка (владелец 12.11), box — шкатулка-арпеджио")
+    ap.add_argument("--music-db", type=float, default=-30, help="громкость музыки без голоса, дБ (RMS)")
+    ap.add_argument("--duck-db", type=float, default=9, help="на сколько дБ музыка тише под голосом")
+    ap.add_argument("--loudness", type=float, default=-16, help="итоговая громкость, LUFS (−16 — голос не «кричит»)")
     ap.add_argument("--preview", help="только кадры PNG в эти секунды, через запятую")
+    ap.add_argument("--audio-only", action="store_true", help="только звуковая дорожка (audio.wav и audio.mp3)")
     a = ap.parse_args()
 
     quiz = json.loads(Path(a.quiz).read_text(encoding="utf-8"))
@@ -247,15 +308,19 @@ def main():
 
     def vo(text, name):
         if own:
-            return own_voice(own[name], work, name, a.voice_pitch, a.voice_tempo)
+            # ускоряем только пояснения и концовку: вопросы на длину ролика не влияют (таймер 10 с)
+            tempo = a.voice_tempo if name[0] in "eo" else 1.0
+            return own_voice(own[name], work, name, {"pitch": a.voice_pitch, "tune": a.voice_tune,
+                                                     "formant": a.voice_formant, "tempo": tempo})
         h = hashlib.md5(f"{text}|{a.speed}".encode()).hexdigest()[:8]
         return say(text, voice, work / f"{name}_{a.voice}_{h}.wav", a.speed)
     intro_voice = vo(quiz.get("intro_voice") or f"Квиз про {quiz['topic']}! Проверь себя!", "intro")
-    clips, scenes = [], []
+    clips, vclips, scenes = [], [], []  # vclips — голос (под него приглушаем музыку)
 
     d = len(intro_voice) / SR
     scenes.append({"type": "intro", "start": 0.0, "end": max(0.3 + d + 0.4, 2.5), "icons": quiz.get("icons") or []})
-    clips += [(whoosh(1), 0.05), (pop(), 0.25), (intro_voice, 0.3)]
+    clips += [(whoosh(1), 0.05), (pop(), 0.25)]
+    vclips += [(intro_voice, 0.3)]
     t = scenes[-1]["end"]
 
     report = []
@@ -279,24 +344,26 @@ def main():
              "start": t, "end": t + t_flip + 0.35 + de + 0.3}
         scenes.append(s)
         report.append(f"вопрос {i + 1}: читается {dq:.1f} с, пояснение {de:.1f} с, всего {s['end'] - t:.1f} с")
-        clips += [(whoosh(i + 2), t), (qv, t + 0.3)]
+        clips += [(whoosh(i + 2), t)]
+        vclips += [(qv, t + 0.3), (ev, t + t_flip + 0.35)]
         clips += [(pop(), t + x) for x in t_opts]
         n = int(round(t_reveal - t_timer))
         clips += [(tick(j >= n - 3), t + t_reveal - n + j) for j in range(n)]
-        clips += [(ding(), t + t_reveal), (whoosh(50 + i), t + t_flip), (ev, t + t_flip + 0.35)]
+        clips += [(ding(), t + t_reveal), (whoosh(50 + i), t + t_flip)]
         t = s["end"]
 
     ov = vo(quiz.get("outro_voice") or "Сколько угадал? Пиши в комментариях!", "outro")
     end = max(t + 0.3 + len(ov) / SR + 0.7, a.min_duration)
     scenes.append({"type": "outro", "start": t, "end": end, "icons": quiz.get("icons") or []})
-    clips += [(whoosh(99), t), (ding(), t + 0.3), (ov, t + 0.3)]
+    clips += [(whoosh(99), t), (ding(), t + 0.3)]
+    vclips += [(ov, t + 0.3)]
     total = scenes[-1]["end"]
     log(f"длина ролика {total:.1f} с; " + "; ".join(report))
     if total > a.max_duration:
         sys.exit(f"ОШИБКА: ролик {total:.1f} с длиннее {a.max_duration:.0f} с — сократи пояснения или вопросы")
 
     for j, (prompt, w, h, p, sd_seed) in enumerate(jobs):
-        if model_ok and not a.preview:
+        if model_ok and not a.preview and not a.audio_only:
             painter.paint(prompt, w, h, p, sd_seed, a.steps)
         elif not p.exists():  # заглушка под другим именем, чтобы не принять её потом за готовую картинку
             stub = p.with_name(p.stem + "_stub.png")
@@ -324,11 +391,17 @@ def main():
         return
 
     track = np.zeros(int(SR * (total + 1)), np.float32)
+    vtrack = np.zeros_like(track)
+    for clip, at in vclips:
+        mix(vtrack, clip, at)
     if not a.no_music:
-        m = music(total)
-        track += m[:len(track)]
+        m = (music_calm if a.music == "calm" else music)(total)[:len(track)]
+        rms = float(np.sqrt(np.mean(m[m != 0] ** 2))) or 1.0
+        m = m * (10 ** (a.music_db / 20) / rms)        # музыка тихая и одинаковая по громкости
+        track += duck(m, vtrack, a.duck_db)            # и ещё тише, пока говорит голос
     for clip, at in clips:
         mix(track, clip, at)
+    track += vtrack
     track = np.clip(track, -1, 1)
     audio = work / "audio.wav"
     with wave.open(str(audio), "wb") as w:
@@ -337,11 +410,18 @@ def main():
         w.setframerate(SR)
         w.writeframes((track * 32767).astype(np.int16).tobytes())
 
+    if a.audio_only:
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(audio), "-af",
+                        f"loudnorm=I={a.loudness}:TP=-1.5:LRA=11", "-ar", "44100", "-b:a", "160k",
+                        str(work / "audio.mp3")], check=True)
+        log("звук:", work / "audio.mp3")
+        return
+
     video = work / "video.mp4"
     log(f"рендер кадров: {total:.1f} с ролика…")
     subprocess.run(["node", str(HERE / "render.js"), str(tl_path), str(video)], check=True)
     subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(video), "-i", str(audio), "-map", "0:v", "-map", "1:a",
-                    "-c:v", "copy", "-af", "loudnorm=I=-14:TP=-1.5:LRA=11", "-ar", "44100", "-c:a", "aac",
+                    "-c:v", "copy", "-af", f"loudnorm=I={a.loudness}:TP=-1.5:LRA=11", "-ar", "44100", "-c:a", "aac",
                     "-b:a", "160k", "-shortest", "-movflags", "+faststart", str(out)], check=True)
     log(f"готово: {out} ({out.stat().st_size / 1e6:.1f} МБ, {total:.0f} с)")
 
