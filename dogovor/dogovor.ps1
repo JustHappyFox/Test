@@ -15992,9 +15992,12 @@ public class DogovorForm : Form {
         Dictionary<string, int> r = new Dictionary<string, int>();
         // длинное название н.п. - мельче, чтобы влезло в свою линию (217 пт)
         string np;
-        if (v.TryGetValue("НП", out np))
+        if (v.TryGetValue("НП", out np)) { int hp = NpSize(np.Replace("\t", "")); if (hp < 20) r["НП"] = hp; }
+        // инициалы потребителя в строках СМС: от линии подписи до правого края 170 пт
+        string sms;
+        if (v.TryGetValue("ПОТР_СМС", out sms))
             for (int hp = 20; hp >= 14; hp--)
-                if (Fit.Width(np, hp / 2f, true) <= 205f || hp == 14) { if (hp < 20) r["НП"] = hp; break; }
+                if (Fit.Width(sms, hp / 2f, false) <= 165f || hp == 14) { if (hp < 20) r["ПОТР_СМС"] = hp; break; }
         foreach (string k in new string[] { "ПУ1_ЦЕЛЬ", "ПУ2_ЦЕЛЬ" }) {
             string s;
             if (!v.TryGetValue(k, out s) || s.Length == 0) continue;
@@ -16006,6 +16009,30 @@ public class DogovorForm : Form {
         }
         return r;
     }
+
+    // размер н.п. (полупункты): длинное название мельче, чтобы влезло в свою линию (217 пт)
+    static int NpSize(string np) {
+        for (int hp = 20; hp > 14; hp--) if (Fit.Width(np, hp / 2f, true) <= 205f) return hp;
+        return 14;
+    }
+
+    // Места вставки (12.11): линия - подчёркнутые табуляции в значении (одно подчёркивание с текстом, без разрывов);
+    // в шаблоне у абзаца - только позиции табуляций.
+    // по центру линии постоянной длины: «\tзначение\t»; пусто - вся линия; не влезает в линию - без табуляций
+    // (иначе табуляция уйдёт за линию и рядом появится лишний кусок линии)
+    static string Zone(string text, float pt, bool bold, float widthPt) {
+        if (text.Length == 0) return "\t\t" + Zw;
+        return Fit.Width(text, pt, bold) <= widthPt - 6f ? "\t" + text + "\t" + Zw : text;
+    }
+
+    // значение, а пусто - линия до табуляции абзаца (до края строки)
+    static string OrLine(string text) { return text.Length > 0 ? text : "\t" + Zw; }
+
+    // знак нулевой ширины после линии: линия в конце абзаца без него не рисуется (LibreOffice); в Word не виден
+    const string Zw = "\u200b";
+
+    // пусто посреди строки - подчёркнутые пробелы
+    static string OrGap(string text) { return text.Length > 0 ? text : new string('\u00a0', 14); }
 
     static string LowerFirst(string s) {
         if (s.Length < 2 || !char.IsUpper(s[0]) || char.IsUpper(s[1])) return s;
@@ -16034,29 +16061,32 @@ public class DogovorForm : Form {
         string np = UpperFirst(V("np"));
         if (tip.ToUpper() == "СТ" || tip.ToLower() == "с/т") np = tip + " «" + np.Trim('«', '»', '"') + "»";
         // название - по центру своей линии (линия постоянной длины - табуляции в шаблоне); длинное - мельче (Sizes)
-        v["НП"] = np;
-        v["АДРЕС_ОБЪЕКТА"] = V("adres");
-        v["ПОДП_В_ЛИЦЕ"] = (Flat(V("podp_dolzh")) + " " + Flat(V("podp_fio"))).Trim();
-        v["ПОДП_ДОВЕРЕННОСТЬ"] = V("podp_dov");
+        v["НП"] = np.Length == 0 ? "\t\t" + Zw : Fit.Width(np, NpSize(np) / 2f, true) <= 211f ? "\t" + np + "\t" + Zw : np;
+        v["АДРЕС_ОБЪЕКТА"] = OrLine(V("adres"));
+        v["ПОДП_В_ЛИЦЕ"] = OrLine((Flat(V("podp_dolzh")) + " " + Flat(V("podp_fio"))).Trim());
+        // «доверенности № ...» и линия до 387 пт; длинная доверенность - без линии (не уедет на следующую строку)
+        string pdov = V("podp_dov");
+        v["ПОДП_ДОВЕРЕННОСТЬ"] = Fit.Width("действующего(ей) на основании доверенности " + pdov, 10f, false) <= 380f ? pdov + "\t" + Zw : pdov;
         v["ПОДП_ИНИЦ"] = V("podp_inic");
         v["ОФОРМИЛ_ИНИЦ"] = Initials(V("oformil"));
-        v["АДРЕС_СООБЩАТЬ"] = V("soob_adres");
-        v["ТЕЛ_СООБЩАТЬ"] = V("soob_tel");
-        v["ФИО"] = V("fio");
+        v["АДРЕС_СООБЩАТЬ"] = OrGap(V("soob_adres"));
+        v["ТЕЛ_СООБЩАТЬ"] = OrGap(V("soob_tel"));
+        v["ФИО"] = OrLine(V("fio"));
         v["ПОТР_ИНИЦ"] = V("potr_inic");
-        v["ЛИЧНЫЙ_НОМЕР"] = V("lichny");
-        v["АДРЕС_ПРОЖИВАНИЯ"] = V("adres_prozh");
-        v["ТЕЛЕФОН"] = V("telefon").Length > 0 ? V("telefon") : Line(31, '_');
-        v["ОБЪЕКТ"] = LowerFirst(V("obekt"));
+        v["ПОТР_СМС"] = V("potr_inic");          // то же - в строках СМС (место 170 пт: длинное - мельче, Sizes)
+        v["ЛИЧНЫЙ_НОМЕР"] = Zone(V("lichny"), 10f, true, 139f);
+        v["АДРЕС_ПРОЖИВАНИЯ"] = OrLine(V("adres_prozh"));
+        v["ТЕЛЕФОН"] = OrLine(V("telefon"));
+        v["ОБЪЕКТ"] = OrLine(LowerFirst(V("obekt")));
         string kad = V("kadastr");
         bool digits = kad.Length > 0;
         foreach (char ch in kad) if (!char.IsDigit(ch)) digits = false;
         v["КАДАСТР"] = digits ? "к.н." + kad : kad;
         // кадастрового номера нет, а потребитель по доверенности - пустой строки под 28.1 нет, на её месте 28.2
         if (kad.Length == 0 && V("dov") == "1") v["КАДАСТР"] = DocxTemplate.Drop;
-        v["МОЩНОСТЬ"] = Kw(V("moshn"), "");
-        v["МОЩНОСТЬ_ОТОПЛ"] = Kw(V("moshn_otopl"), "0,0");
-        v["ДОПУСК"] = V("dopusk_nom").Length == 0 ? "" :
+        v["МОЩНОСТЬ"] = Zone(Kw(V("moshn"), ""), 10f, false, 60f);
+        v["МОЩНОСТЬ_ОТОПЛ"] = Zone(Kw(V("moshn_otopl"), "0,0"), 10f, false, 85f);
+        v["ДОПУСК"] = V("dopusk_nom").Length == 0 ? "\t" + Zw :
             (V("dopusk_nom") + " от " + V("dopusk_data") + " г. " + V("dopusk_kem")).Trim();
         string pr = V("prochie").TrimEnd('.', ' ');
         if (pr.Length == 0) v["ПРОЧИЕ_УСЛОВИЯ"] = "";
@@ -16075,20 +16105,20 @@ public class DogovorForm : Form {
             if (i == 2 && !two) {
                 string dash = Line(42, '-'), shortDash = Line(16, '-');
                 // как в эталонном договоре с одним счётчиком
-                v[f + "НОМ"] = "_";
-                v[f + "НОМ_Т"] = Line(14, '-');           // прочерк - по центру линии (табуляции в шаблоне)
+                v[f + "НОМ"] = "\t\t" + Zw;                     // в таблице - пустая линия
+                v[f + "НОМ_Т"] = "\t" + Line(14, '-') + "\t" + Zw;  // в тарифах - прочерк по центру линии
                 v[f + "ЦЕЛЬ"] = shortDash;
                 foreach (string k in new string[] { "ТИП", "ЗАВ", "ПОВЕРКА", "ПЛОМБА_ГП", "ФАЗ", "МЕСТО", "ПРИНАДЛ", "МОДЕМ", "ПОКАЗ", "МОДУЛЬ" }) v[f + k] = dash;
                 foreach (string k in new string[] { "ВВОД_ТИП", "ВВОД_I", "ЗАЩ_ТИП", "ЗАЩ_I" }) v[f + k] = shortDash;
                 v["□" + f + "АСКУЭ_ДА"] = v["□" + f + "АСКУЭ_НЕТ"] = "0";
                 v["□" + f + "ОДНОСТ"] = v["□" + f + "ДИФФ"] = "0";
-                v[f + "ПЕРИОДЫ"] = Line(14, '-');
+                v[f + "ПЕРИОДЫ"] = "\t" + Line(14, '-') + "\t" + Zw;
                 v[f + "ТАРИФ"] = v[f + "ТАРИФ_Д"] = v[f + "ЗПТ"] = v[f + "ЗПТ_Д"] = "";
                 v[f + "НАГРЕВ"] = v[f + "НАГРЕВ_Д"] = "";
                 continue;
             }
-            v[f + "НОМ"] = i.ToString();
-            if (i == 2) v[f + "НОМ_Т"] = "2";
+            v[f + "НОМ"] = "\t" + i + "\t" + Zw;
+            if (i == 2) v[f + "НОМ_Т"] = "\t2\t" + Zw;
             v[f + "ЦЕЛЬ"] = V(p + "cel");
             v[f + "ТИП"] = V(p + "tip");
             v[f + "ЗАВ"] = V(p + "zav");
@@ -16111,7 +16141,7 @@ public class DogovorForm : Form {
             bool diff = per.Length > 0;
             v["□" + f + "ОДНОСТ"] = V(p + "tarif") == Tarifs[0] ? "1" : "0";
             v["□" + f + "ДИФФ"] = diff ? "1" : "0";
-            v[f + "ПЕРИОДЫ"] = diff ? per : "";          // нет - пустая линия (её длина - в шаблоне)
+            v[f + "ПЕРИОДЫ"] = Zone(diff ? per : "", 10f, false, 30f);   // нет - пустая линия (её длина - в шаблоне)
             // тарифная группа (жирным, после запятой) и электронагреватели - под выбранным тарифом
             string heat = V(p + "nagrev"), comma = group.Length > 0 ? ", " : "";
             v[f + "ЗПТ"] = diff ? "" : comma;
@@ -16130,17 +16160,19 @@ public class DogovorForm : Form {
             v["□" + q[1] + "_НЕТ"] = V(q[0]) == "нет" ? "1" : "0";
         }
         v["ДОП_ИНФО"] = V("dop_info").Length > 0 ? V("dop_info") : Line(94, '_');
-        v["ЛЬГОТА"] = V("lgota").Length > 0 ? V("lgota") : Line(78, '_');
+        // льгота: значение и линия до края - одним подчёркиванием (длинное - без линии); пусто - линия
+        string lg = V("lgota");
+        v["ЛЬГОТА"] = lg.Length == 0 ? "\t" + Zw : Fit.Width("Оформлена льгота ", 10f, true) + Fit.Width(lg, 10f, false) <= 462f ? lg + "\t" + Zw : lg;
         string os = V("osobye");
         if (V("utratil") == "1") {
             string u = "Считать утратившим силу приложение к договору № " + V("utratil_nom") + " от " + V("utratil_ot") + ".";
             os = os.Length > 0 ? os + "\n" + u : u;
         }
-        v["ОСОБЫЕ"] = os.Length > 0 ? os : Line(93, '_');
+        v["ОСОБЫЕ"] = os.Length > 0 ? os : Line(94, '_');
         bool sms = V("sms") == "согласен(а)";
         v["□СМС_ДА"] = sms ? "1" : "0";
         v["□СМС_НЕТ"] = V("sms") == "отказ" ? "1" : "0";
-        v["СМС_ТЕЛ"] = sms && Digits(V("sms_tel")).Length >= 9 ? V("sms_tel") : Line(13, '_');
+        v["СМС_ТЕЛ"] = Zone(sms && Digits(V("sms_tel")).Length >= 9 ? V("sms_tel") : "", 10f, false, 150f);
         return v;
     }
 
