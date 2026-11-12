@@ -11,7 +11,7 @@ quiz.json:
    "outro_title": "…", "outro_sub": "…", "outro_voice": "…", "palette": 0}
 Правила владельца (11.11): 5 вопросов, сложность растёт от «очень легко» до «очень сложно»; 10 с на размышление
 (таймер идёт, пока голос читает вопрос); после ответа карточка переворачивается и голос читает пояснение;
-ролик от 62 до 90 с.
+ролик от 62 с; 90 с — ориентир (владелец 12.11): главное, чтобы каждый текст успели прочитать.
 
 В ПАПКЕ_С_МОДЕЛЯМИ: models/z_image_turbo-Q4_0.gguf, models/qwen_3_4b-Q8_0.gguf, models/ae-f16.gguf,
 voices/ru_RU-<голос>-medium.onnx (+ .onnx.json). Модели и голоса в репозиторий не кладём — они большие.
@@ -252,7 +252,11 @@ def main():
     ap.add_argument("--voice-tempo", type=float, default=1.0, help="скорость пояснений и концовки живым голосом (1.1 — на 10%% быстрее)")
     ap.add_argument("--timer", type=float, default=10.0, help="секунд на размышление")
     ap.add_argument("--min-duration", type=float, default=62.0, help="ролик не короче, с")
-    ap.add_argument("--max-duration", type=float, default=90.0, help="ролик не длиннее, с")
+    ap.add_argument("--max-duration", type=float, default=100.0,
+                    help="ориентир длины, с: длиннее — только предупреждение (владелец 12.11: 90 с — ориентировочно, "
+                         "можно 95–100, главное — чтобы текст успели прочитать)")
+    ap.add_argument("--read-cps", type=float, default=15.0,
+                    help="скорость чтения зрителя, знаков в секунду: пояснение висит, пока его можно прочитать")
     ap.add_argument("--steps", type=int, default=6)
     ap.add_argument("--image-size", default="512x384", help="картинки вопросов (рисунки, не фото — владелец 11.11)")
     ap.add_argument("--cover-size", default="512x512")
@@ -266,6 +270,8 @@ def main():
     ap.add_argument("--loudness", type=float, default=-16, help="итоговая громкость, LUFS (−16 — голос не «кричит»)")
     ap.add_argument("--preview", help="только кадры PNG в эти секунды, через запятую")
     ap.add_argument("--audio-only", action="store_true", help="только звуковая дорожка (audio.wav и audio.mp3)")
+    ap.add_argument("--images-only", action="store_true",
+                    help="только нарисовать картинки (пока клиент записывает голос — экономим время)")
     a = ap.parse_args()
 
     quiz = json.loads(Path(a.quiz).read_text(encoding="utf-8"))
@@ -294,6 +300,16 @@ def main():
     images = [picture(q["image_prompt"], qw, qh, f"q{i + 1}", seed + q.get("seed_off", i + 1))
               for i, q in enumerate(qs)]
 
+    if a.images_only:
+        for prompt, w, h, p, sd_seed in jobs:
+            if model_ok:
+                painter.paint(prompt, w, h, p, sd_seed, a.steps)
+        log("картинки готовы:", ", ".join(p.name for *_, p, _s in jobs))
+        return
+
+    def read_time(text: str) -> float:  # сколько секунд нужно, чтобы спокойно прочитать текст
+        return len(text) / a.read_cps + 1.0
+
     # голос и раскладка по времени
     voice = assets / "voices" / f"ru_RU-{a.voice}-medium.onnx"
     own = {}
@@ -318,7 +334,8 @@ def main():
     clips, vclips, scenes = [], [], []  # vclips — голос (под него приглушаем музыку)
 
     d = len(intro_voice) / SR
-    scenes.append({"type": "intro", "start": 0.0, "end": max(0.3 + d + 0.4, 2.5), "icons": quiz.get("icons") or []})
+    scenes.append({"type": "intro", "start": 0.0, "end": max(0.3 + d + 0.4, 2.5, 0.3 + read_time(quiz["hook"]) * 0.6),
+                   "icons": quiz.get("icons") or []})
     clips += [(whoosh(1), 0.05), (pop(), 0.25)]
     vclips += [(intro_voice, 0.3)]
     t = scenes[-1]["end"]
@@ -341,9 +358,10 @@ def main():
              "icons": q.get("icons") or quiz.get("icons") or [],
              "image": images[i].resolve().as_uri(), "timer": t_reveal - t_timer,
              "t_opts": t_opts, "t_timer": t_timer, "t_reveal": t_reveal, "t_flip": t_flip,
-             "start": t, "end": t + t_flip + 0.35 + de + 0.3}
+             "start": t, "end": t + t_flip + 0.35 + max(de + 0.3, read_time(q["explain"]))}
         scenes.append(s)
-        report.append(f"вопрос {i + 1}: читается {dq:.1f} с, пояснение {de:.1f} с, всего {s['end'] - t:.1f} с")
+        report.append(f"вопрос {i + 1}: читается {dq:.1f} с, пояснение {de:.1f} с (чтение {read_time(q['explain']):.1f} с), "
+                      f"всего {s['end'] - t:.1f} с")
         clips += [(whoosh(i + 2), t)]
         vclips += [(qv, t + 0.3), (ev, t + t_flip + 0.35)]
         clips += [(pop(), t + x) for x in t_opts]
@@ -360,7 +378,7 @@ def main():
     total = scenes[-1]["end"]
     log(f"длина ролика {total:.1f} с; " + "; ".join(report))
     if total > a.max_duration:
-        sys.exit(f"ОШИБКА: ролик {total:.1f} с длиннее {a.max_duration:.0f} с — сократи пояснения или вопросы")
+        log(f"ВНИМАНИЕ: ролик {total:.1f} с длиннее ориентира {a.max_duration:.0f} с (не ошибка — владелец 12.11)")
 
     for j, (prompt, w, h, p, sd_seed) in enumerate(jobs):
         if model_ok and not a.preview and not a.audio_only:
