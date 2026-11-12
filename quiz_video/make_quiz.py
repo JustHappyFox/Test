@@ -88,11 +88,37 @@ def say(text: str, voice: Path, out: Path, speed: float) -> np.ndarray:
         subprocess.run([sys.executable, "-m", "piper", "-m", str(voice), "-f", str(out),
                         "--length-scale", str(speed), "--sentence-silence", "0.15"],
                        input=text.encode(), check=True, capture_output=True)
-    with wave.open(str(out)) as w:
+    return read_voice(out)
+
+
+def read_voice(path: Path) -> np.ndarray:
+    with wave.open(str(path)) as w:
         assert w.getframerate() == SR, w.getframerate()
         a = np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16).astype(np.float32) / 32768
     peak = float(np.abs(a).max()) or 1.0
     return a * (0.85 / peak)
+
+
+AUDIO_EXT = {".ogg", ".oga", ".opus", ".mp3", ".m4a", ".wav", ".aac", ".flac", ".mp4", ".webm"}
+
+
+def own_voice(src: Path, work: Path, name: str, pitch: float, tempo: float) -> np.ndarray:
+    """Живой голос из записи (голосовое Telegram и т.п.): чистим шум и тишину по краям, слегка меняем голос.
+
+    pitch — сдвиг в полутонах вместе с тембром (голос узнаётся хуже, но звучит естественно), tempo — скорость."""
+    key = hashlib.md5(f"{src.resolve()}|{src.stat().st_size}|{pitch}|{tempo}".encode()).hexdigest()[:8]
+    out = work / f"{name}_own_{key}.wav"
+    if not out.exists():
+        trim = "silenceremove=start_periods=1:start_threshold=-40dB:start_silence=0.08"
+        af = ["highpass=f=70", "afftdn=nf=-25", trim, "areverse", trim, "areverse"]
+        if pitch:
+            af.append(f"rubberband=pitch={2 ** (pitch / 12):.4f}")
+        if tempo != 1:
+            af.append(f"atempo={tempo}")
+        af.append("acompressor=threshold=-20dB:ratio=3:attack=5:release=120")
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(src), "-af", ",".join(af),
+                        "-ac", "1", "-ar", str(SR), "-c:a", "pcm_s16le", str(out)], check=True)
+    return read_voice(out)
 
 
 # ---------- звуки ----------
@@ -165,6 +191,10 @@ def main():
     ap.add_argument("--work", help="рабочая папка (по умолчанию рядом с --out)")
     ap.add_argument("--voice", default="dmitri")
     ap.add_argument("--speed", type=float, default=0.9, help="темп речи Piper: меньше — быстрее")
+    ap.add_argument("--voice-files", help="папка с записями живого голоса по порядку: вступление, вопрос 1, "
+                                          "пояснение 1, …, вопрос N, пояснение N, концовка (клиент 12.11)")
+    ap.add_argument("--voice-pitch", type=float, default=-1.5, help="сдвиг живого голоса, полутона (0 — без изменений)")
+    ap.add_argument("--voice-tempo", type=float, default=1.0, help="скорость живого голоса (1.1 — на 10%% быстрее)")
     ap.add_argument("--timer", type=float, default=10.0, help="секунд на размышление")
     ap.add_argument("--min-duration", type=float, default=62.0, help="ролик не короче, с")
     ap.add_argument("--max-duration", type=float, default=90.0, help="ролик не длиннее, с")
@@ -205,7 +235,21 @@ def main():
 
     # голос и раскладка по времени
     voice = assets / "voices" / f"ru_RU-{a.voice}-medium.onnx"
-    vo = lambda text, name: say(text, voice, work / f"{name}_{a.voice}_{hashlib.md5(f'{text}|{a.speed}'.encode()).hexdigest()[:8]}.wav", a.speed)
+    own = {}
+    if a.voice_files:  # живой голос вместо Piper
+        files = sorted(p for p in Path(a.voice_files).iterdir() if p.suffix.lower() in AUDIO_EXT)
+        names = ["intro"] + [f"{k}{i + 1}" for i in range(len(qs)) for k in ("q", "e")] + ["outro"]
+        if len(files) != len(names):
+            sys.exit(f"ОШИБКА: записей {len(files)}, а нужно {len(names)} (вступление, вопрос и пояснение ×{len(qs)}, "
+                     f"концовка)")
+        own = dict(zip(names, files))
+        log("живой голос:", ", ".join(f"{n}={p.name}" for n, p in own.items()))
+
+    def vo(text, name):
+        if own:
+            return own_voice(own[name], work, name, a.voice_pitch, a.voice_tempo)
+        h = hashlib.md5(f"{text}|{a.speed}".encode()).hexdigest()[:8]
+        return say(text, voice, work / f"{name}_{a.voice}_{h}.wav", a.speed)
     intro_voice = vo(quiz.get("intro_voice") or f"Квиз про {quiz['topic']}! Проверь себя!", "intro")
     clips, scenes = [], []
 
