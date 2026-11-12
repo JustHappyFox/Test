@@ -3,9 +3,9 @@
 
   python voice_fx.py ВХОД ВЫХОД.wav [--pitch -1.5] [--tune 0.4] [--formant 1.0] [--tempo 1.0]
 
-Цепочка: срез низа, щелчки → шумоподавление (спектральный гейт) → обрезка тишины по краям →
+Цепочка: срез низа, щелчки → мягкое шумоподавление (afftdn) → обрезка тишины по краям →
 Praat (PSOLA): лёгкая подтяжка высоты к ближайшей ноте («автотюн»), сдвиг высоты, при нужде — ускорение →
-эквалайзер, де-эссер, мягкий компрессор → ровная громкость (RMS −18 дБ).
+эквалайзер (подъём 1,3–3,5 кГц против «зажатого носа»), мягкий компрессор → ровная громкость (RMS −18 дБ).
 Проверка 12.11 распознаванием речи: WORLD-вокодер и сдвиг тембра (formant) портят разборчивость,
 Praat с formant=1.0 — нет, поэтому по умолчанию Praat без сдвига тембра.
 """
@@ -114,45 +114,42 @@ def retune_praat(x: np.ndarray, sr: int, pitch: float, tune: float, formant: flo
 
 
 def process(src: Path, out: Path, out_sr: int, pitch: float = -1.5, tune: float = 0.4, formant: float = 1.0,
-            expand: float = 1.0, tempo: float = 1.0, nr_strength: float = 0.7, nr_extra: float = 0.0,
-            gate: bool = False, engine: str = "praat") -> Path:
-    import noisereduce as nr
+            expand: float = 1.0, tempo: float = 1.0, denoise: str = "afftdn", engine: str = "praat") -> Path:
+    """Владелец 12.11 после «Машины»: «голос приглушённый, как будто с зажатым носом». Разбор спектра:
+    в её записях (микрофон телефона) провал 1,3–2 кГц на ~10 дБ против чистого голоса и много низов;
+    noisereduce добавлял «подводный» призвук. Поэтому: мягкий шумодав ffmpeg, подъём 1,3–3,5 кГц,
+    меньше низов, фильтры с двойной точностью, громкость — мягким ограничителем, без обрезки."""
     import soundfile as sf
     x = decode(src)
-    x = ffilter(x, "highpass=f=75,lowpass=f=12000,adeclick")
-    # шумоподавление: стационарный шум (гул, шипение) + мягкий гейт для посторонних звуков между словами
-    x = nr.reduce_noise(y=x, sr=FS, stationary=True, prop_decrease=nr_strength, n_fft=2048).astype(np.float32)
-    if nr_extra:  # нестационарные шумы (стук, шорох); сильнее — страдают согласные
-        x = nr.reduce_noise(y=x, sr=FS, stationary=False, prop_decrease=nr_extra, n_fft=2048,
-                            time_mask_smooth_ms=80, freq_mask_smooth_hz=300).astype(np.float32)
+    x = ffilter(x, "highpass=f=80,adeclick")
+    if denoise == "afftdn":    # мягко: гул и шипение, голос не трогаем
+        x = ffilter(x, "afftdn=nr=10:nf=-50:tn=1")
+    elif denoise == "nr":      # старый вариант (noisereduce) — даёт призвук, не по умолчанию
+        import noisereduce as nr
+        x = nr.reduce_noise(y=x, sr=FS, stationary=True, prop_decrease=0.7, n_fft=2048).astype(np.float32)
     x = trim(x)
-    x = x / (np.abs(x).max() + 1e-9) * 0.8
+    x = x / (np.abs(x).max() + 1e-9) * 0.5   # запас по громкости: подъёмы эквалайзера без перегруза
     if engine == "praat":
         x = retune_praat(x, FS, pitch, tune, formant, expand, tempo)
-        tempo = 1.0
     elif pitch or tune or formant != 1.0 or expand != 1.0:
         x = retune(x, FS, pitch, tune, formant, expand)
-    chain = ["highpass=f=80",
-             "equalizer=f=250:t=q:w=1.2:g=-2.5",      # убрать «бубнение»
-             "equalizer=f=3200:t=q:w=1.0:g=2",        # разборчивость
-             "equalizer=f=9000:t=q:w=1.5:g=-1.5",     # мягче верх
-             "deesser=i=0.5",
-             "acompressor=threshold=-24dB:ratio=3:attack=8:release=160:makeup=3",
-             "alimiter=limit=0.89"]
-    if gate:  # шорохи в паузах тише
-        chain.insert(-1, "agate=threshold=0.012:ratio=2:attack=5:release=120")
-    if tempo != 1.0:
-        chain.insert(0, f"atempo={tempo}")
-    y = ffilter(x, ",".join(chain), FS, out_sr)
+    eq = ["highpass=f=90:r=f64",
+          "equalizer=f=200:t=q:w=0.8:g=-3:r=f64",     # меньше «бубнения» и гула
+          "equalizer=f=700:t=q:w=1.2:g=-3:r=f64",     # «гнусавость»: избыток 500–800 Гц
+          "equalizer=f=1600:t=q:w=0.8:g=8:r=f64",     # открыть голос: провал 1,3–2 кГц — тот самый «нос»
+          "equalizer=f=3200:t=q:w=1.0:g=3:r=f64",     # разборчивость согласных
+          "highshelf=f=7000:g=2:r=f64",               # немного воздуха
+          "acompressor=threshold=-26dB:ratio=2.5:attack=10:release=150"]
+    y = ffilter(x, ",".join(eq), FS, out_sr)
     y = trim(y, out_sr, thr_db=-45, pad=0.04)
-    # ровная громкость клипов: по RMS звонкой части
+    # ровная громкость клипов: по RMS звонкой части, пики — мягким ограничителем
     w = int(out_sr * 0.05)
     n = max(1, len(y) // w)
     rms = np.sqrt(np.mean(y[:n * w].reshape(n, w) ** 2, axis=1) + 1e-12)
     loud = rms[rms > rms.max() * 0.25]
     y = y * (10 ** (-18 / 20) / (np.sqrt(np.mean(loud ** 2)) + 1e-9))
-    y = np.clip(y, -0.95, 0.95)
-    sf.write(out, y, out_sr, subtype="PCM_16")
+    y = ffilter(y, "alimiter=limit=0.89:attack=5:release=60:level=disabled", out_sr)
+    sf.write(out, np.clip(y, -1, 1), out_sr, subtype="PCM_16")
     return out
 
 
@@ -166,5 +163,6 @@ if __name__ == "__main__":
     ap.add_argument("--formant", type=float, default=1.0)
     ap.add_argument("--expand", type=float, default=1.0)
     ap.add_argument("--tempo", type=float, default=1.0)
+    ap.add_argument("--denoise", choices=["afftdn", "nr", "none"], default="afftdn")
     a = ap.parse_args()
-    process(Path(a.src), Path(a.out), a.sr, a.pitch, a.tune, a.formant, a.expand, a.tempo)
+    process(Path(a.src), Path(a.out), a.sr, a.pitch, a.tune, a.formant, a.expand, a.tempo, a.denoise)
