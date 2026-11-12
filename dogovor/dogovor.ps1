@@ -1286,7 +1286,11 @@ OformilMark + "\r\n" +
 "в тамбуре\r\nв доме\r\nв гараже\r\nв ЩУЭ на границе участка\r\nза границей земельного участка\r\nна лестничной клетке\r\nна опоре\r\n" +
 "\r\n" +
 "[Справка: чья собственность]\r\n" +
-"собственности абонента\r\nсобственности РУП «Минскэнерго»\r\n";
+"собственности абонента\r\nсобственности РУП «Минскэнерго»\r\n" +
+"\r\n" +
+"[Места пломб]\r\n" +
+"# пломбы «другие» в договоре и справке: место - сокращение (как в отчёте пломб), после « - » пояснение; свои - дописывайте\r\n" +
+"ДСТП - кнопка параметризации\r\nИК - испытательная колодка\r\nТТ - трансформаторы тока\r\nФП - фальш панель\r\nКК - клеммная крышка\r\nВА - вводной автомат\r\n";
 }
 
 // Запомненные значения (последний подписант, кто оформил и т.п.) и ранее введённые варианты для подсказок
@@ -2782,6 +2786,16 @@ public class Seals : Panel {
     readonly List<Row> rows = new List<Row>();
     readonly Button add = new Button();
     bool quiet;
+    // варианты мест - из справочника [Места пломб] (можно дописывать свои); нет его - встроенные
+    List<string> placeItems = PlaceItems();
+
+    public void SetPlaces(List<string> items) {
+        placeItems = items != null && items.Count > 0 ? new List<string>(items) : PlaceItems();
+        quiet = true;
+        try {
+            foreach (Row r in rows) { string t = r.Place.Text; r.Place.SetItems(placeItems); if (r.Place.Text != t) r.Place.Text = t; }
+        } finally { quiet = false; }
+    }
     public event EventHandler Changed;
     public event EventHandler Resized;
 
@@ -2812,7 +2826,7 @@ public class Seals : Panel {
     Row AddRow() {
         Row r = new Row();
         r.Place = new Combo(true, false);
-        r.Place.SetItems(PlaceItems());
+        r.Place.SetItems(placeItems);
         r.Number = Ui.Text(1);
         r.Remove = new Button();
         r.Remove.Text = "×";
@@ -2883,11 +2897,17 @@ public class Seals : Panel {
         }
     }
 
-    // место - короткое обозначение заглавными («дстп» -> «ДСТП»)
-    static string Code(string s) {
+    // место - короткое обозначение как в списке («дстп» -> «ДСТП»)
+    string Code(string s) {
         s = s.Trim();
         int d = s.IndexOf(" - ");
-        if (d > 0) s = s.Substring(0, d);
+        if (d > 0) s = s.Substring(0, d).Trim();
+        foreach (string item in placeItems) {
+            string c = item;
+            int k = c.IndexOf(" - ");
+            if (k > 0) c = c.Substring(0, k);
+            if (string.Compare(c.Trim(), s, StringComparison.OrdinalIgnoreCase) == 0) return c.Trim();
+        }
         foreach (string[] p in Places) if (string.Compare(p[0], s, StringComparison.OrdinalIgnoreCase) == 0) return p[0];
         return s;
     }
@@ -2927,9 +2947,14 @@ public class Seals : Panel {
             string t = part.Trim().Trim(',');
             if (t.Length == 0) continue;
             int sp = t.IndexOf(' ');
-            string first = sp > 0 ? t.Substring(0, sp) : t, code = Code(first);
+            string first = sp > 0 ? t.Substring(0, sp) : t, code = first;
             bool known = false;
-            foreach (string[] p in Places) if (p[0] == code) known = true;
+            foreach (string[] p in Places) if (string.Compare(p[0], first, StringComparison.OrdinalIgnoreCase) == 0) { known = true; code = p[0]; }
+            // своё место из справочника [Места пломб] («ЩУ 1234567») - первое слово из одних букв
+            if (!known && first.Length <= 10) {
+                known = true;
+                foreach (char ch in first) if (!char.IsLetter(ch)) known = false;
+            }
             if (known) r.Add(new string[] { code, sp > 0 ? t.Substring(sp + 1).Trim() : "" });
             else r.Add(new string[] { "", t });
         }
@@ -14831,6 +14856,7 @@ public class DogovorForm : Form {
         Row(c, F("Дата договора", D("data"), 1), F("Приставка", T("ls_pre", 1, "5002"), 1), F("Лицевой счёт № (номер в базе)", T("ls", 1, "9 цифр"), 1),
             F("Договор оформил(а)", C("oformil", true, false, "фамилия И.О."), 1));
         Row(c, F(null, lsNote, 4));
+        Row(c, F(null, X("ls_reuse", "Использовать лицевой повторно (сменился собственник - новый договор на тот же лицевой); данные подтянутся из базы"), 4));
         Row(c, F("Исполнитель в лице (подписывает)", C("podp", true, false, "выберите из списка"), 1), F("Подпись подписанта", T("podp_inic", 1, "И.О.Фамилия"), 1),
             F("Доверенность", T("podp_dov", 1, "№ ... от ..."), 2));
         Row(c, F("Должность подписанта (в лице кого)", T("podp_dolzh", 3, null), 3), F("Ф.И.О. подписанта (кого)", T("podp_fio", 3, null), 1));
@@ -15242,6 +15268,7 @@ public class DogovorForm : Form {
         Items("selsovet", With(lists.Get("Сельсовет"), memory.Hist("сельсовет")));
         Items("dopusk_kem", With(lists.Get("Кем выдан допуск"), memory.Hist("допуск")));
         Items("prochie", lists.Get("Прочие условия"));
+        ((Seals)inp["plomba_drugoe"]).SetPlaces(lists.Get("Места пломб"));
         for (int i = 1; i <= 2; i++) {
             string p = "pu" + i + "_";
             MeterLists(i, false);
@@ -15372,6 +15399,8 @@ public class DogovorForm : Form {
             }
         } finally { loading = false; }
         if (key == "ls") Recheck(true, false);
+        if (key == "ls_reuse") { baseAsked = null; ShowLs(); }
+        if (key == "ls" || key == "ls_reuse") AskBase();
         if (lastCert != null && (Array.IndexOf(CertKeys, key) >= 0 || key == "fio" || key == "kadastr")) CertNote();
         for (int i = 1; i <= 2; i++)
             if (photoMeter[i - 1] != null && (key == "pu" + i + "_zav" || key == "pu" + i + "_tip" || key == "pu" + i + "_pokaz" || key == "pu" + i + "_poverka")) MeterNote(i);
@@ -15526,6 +15555,11 @@ public class DogovorForm : Form {
 
     // текст запрета: копия лицевого (в базе или в другом сохранённом договоре); null - можно
     string LsBlockText() {
+        return V("ls_reuse") == "1" ? null : LsDupText();
+    }
+
+    // лицевой уже есть: в другом сохранённом договоре или в базе (текст; null - нет)
+    string LsDupText() {
         string ls = Digits(V("ls"));
         if (ls.Length == 0) return null;
         if (lsSaved != null) return "Лицевой счёт " + LsFull() + " уже есть в сохранённом договоре «" + lsSaved + "».";
@@ -15538,11 +15572,107 @@ public class DogovorForm : Form {
         string ls = Digits(V("ls"));
         string block = LsBlockText();
         if (ls.Length == 0) Note(lsNote, "", St.Hint, false);
-        else if (block != null) Note(lsNote, block + " Копию лицевого сохранить нельзя - она ломает базу.", St.Bad, true);
+        else if (block != null) Note(lsNote, block + " Копию лицевого сохранить нельзя - она ломает базу. Если лицевой оформляется повторно"
+            + " (сменился собственник) - поставьте галочку «Использовать лицевой повторно».", St.Bad, true);
+        else if (LsDupText() != null) Note(lsNote, LsDupText() + " Оформляется повторно (стоит галочка «Использовать лицевой повторно»).", Warn, false);
         else if (ls.Length != 9) Note(lsNote, "Лицевой счёт - 9 цифр номера в базе (приставка района 5002... - в поле «Приставка»). Сейчас цифр: " + ls.Length, St.Hint, false);
         else if (baseLink == null) Note(lsNote, "База не подключена - лицевой по базе не проверен.", St.Hint, false);
         else if (lsError != null && lsChecked == null) Note(lsNote, "Проверить по базе не удалось: " + lsError, Warn, false);
         else if (lsChecked == ls) Note(lsNote, "Лицевого " + BaseLink.Nab(ls) + " в базе нет - можно оформлять.", St.Good, false);
+    }
+
+    // ---------- лицевой используется повторно: данные из базы (как в справке) ----------
+    string baseAsked;
+    Timer baseWait;
+    readonly Dictionary<string, string> baseFilled = new Dictionary<string, string>();
+
+    // галочка «Использовать лицевой повторно» и лицевой вписан полностью - через полсекунды найти его в базе
+    void AskBase() {
+        if (V("ls_reuse") != "1") return;
+        string nab = BaseLink.Nab(Digits(V("ls")));
+        if (nab.Length != 9 || nab == baseAsked) return;
+        baseAsked = nab;
+        if (baseWait == null) {
+            baseWait = new Timer();
+            baseWait.Interval = 500;
+            baseWait.Tick += delegate {
+                baseWait.Stop();
+                string n = baseAsked;
+                if (n == null) return;
+                headSub.Text = "Ищу лицевой " + n + " в базе...";
+                headSub.ForeColor = St.Hint;
+                BaseShare.Lookup(this, memory, n, delegate(Dictionary<string, string> rec, string err) { FromBase(n, rec, err); });
+            };
+        }
+        baseWait.Stop();
+        baseWait.Start();
+    }
+
+    // ответ базы: Ф.И.О., телефон, адрес по частям, сельсовет, счётчик 1 (тип, номер, поверка) - в пустые поля и в подставленные
+    // из базы раньше (поправленное руками остаётся); показания - нет
+    void FromBase(string nab, Dictionary<string, string> rec, string err) {
+        if (V("ls_reuse") != "1" || BaseLink.Nab(Digits(V("ls"))) != nab) return;
+        if (err != null) { headSub.Text = "База недоступна (" + err + ") - впишите сами; папка базы - в главном меню «База абонентов…»"; headSub.ForeColor = St.Warn; return; }
+        if (rec == null) { headSub.Text = "Лицевого " + nab + " в базе нет - подставить нечего"; headSub.ForeColor = St.Warn; return; }
+        Dictionary<string, string> b = SpravkaForm.BaseValues(rec);
+        Dictionary<string, string> v = new Dictionary<string, string>();
+        foreach (string k in new string[] { "fio", "np_tip", "np", "ulica_tip", "ulica", "dom", "korp", "kv" }) v[k] = b[k];
+        v["telefon"] = b["tel"];
+        v["selsovet"] = rec["ss"];
+        string tipch = rec["TIPCH"].Trim();
+        MeterType known = null;
+        if (tipch.Length > 0) foreach (MeterType m in lists.Meters()) if (MeterType.Same(m.Full, tipch)) known = m;
+        // полного типа нет в справочнике - хотя бы модель («СЕ-208BY ...» -> CE208BY): корпус и модификацию выберут из списков
+        string model = known != null ? known.Model : "", flat = FlatType(tipch);
+        if (known == null && flat.Length > 0)
+            foreach (MeterType m in lists.Meters()) if (FlatType(m.Model).Length > 0 && flat.StartsWith(FlatType(m.Model)) && m.Model.Length > model.Length) model = m.Model;
+        v["pu1_model"] = model;
+        v["pu1_korpus"] = known != null ? known.Case : "";
+        v["pu1_modif"] = known != null ? known.Mod : "";
+        v["pu1_tip"] = known != null ? known.Full : tipch;
+        v["pu1_zav"] = rec["NCH"].Trim();
+        v["pu1_poverka"] = BaseLink.Verification(rec["GODPR"], rec["KVP"]);
+        loading = true;
+        try {
+            foreach (KeyValuePair<string, string> kv in v) {
+                string cur = V(kv.Key), before;
+                if (cur.Length == 0 || baseFilled.TryGetValue(kv.Key, out before) && before == cur) SetV(kv.Key, kv.Value);
+                baseFilled[kv.Key] = kv.Value;
+            }
+            // что зависит от подставленного: подпись потребителя, строка адреса, списки и тип счётчика, фазность, модем
+            string inic = Initials(V("fio"));
+            if (V("potr_inic") == autoInic || V("potr_inic").Length == 0) SetV("potr_inic", inic);
+            autoInic = inic;
+            string adr = Address();
+            if (V("adres") == autoAdres || V("adres").Length == 0) SetV("adres", adr);
+            autoAdres = adr;
+            lastModel[1] = V("pu1_model");
+            lastCase[1] = V("pu1_korpus");
+            MeterLists(1, false);
+            string phase = MeterType.Phase(V("pu1_model"));
+            if (phase.Length > 0 && V("pu1_faz").Length == 0) SetV("pu1_faz", phase);
+            autoTip[1] = V("pu1_tip");
+            string modem = MeterType.Modem(V("pu1_modif"));
+            if (V("pu1_modem") == (autoModem[1] ?? "") || V("pu1_modem").Length == 0) SetV("pu1_modem", modem);
+            autoModem[1] = modem;
+        } finally { loading = false; }
+        dirty = true;
+        unsavedAuto = true;
+        Enable();
+        Recheck(false, true);
+        RefreshState();
+        headSub.Text = "Из базы подставлены Ф.И.О., телефон, адрес и счётчик - проверьте; сменился собственник - впишите нового в Ф.И.О.";
+        headSub.ForeColor = St.Good;
+    }
+
+    // тип счётчика для сравнения: заглавные латиницей, без пробелов, точек и дефисов («СЕ-208 BY» -> «CE208BY»)
+    static string FlatType(string s) {
+        StringBuilder sb = new StringBuilder();
+        foreach (char ch in s.ToUpperInvariant()) {
+            char c = ch == 'С' ? 'C' : ch == 'Е' ? 'E' : ch == 'В' ? 'B' : ch == 'У' ? 'Y' : ch == 'Р' ? 'P' : ch == 'А' ? 'A' : ch == 'О' ? 'O' : ch == 'К' ? 'K' : ch == 'М' ? 'M' : ch == 'Н' ? 'H' : ch == 'Т' ? 'T' : ch == 'Х' ? 'X' : ch;
+            if (char.IsLetterOrDigit(c)) sb.Append(c);
+        }
+        return sb.ToString();
     }
 
     // перед сохранением: ответ базы по этому лицевому обязателен (если база есть)
@@ -16823,8 +16953,12 @@ public class DogovorForm : Form {
             if (V("dopusk_kem").Length == 0) { List<string> k = lists.Get("Кем выдан допуск"); if (k.Count > 0) SetV("dopusk_kem", k[0]); }
             if (V("podp").Length == 0) { List<string[]> s = lists.Signers(); if (s.Count > 0) { SetV("podp", s[0][0]); SetV("podp_dolzh", s[0][1]); SetV("podp_fio", s[0][2]); SetV("podp_dov", s[0][3]); SetV("podp_inic", s[0][4]); } }
             SetV("ls_pre", "5002");
+            baseAsked = null;
+            baseFilled.Clear();
             SetV("np_tip", "д.");
             SetV("ulica_tip", "ул.");
+            baseFilled["np_tip"] = "д.";
+            baseFilled["ulica_tip"] = "ул.";
             SetV("schetchikov", "1 счётчик");
             SetV("moshn_otopl", "0,0");
             List<string> o = lists.Get("Объект электроснабжения");
@@ -18113,6 +18247,7 @@ public class SpravkaForm : Form {
             Items("vlad", new List<string>(new string[] { "1 владелец", "2 владельца", "3 владельца", "4 владельца", "5 владельцев" }));
             Items("zakl", lists.Get("Справка: заключение"));
             Items("gruppa", lists.Get("Тарифная группа"));
+            ((Seals)inp["plomba_drugoe"]).SetPlaces(lists.Get("Места пломб"));
             foreach (MeterBlock m in meters) MeterLists(m);
         } finally { loading = was; }
     }

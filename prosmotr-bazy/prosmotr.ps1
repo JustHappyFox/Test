@@ -3545,6 +3545,7 @@ public class DbfViewer : Form {
         grid.ColumnHeaderMouseClick += new DataGridViewCellMouseEventHandler(OnHeaderClick);
         grid.CellDoubleClick += new DataGridViewCellEventHandler(OnCellDoubleClick);
         grid.KeyDown += new KeyEventHandler(OnGridKey);
+        CopyText.Grid(grid);
 
         status.Dock = DockStyle.Bottom;
         status.Height = 22;
@@ -4631,6 +4632,7 @@ public static class Card {
         g.Columns[1].AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill;
         g.Columns[1].DefaultCellStyle.WrapMode = DataGridViewTriState.True;
         g.AutoSizeRowsMode = DataGridViewAutoSizeRowsMode.AllCells;
+        CopyText.Grid(g);
         if (extra != null)
             for (int i = 0; i + 1 < extra.Length; i += 2) g.Rows.Add(extra[i], extra[i + 1]);
         for (int j = 0; j < values.Length; j++)
@@ -6283,6 +6285,7 @@ public class AbonentSearch : Form {
         grid.CellPainting += new DataGridViewCellPaintingEventHandler(OnCellPainting);
         grid.CellDoubleClick += delegate(object s, DataGridViewCellEventArgs e) { if (e.RowIndex >= 0) OpenCard(e.RowIndex); };
         grid.KeyDown += new KeyEventHandler(OnGridKey);
+        CopyText.Grid(grid);
 
         bottom.Dock = DockStyle.Bottom;
         bottom.Height = 34;
@@ -7546,6 +7549,7 @@ public class BatchSearch : Form {
         grid.ClipboardCopyMode = DataGridViewClipboardCopyMode.EnableWithoutHeaderText;
         grid.CellValueNeeded += new DataGridViewCellValueEventHandler(OnCellValueNeeded);
         grid.CellFormatting += new DataGridViewCellFormattingEventHandler(OnCellFormatting);
+        CopyText.Grid(grid);
         grid.CellPainting += delegate(object s, DataGridViewCellPaintingEventArgs e) {
             if (e.RowIndex >= 0) ResultColumns.PaintGroup(grid, e, GroupAt(e.RowIndex - 1), GroupAt(e.RowIndex), GroupAt(e.RowIndex + 1));
         };
@@ -8998,6 +9002,7 @@ public class NaryadForm : Form {
         grid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
         grid.ClipboardCopyMode = DataGridViewClipboardCopyMode.EnableWithoutHeaderText;
         grid.CellValueNeeded += delegate(object s, DataGridViewCellValueEventArgs e) { if (e.RowIndex < hits.Count) e.Value = Cell(hits[e.RowIndex], e.ColumnIndex); };
+        CopyText.Grid(grid);
         grid.CellFormatting += delegate(object s, DataGridViewCellFormattingEventArgs e) {
             if (e.RowIndex < 0 || e.RowIndex >= hits.Count) return;
             int st = hits[e.RowIndex].State;
@@ -9032,6 +9037,7 @@ public class NaryadForm : Form {
         grid.SelectionChanged += delegate {
             // окно ещё не показано (или закрывается) - списки не трогать
             if (!lsList.IsHandleCreated || IsDisposed || grid.CurrentRow == null || grid.CurrentRow.Index >= hits.Count) return;
+            if (hits[grid.CurrentRow.Index] == shownHit) return;      // выделяют поля той же строки - наряды лицевого те же
             try { ShowAccount(hits[grid.CurrentRow.Index]); } catch (Exception ex) { lsHead.Text = "Наряды лицевого не показались: " + ex.Message; }
         };
         split.Panel2.Controls.Add(lower);
@@ -9596,6 +9602,7 @@ public class NaryadForm : Form {
             v.HideSelection = false;
             v.MultiSelect = false;
             v.GridLines = true;
+            CopyText.List(v);
         }
         lsList.Columns.Add("№ Н-З", 95);
         lsList.Columns.Add("Дата оф.", 85);
@@ -9625,6 +9632,7 @@ public class NaryadForm : Form {
         obList.HideSelection = false;
         obList.MultiSelect = false;
         obList.GridLines = true;
+        CopyText.List(obList);
         ob.Controls.Add(obList);
         ob.Controls.Add(obHead);
         SplitContainer both = new SplitContainer();
@@ -10001,6 +10009,7 @@ public class BlueListForm : Form {
         v.BackColor = Back;
         v.ForeColor = Color.White;
         v.Font = mono;
+        CopyText.List(v);
         return v;
     }
 
@@ -10491,6 +10500,114 @@ public class NaryadSetupDialog : Form {
         Result = s;
         DialogResult = DialogResult.OK;
         Close();
+    }
+}
+
+// Копирование из таблиц и списков: поля (ячейки) выделяются мышью (протянуть, Shift/Ctrl+щелчок),
+// копируются Ctrl+C или правой кнопкой «Копировать»; в базу ничего не пишется
+public static class CopyText {
+    // таблица: выделяются ячейки, а не строка целиком; текущая строка - в рамке
+    public static void Grid(DataGridView g) {
+        g.SelectionMode = DataGridViewSelectionMode.CellSelect;
+        g.MultiSelect = true;
+        g.ClipboardCopyMode = DataGridViewClipboardCopyMode.EnableWithoutHeaderText;
+        g.KeyDown += delegate(object s, KeyEventArgs e) {
+            if (e.Control && (e.KeyCode == Keys.C || e.KeyCode == Keys.Insert)) { e.Handled = true; e.SuppressKeyPress = true; Put(Selected(g)); }
+        };
+        g.CellMouseDown += delegate(object s, DataGridViewCellMouseEventArgs e) {
+            if (e.Button != MouseButtons.Right || e.RowIndex < 0 || e.ColumnIndex < 0) return;
+            DataGridViewCell c = g[e.ColumnIndex, e.RowIndex];
+            if (!c.Selected) { g.ClearSelection(); g.CurrentCell = c; c.Selected = true; }
+        };
+        ContextMenuStrip m = new ContextMenuStrip();
+        ToolStripMenuItem cells = new ToolStripMenuItem("Копировать выделенное (Ctrl+C)");
+        cells.Click += delegate { Put(Selected(g)); };
+        ToolStripMenuItem row = new ToolStripMenuItem("Копировать строку целиком");
+        row.Click += delegate { if (g.CurrentCell != null) Put(RowText(g, g.CurrentCell.RowIndex)); };
+        m.Items.Add(cells);
+        m.Items.Add(row);
+        g.ContextMenuStrip = m;
+        g.CurrentCellChanged += delegate { g.Invalidate(); };
+        g.RowPostPaint += delegate(object s, DataGridViewRowPostPaintEventArgs e) {
+            if (g.CurrentCell == null || e.RowIndex != g.CurrentCell.RowIndex) return;
+            Rectangle r = e.RowBounds;
+            r.Width = Math.Min(r.Width, g.Columns.GetColumnsWidth(DataGridViewElementStates.Visible) - g.HorizontalScrollingOffset) - 1;
+            r.Height -= 1;
+            using (Pen p = new Pen(Look.Accent, 2)) e.Graphics.DrawRectangle(p, r);
+        };
+    }
+
+    // список: Ctrl+C - выбранная строка; правая кнопка - значение под мышкой или строка
+    public static void List(ListView v) {
+        v.KeyDown += delegate(object s, KeyEventArgs e) {
+            if (e.Control && (e.KeyCode == Keys.C || e.KeyCode == Keys.Insert)) { e.Handled = true; e.SuppressKeyPress = true; Put(Items(v)); }
+        };
+        ContextMenuStrip m = new ContextMenuStrip();
+        ToolStripMenuItem cell = new ToolStripMenuItem("Копировать значение");
+        ToolStripMenuItem row = new ToolStripMenuItem("Копировать строку (Ctrl+C)");
+        string[] under = new string[1];
+        v.MouseDown += delegate(object s, MouseEventArgs e) {
+            if (e.Button != MouseButtons.Right) return;
+            ListViewHitTestInfo h = v.HitTest(e.Location);
+            under[0] = h.SubItem != null ? h.SubItem.Text.Trim() : "";
+            if (h.Item != null && !h.Item.Selected) {
+                foreach (ListViewItem it in v.SelectedItems) it.Selected = false;
+                h.Item.Selected = true;
+                h.Item.Focused = true;
+            }
+            cell.Enabled = under[0].Length > 0;
+            cell.Text = under[0].Length > 0 ? "Копировать «" + (under[0].Length > 40 ? under[0].Substring(0, 40) + "…" : under[0]) + "»" : "Копировать значение";
+        };
+        cell.Click += delegate { Put(under[0]); };
+        row.Click += delegate { Put(Items(v)); };
+        m.Items.Add(cell);
+        m.Items.Add(row);
+        v.ContextMenuStrip = m;
+    }
+
+    // выделенные ячейки: в строке - через табуляцию (по порядку столбцов), строки - с новой строки; одна ячейка - только значение
+    public static string Selected(DataGridView g) {
+        SortedDictionary<int, SortedDictionary<int, string>> rows = new SortedDictionary<int, SortedDictionary<int, string>>();
+        foreach (DataGridViewCell c in g.SelectedCells) {
+            if (!c.Visible || c.RowIndex < 0) continue;
+            SortedDictionary<int, string> r;
+            if (!rows.TryGetValue(c.RowIndex, out r)) { r = new SortedDictionary<int, string>(); rows[c.RowIndex] = r; }
+            r[g.Columns[c.ColumnIndex].DisplayIndex] = Value(c);
+        }
+        if (rows.Count == 0 && g.CurrentCell != null) return Value(g.CurrentCell);
+        StringBuilder sb = new StringBuilder();
+        foreach (KeyValuePair<int, SortedDictionary<int, string>> r in rows) {
+            if (sb.Length > 0) sb.Append("\r\n");
+            sb.Append(string.Join("\t", new List<string>(r.Value.Values).ToArray()));
+        }
+        return sb.ToString();
+    }
+
+    public static string RowText(DataGridView g, int row) {
+        SortedDictionary<int, string> r = new SortedDictionary<int, string>();
+        foreach (DataGridViewColumn col in g.Columns) if (col.Visible) r[col.DisplayIndex] = Value(g[col.Index, row]);
+        return string.Join("\t", new List<string>(r.Values).ToArray());
+    }
+
+    static string Value(DataGridViewCell c) {
+        object v = c.FormattedValue;
+        return v == null ? "" : v.ToString().Replace("\r", " ").Replace("\n", " ").Trim();
+    }
+
+    static string Items(ListView v) {
+        StringBuilder sb = new StringBuilder();
+        foreach (ListViewItem it in v.SelectedItems) {
+            if (sb.Length > 0) sb.Append("\r\n");
+            List<string> parts = new List<string>();
+            foreach (ListViewItem.ListViewSubItem si in it.SubItems) parts.Add(si.Text.Trim());
+            sb.Append(string.Join("\t", parts.ToArray()).Trim());
+        }
+        return sb.ToString();
+    }
+
+    public static void Put(string text) {
+        if (text == null || text.Length == 0) return;
+        try { Clipboard.SetText(text); } catch (Exception) { }
     }
 }
 
