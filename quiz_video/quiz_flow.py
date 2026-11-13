@@ -9,6 +9,7 @@
         Распознаёт голосовые из DIR (имена — номер сообщения: 000114.oga), новее сообщения ID,
         сопоставляет с пунктами и кладёт в VOICE_DIR как 01.oga … 12.oga.
         Код выхода: 0 — все пункты есть; 3 — каких-то не хватает; 4 — все есть, но пришло что-то неопознанное.
+        --other JOB2.json … — темы, которые записываются в те же дни: их записи пропускаются.
   python quiz_flow.py build   JOB.json --voices VOICE_DIR --out ROLIK.mp4 --work DIR --assets DIR [-- аргументы make_quiz]
 """
 import argparse
@@ -59,8 +60,12 @@ def transcribe(files: list[Path], cache: Path, model_dir: Path) -> dict[str, str
     return {f.name: done[f"{f.name}|{f.stat().st_size}"] for f in files}
 
 
-def collect(quiz: dict, media: Path, after: int, out: Path, model_dir: Path, min_score: float = 0.45) -> int:
+def collect(quiz: dict, media: Path, after: int, out: Path, model_dir: Path, min_score: float = 0.45,
+            others: list[dict] = ()) -> int:
+    """others — другие темы, которые клиент озвучивает в те же дни (до 3 роликов в день, владелец 13.11):
+    запись, которая больше похожа на пункт другой темы, тихо пропускаем — она для другого ролика."""
     items = fragments(quiz)
+    foreign = [t for o in others for _, t in fragments(o)]
     files = sorted((f for f in media.iterdir() if f.suffix.lower() in AUDIO_EXT and f.stem.isdigit()
                     and int(f.stem) > after), key=lambda f: int(f.stem))
     if not files:
@@ -73,6 +78,8 @@ def collect(quiz: dict, media: Path, after: int, out: Path, model_dir: Path, min
         heard = norm(texts[f.name])
         scores = [(difflib.SequenceMatcher(None, heard, norm(t)).ratio(), name) for name, t in items]
         score, name = max(scores)
+        if foreign and max(difflib.SequenceMatcher(None, heard, norm(t)).ratio() for t in foreign) > score:
+            continue  # это пункт другой темы
         if score < min_score:
             unknown.append(f"{f.name}: «{texts[f.name]}» (похоже на {name} лишь на {score:.2f})")
             continue
@@ -114,12 +121,14 @@ def main():
     ap.add_argument("--work")
     ap.add_argument("--assets")
     ap.add_argument("--whisper", help="папка модели Whisper", default=str(Path.home() / ".cache" / "whisper"))
+    ap.add_argument("--other", nargs="*", default=[], help="задания других тем, которые записываются параллельно")
     a, rest = ap.parse_known_args()
     quiz = json.loads(Path(a.job).read_text(encoding="utf-8"))
     if a.cmd == "script":
         print("\n".join(f"{n}. {t}" for n, (_, t) in enumerate(fragments(quiz), 1)))
     elif a.cmd == "collect":
-        sys.exit(collect(quiz, Path(a.media), a.after, Path(a.out), Path(a.whisper)))
+        others = [json.loads(Path(o).read_text(encoding="utf-8")) for o in a.other if Path(o) != Path(a.job)]
+        sys.exit(collect(quiz, Path(a.media), a.after, Path(a.out), Path(a.whisper), others=others))
     else:
         cmd = [sys.executable, str(HERE / "make_quiz.py"), a.job, "--out", a.out, "--work", a.work,
                "--assets", a.assets, "--voice-files", a.voices] + [x for x in rest if x != "--"]
