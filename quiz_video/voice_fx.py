@@ -136,16 +136,20 @@ def process(src: Path, out: Path, out_sr: int, pitch: float = 1.0, tune: float =
     if pitch or tempo != 1.0:
         chain.append(f"atempo={tempo / ratio:.5f}")
     y = ffilter(x, ",".join(chain + EQ), FS, out_sr)   # компрессора нет намеренно: он поднимает эхо и шум
-    y = trim(y, out_sr, thr_db=-45, pad=0.04)
-    # ровная громкость клипов: по RMS звонкой части, пики — мягким ограничителем
-    w = int(out_sr * 0.05)
+    sf.write(out, level(y, out_sr), out_sr, subtype="PCM_16")
+    return out
+
+
+def level(y: np.ndarray, sr: int) -> np.ndarray:
+    """Обрезка тишины и ровная громкость фразы: RMS громких участков −18 дБFS, пики — мягким ограничителем."""
+    y = trim(y, sr, thr_db=-45, pad=0.04)
+    w = int(sr * 0.05)
     n = max(1, len(y) // w)
     rms = np.sqrt(np.mean(y[:n * w].reshape(n, w) ** 2, axis=1) + 1e-12)
     loud = rms[rms > rms.max() * 0.25]
     y = y * (10 ** (-18 / 20) / (np.sqrt(np.mean(loud ** 2)) + 1e-9))
-    y = ffilter(y, "alimiter=limit=0.89:attack=5:release=60:level=disabled", out_sr)
-    sf.write(out, np.clip(y, -1, 1), out_sr, subtype="PCM_16")
-    return out
+    y = ffilter(y, "alimiter=limit=0.89:attack=5:release=60:level=disabled", sr)
+    return np.clip(y, -1, 1)
 
 
 if __name__ == "__main__":

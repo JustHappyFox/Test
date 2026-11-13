@@ -257,6 +257,8 @@ def main():
     ap.add_argument("--speed", type=float, default=0.9, help="темп речи Piper: меньше — быстрее")
     ap.add_argument("--voice-files", help="папка с записями живого голоса по порядку: вступление, вопрос 1, "
                                           "пояснение 1, …, вопрос N, пояснение N, концовка (клиент 12.11)")
+    ap.add_argument("--voice-ready", action="store_true",
+                    help="записи в --voice-files уже готовы (клон голоса из quiz_tts.py): без обработки voice_fx")
     ap.add_argument("--voice-pitch", type=float, default=1.0,
                     help="«немного изменить голос»: сдвиг высоты вместе с тембром, полутона (+ звонче; 0 — как есть)")
     ap.add_argument("--voice-tune", type=float, default=0.0,
@@ -335,6 +337,10 @@ def main():
         log("живой голос:", ", ".join(f"{n}={p.name}" for n, p in own.items()))
 
     def vo(text, name):
+        if own and a.voice_ready:
+            raw = subprocess.run(["ffmpeg", "-v", "error", "-i", str(own[name]), "-ac", "1", "-ar", str(SR),
+                                  "-f", "f32le", "-"], capture_output=True, check=True).stdout
+            return np.frombuffer(raw, np.float32).copy()
         if own:
             # ускоряем только пояснения и концовку: вопросы на длину ролика не влияют (таймер 10 с)
             tempo = a.voice_tempo if name[0] in "eo" else 1.0
