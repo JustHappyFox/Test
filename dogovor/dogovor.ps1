@@ -25234,28 +25234,19 @@ public static class SealPrint {
         for (int i = 0; i < 5; i++) Cell(x, ws[3 + i], cons[i], 9, false, null, 0, true);
         Cell(x, ws[8], "", 10, false, "continue", 0, true);
         x.Append("</w:tr>");
-        SealRow prev = before;
         foreach (SealRow r in rows) {
             // высота строки - как в бланке (27 строк на листе)
             x.Append("<w:tr><w:trPr><w:cantSplit/><w:trHeight w:val=\"290\" w:hRule=\"exact\"/></w:trPr>");
-            bool same = prev != null && r.Source.Length > 0 && r.Source == prev.Source;
-            string date = r.Get(0);
-            if (prev != null && date.Length > 0 && date == prev.Get(0)) date = "-//-";
+            // каждая строка - целиком, без «-//-» (13.11: и когда дата и договор те же, что строкой выше)
             string[] v = new string[9];
             v[0] = r.Index.ToString();
-            v[1] = date;
+            v[1] = r.Get(0);
             v[2] = r.Number;
-            for (int c = 1; c <= 5; c++) {
-                string s = r.Get(c);
-                // тот же договор, что строкой выше - «-//-», как пишут от руки
-                if (same && s.Length > 0 && s == prev.Get(c)) s = "-//-";
-                v[2 + c] = s;
-            }
+            for (int c = 1; c <= 5; c++) v[2 + c] = r.Get(c);
             v[8] = r.Get(6);
             // всё по центру; длинное (адрес) - мельче, чтобы влезло в одну строку (строки бланка - точной высоты)
             for (int i = 0; i < 9; i++) Cell(x, ws[i], v[i], FitSize(v[i], ws[i] - 130), false, null, 0, true);
             x.Append("</w:tr>");
-            prev = r;
         }
         x.Append("</w:tbl>");
         x.Append(Para(Run("Должность: " + b.Post, 12, false, false), null, false, null));
