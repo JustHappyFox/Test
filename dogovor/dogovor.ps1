@@ -17090,6 +17090,18 @@ public class DogovorForm : Form {
         Recheck(true, true);
     }
 
+    // из журнала договоров: открыть сохранённый (несохранённый текущий - вопрос); false - отказались или не открылся
+    public bool OpenSaved(string file) {
+        if (!AskSave("Открыть другой")) return false;
+        try { LoadFile(file); return true; }
+        catch (Exception ex) { MessageBox.Show(this, "Не удалось открыть:\n" + ex.Message, Text); return false; }
+    }
+
+    public bool IsOpened(string file) {
+        try { return openedFile != null && string.Compare(Path.GetFullPath(openedFile), Path.GetFullPath(file), StringComparison.OrdinalIgnoreCase) == 0; }
+        catch { return false; }
+    }
+
     void OpenSaved() {
         if (!AskSave("Открыть другой")) return;
         using (SavedDialog dlg = new SavedDialog(dataDir)) {
@@ -17355,11 +17367,12 @@ public class StartMenu : Form {
     DogovorForm dog;
     SpravkaForm spr;
     NaryadForm nar;
-    readonly Tile dogTile, sprTile, narTile, jurTile, plTile, logTile;
+    readonly Tile dogTile, sprTile, narTile, jurTile, plTile, logTile, dlogTile;
     JurForm jur;
     JurPick jurPick;
     PlombyForm pl;
     SpravkaLogForm log;
+    DogovorLogForm dlog;
 
     public StartMenu(string here, string launch) {
         // тема окон (тёмная / светлая) - из настроек, до создания элементов
@@ -17409,9 +17422,13 @@ public class StartMenu : Form {
         narTile = new Tile("Наряд на подключение", "включение / отключение по справке или договору; ТП, ВЛ, опора", Color.FromArgb(214, 76, 76));
         narTile.SetBounds(34, 272, 572, 74);
         narTile.Click += delegate { OpenNaryad(this, null, null); };
-        logTile = new Tile("Журнал справок", "вернувшиеся ответы - зелёным; забрать ответы с телефона", St.TintOf("Счётчики").Mark);
-        logTile.SetBounds(34, 354, 572, 74);
+        // журналы справок и договоров - рядом, по половине строки
+        logTile = new Tile("Журнал справок", "ответы и готовые - зелёным", St.TintOf("Счётчики").Mark);
+        logTile.SetBounds(34, 354, 282, 74);
         logTile.Click += delegate { OpenLog(this); };
+        dlogTile = new Tile("Журнал договоров", "готовые договоры - зелёным", St.TintOf("Договор").Mark);
+        dlogTile.SetBounds(324, 354, 282, 74);
+        dlogTile.Click += delegate { OpenDogLog(this); };
         jurTile = new Tile("Перевод из юр в физ", "адрес -> счётчик и лицевой из баз -> новый договор с гражданином", St.TintOf("Объект").Mark);
         jurTile.SetBounds(34, 436, 572, 74);
         jurTile.Click += delegate { OpenJur(); };
@@ -17419,6 +17436,7 @@ public class StartMenu : Form {
         Controls.Add(sprTile);
         Controls.Add(narTile);
         Controls.Add(logTile);
+        Controls.Add(dlogTile);
         plTile = new Tile("Мои отчёты пломб", "партии пломб, что поставлено по договорам, пропущенные, печать отчёта", St.TintOf("Пломбы и оборудование").Mark);
         plTile.SetBounds(34, 518, 572, 74);
         plTile.Click += delegate { OpenPlomby(); };
@@ -17571,6 +17589,20 @@ public class StartMenu : Form {
         log.Activate();
         if (from != log) from.Hide();
     }
+
+    // журнал договоров; from - куда вернётся «Назад»
+    public void OpenDogLog(Form from) {
+        if (dlog == null || dlog.IsDisposed) { dlog = new DogovorLogForm(here); dlog.Home = this; }
+        else dlog.Reload();
+        dlog.Back = from;
+        dlog.Show();
+        if (dlog.WindowState == FormWindowState.Minimized) dlog.WindowState = FormWindowState.Normal;
+        dlog.Activate();
+        if (from != dlog) from.Hide();
+    }
+
+    public DogovorLogForm DogLog { get { return dlog; } }
+    public SpravkaLogForm SprLog { get { return log; } }
 
     public void OpenPlomby() {
         if (pl == null || pl.IsDisposed) { pl = new PlombyForm(here); pl.Home = this; }
@@ -20483,20 +20515,31 @@ public static class SpravkaJournal {
         return IsId(t) ? t : null;
     }
 
-    // справки, ответа на которые ещё нет
+    // справки, ответа на которые ещё нет (отмеченные «готово» вручную и удалённые из журнала - не ждём)
     public static int Waiting(string here) {
         int n = 0;
-        try { foreach (SpravkaRec x in Load(here)) if (Answers(here, x.Name).Count == 0) n++; } catch { }
+        try {
+            Dictionary<string, string[]> marks = LogMarks.Load(SpravkaForm.Folder(here));
+            Dictionary<string, bool> seen = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+            foreach (SpravkaRec x in Load(here))
+                if (!seen.ContainsKey(x.Name) && Waits(here, marks, x)) { seen[x.Name] = true; n++; }
+        } catch { }
         return n;
+    }
+
+    static bool Waits(string here, Dictionary<string, string[]> marks, SpravkaRec x) {
+        return LogMarks.Mark(marks, x.Name).Length == 0 && Answers(here, x.Name).Count == 0;
     }
 
     // с какого времени смотреть фото на телефоне: после прошлого забора, но не раньше самой старой справки без ответа
     public static DateTime Since(string here, Memory memory) {
         DateTime last = DateTime.MinValue, oldest = DateTime.MaxValue;
         DateTime.TryParseExact(memory.Get("ТелефонОтветыДо", ""), new string[] { "yyyy-MM-dd HH:mm:ss.fff", "yyyy-MM-dd HH:mm:ss" }, CultureInfo.InvariantCulture, DateTimeStyles.None, out last);
+        Dictionary<string, string[]> marks;
+        try { marks = LogMarks.Load(SpravkaForm.Folder(here)); } catch { marks = new Dictionary<string, string[]>(); }
         foreach (SpravkaRec x in Load(here)) {
             DateTime d;
-            if (Answers(here, x.Name).Count == 0 && DateTime.TryParseExact(x.Saved, "dd.MM.yyyy HH:mm", CultureInfo.InvariantCulture, DateTimeStyles.None, out d) && d < oldest) oldest = d;
+            if (Waits(here, marks, x) && DateTime.TryParseExact(x.Saved, "dd.MM.yyyy HH:mm", CultureInfo.InvariantCulture, DateTimeStyles.None, out d) && d < oldest) oldest = d;
         }
         if (oldest != DateTime.MaxValue) {
             oldest = oldest.AddMinutes(-5);
@@ -20652,18 +20695,91 @@ public static class SpravkaQr {
 
 // Окно «Журнал справок»: все справки папки «Справки» - номер, когда сохранена, лицевой, Ф.И.О., вернулся ли ответ
 // (вернувшиеся - зелёным); забрать ответы с телефона, добавить фото ответа из папки, открыть справку или ответ.
+// Журналы справок и договоров (13.11): отметка «готово» вручную и «удалена из списка» - файл «журнал - отметки.txt» рядом с
+// документами (имя документа, отметка, когда). Удалить из списка: документ, его данные, фото / ответ переносятся в папку
+// «Удалённые» рядом (по ошибке - вернуть оттуда вручную): в списке, проверке копии лицевого и отчётах пломб их больше нет.
+public static class LogMarks {
+    public const string Ready = "готово", Removed = "удалена";
+
+    static string FileOf(string folder) { return Path.Combine(folder, "журнал - отметки.txt"); }
+
+    // имя документа -> { отметка, когда }
+    public static Dictionary<string, string[]> Load(string folder) {
+        Dictionary<string, string[]> r = new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase);
+        string f = FileOf(folder);
+        if (!File.Exists(f)) return r;
+        foreach (string line in File.ReadAllLines(f, Encoding.UTF8)) {
+            if (line.StartsWith("#") || line.Trim().Length == 0) continue;
+            string[] p = line.Split('\t');
+            if (p.Length < 2 || p[0].Trim().Length == 0) continue;
+            r[p[0].Trim()] = new string[] { p[1].Trim(), p.Length > 2 ? p[2].Trim() : "" };
+        }
+        return r;
+    }
+
+    // отметить (mark - Ready / Removed) или снять отметку (null); запись через временный файл
+    public static void Set(string folder, string name, string mark) {
+        Dictionary<string, string[]> all = Load(folder);
+        if (mark == null) all.Remove(name);
+        else all[name] = new string[] { mark, DateTime.Now.ToString("dd.MM.yyyy HH:mm") };
+        StringBuilder sb = new StringBuilder();
+        sb.Append("# Отметки журнала (программа «Оформление договора»): документ, отметка (готово / удалена), когда - через табуляцию\r\n");
+        foreach (KeyValuePair<string, string[]> kv in all)
+            sb.Append(kv.Key.Replace('\t', ' ')).Append('\t').Append(kv.Value[0]).Append('\t').Append(kv.Value[1]).Append("\r\n");
+        Directory.CreateDirectory(folder);
+        string f = FileOf(folder), tmp = f + ".tmp";
+        File.WriteAllText(tmp, sb.ToString(), new UTF8Encoding(true));
+        if (File.Exists(f)) File.Delete(f);
+        File.Move(tmp, f);
+    }
+
+    public static string Mark(Dictionary<string, string[]> marks, string name) {
+        string[] m;
+        return marks.TryGetValue(name, out m) ? m[0] : "";
+    }
+
+    public static string When(Dictionary<string, string[]> marks, string name) {
+        string[] m;
+        return marks.TryGetValue(name, out m) && m[1].Length >= 10 ? m[1].Substring(0, 10) : "";
+    }
+
+    // папка «Удалённые» рядом с документами
+    public static string Bin(string folder) { return Path.Combine(folder, "Удалённые"); }
+
+    // что и куда переносить: пары { откуда, куда (папка) }; сначала проверка, что всё можно перенести
+    public static string Move(List<string[]> what) {
+        // файл открыт в Word - перенос не пройдёт: сказать заранее, ничего не трогая
+        foreach (string[] w in what)
+            if (File.Exists(w[0]))
+                try { using (FileStream fs = new FileStream(w[0], FileMode.Open, FileAccess.ReadWrite, FileShare.None)) { } }
+                catch (Exception) { return "файл «" + Path.GetFileName(w[0]) + "» открыт (в Word?) - закройте его и повторите"; }
+        foreach (string[] w in what) {
+            Directory.CreateDirectory(w[1]);
+            if (File.Exists(w[0])) File.Move(w[0], Photo.Free(w[1], Path.GetFileName(w[0])));
+            else if (Directory.Exists(w[0])) {
+                string to = Path.Combine(w[1], Path.GetFileName(w[0]));
+                for (int i = 2; Directory.Exists(to) || File.Exists(to); i++) to = Path.Combine(w[1], Path.GetFileName(w[0]) + " (" + i + ")");
+                Directory.Move(w[0], to);
+            }
+        }
+        return null;
+    }
+}
+
 public class SpravkaLogForm : Form {
     readonly string here;
     readonly Memory memory;
     public StartMenu Home;
     public Form Back;
     readonly ListView list = new ListView();
-    readonly Seg filter = new Seg("Все", "Ждут ответа", "Вернулись");
+    readonly Seg filter = new Seg("Все", "Ждут ответа", "Готовы");
     readonly TextBox find = Ui.Text(1);
     readonly Label count = new Label(), status = new Label();
     readonly Button take = Ui.Button("Забрать ответы с телефона", true), add = Ui.Button("Добавить фото ответа…", false),
-        openDoc = Ui.Button("Открыть справку", false), openAns = Ui.Button("Папка ответа", false);
+        openDoc = Ui.Button("Открыть справку", false), openAns = Ui.Button("Папка ответа", false),
+        markBtn = Ui.Button("Отметить готовой", false), delBtn = Ui.Button("Удалить…", false), folderBtn = Ui.Button("Папка справок", false);
     readonly ToolTip tip = new ToolTip();
+    Dictionary<string, string[]> marks = new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase);
     bool busy;
     public bool NoQuestions;                          // для проверки без окон: на вопросы - «да»
 
@@ -20674,6 +20790,10 @@ public class SpravkaLogForm : Form {
         public string Docx;
         public List<string> Answers;
         public DateTime When, AnswerTime;
+        public string Mark = "", MarkWhen = "";
+        // готова: вернулся ответ (файлы в папке ответа) или отмечена вручную
+        public bool Manual { get { return Mark == LogMarks.Ready; } }
+        public bool Ready { get { return Answers.Count > 0 || Manual; } }
     }
     readonly List<Row> rows = new List<Row>();
 
@@ -20688,7 +20808,7 @@ public class SpravkaLogForm : Form {
         StartPosition = FormStartPosition.CenterScreen;
         Rectangle wa = Screen.PrimaryScreen.WorkingArea;
         Size = new Size(Math.Min(1180, wa.Width), Math.Min(760, wa.Height));
-        MinimumSize = new Size(860, 520);
+        MinimumSize = new Size(1080, 520);
         KeyPreview = true;
         try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
 
@@ -20711,7 +20831,7 @@ public class SpravkaLogForm : Form {
         title.AutoSize = true;
         title.Location = new Point(22, 36);
         Label sub = new Label();
-        sub.Text = "у каждой справки QR-код с номером; сфотографируйте вернувшуюся справку телефоном и нажмите «Забрать ответы с телефона» - вернувшиеся зелёным";
+        sub.Text = "вернувшиеся (ответ с телефона или из папки) и отмеченные вручную «готово» - зелёным; ненужную справку - «Удалить…»";
         sub.Font = St.Small;
         sub.ForeColor = St.NavText;
         sub.AutoSize = true;
@@ -20739,6 +20859,13 @@ public class SpravkaLogForm : Form {
         bar.Controls.Add(filter);
         bar.Controls.Add(find);
         bar.Controls.Add(count);
+        // папка со справками - справа
+        folderBtn.Size = new Size(160, 32);
+        folderBtn.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+        folderBtn.Click += delegate { OpenFolder(); };
+        tip.SetToolTip(folderBtn, "Открыть папку «Справки» в Проводнике");
+        bar.Controls.Add(folderBtn);
+        bar.Resize += delegate { folderBtn.Location = new Point(bar.ClientSize.Width - 24 - folderBtn.Width, 11); };
 
         list.Dock = DockStyle.Fill;
         list.View = View.Details;
@@ -20756,7 +20883,14 @@ public class SpravkaLogForm : Form {
         menu.MenuItems.Add("Открыть справку", delegate { OpenDoc(); });
         menu.MenuItems.Add("Открыть папку ответа", delegate { OpenAnswer(); });
         menu.MenuItems.Add("Добавить фото ответа…", delegate { AddFromFolder(); });
+        menu.MenuItems.Add("-");
+        MenuItem markItem = menu.MenuItems.Add("Отметить готовой", delegate { ToggleReady(); });
+        menu.MenuItems.Add("Удалить из списка…", delegate { Remove(); });
+        menu.MenuItems.Add("-");
+        menu.MenuItems.Add("Открыть папку справок", delegate { OpenFolder(); });
+        menu.Popup += delegate { Row r = Selected(); markItem.Text = r != null && r.Manual ? "Снять отметку «готово»" : "Отметить готовой"; markItem.Enabled = r != null && !(r.Answers.Count > 0 && !r.Manual); };
         list.ContextMenu = menu;
+        list.KeyDown += delegate(object s, KeyEventArgs e) { if (e.KeyCode == Keys.Delete) { e.SuppressKeyPress = true; Remove(); } };
         Panel mid = new Panel();
         mid.Dock = DockStyle.Fill;
         mid.Padding = new Padding(24, 0, 24, 8);
@@ -20767,16 +20901,22 @@ public class SpravkaLogForm : Form {
         bottom.Height = 112;
         bottom.BackColor = St.Surface;
         bottom.Paint += delegate(object s, PaintEventArgs e) { using (Pen pen = new Pen(St.Border)) e.Graphics.DrawLine(pen, 0, 0, bottom.Width, 0); };
-        take.SetBounds(24, 14, 260, 40);
+        take.SetBounds(24, 14, 240, 40);
         take.Click += delegate { TakeFromPhone(); };
         tip.SetToolTip(take, "Новые фото с телефона: на каждом ищется QR-код справки; такие фото переносятся (с телефона - удаляются) в папку «<справка> - ответ»; остальные фото остаются на телефоне");
-        add.SetBounds(296, 14, 210, 40);
+        add.SetBounds(274, 14, 196, 40);
         add.Click += delegate { AddFromFolder(); };
         tip.SetToolTip(add, "Фото или скан ответа из папки: с кодом справки - к своей справке, без кода - к выбранной в списке");
-        openDoc.SetBounds(518, 14, 160, 40);
+        openDoc.SetBounds(480, 14, 146, 40);
         openDoc.Click += delegate { OpenDoc(); };
-        openAns.SetBounds(690, 14, 140, 40);
+        openAns.SetBounds(636, 14, 130, 40);
         openAns.Click += delegate { OpenAnswer(); };
+        markBtn.SetBounds(784, 14, 160, 40);
+        markBtn.Click += delegate { ToggleReady(); };
+        tip.SetToolTip(markBtn, "Отметить выбранную справку готовой (зелёной) вручную - или снять эту отметку");
+        delBtn.SetBounds(954, 14, 110, 40);
+        delBtn.Click += delegate { Remove(); };
+        tip.SetToolTip(delBtn, "Убрать справку из журнала (с вопросом); файлы - в папку «Справки\\Удалённые»");
         status.AutoSize = false;
         status.Font = St.Base;
         status.SetBounds(24, 60, 900, 46);
@@ -20785,6 +20925,8 @@ public class SpravkaLogForm : Form {
         bottom.Controls.Add(add);
         bottom.Controls.Add(openDoc);
         bottom.Controls.Add(openAns);
+        bottom.Controls.Add(markBtn);
+        bottom.Controls.Add(delBtn);
         bottom.Controls.Add(status);
         bottom.Resize += delegate { status.Width = bottom.ClientSize.Width - 48; };
 
@@ -20827,6 +20969,7 @@ public class SpravkaLogForm : Form {
         string keep = Selected() != null ? Selected().Rec.Name : null;
         rows.Clear();
         string dir = SpravkaForm.Folder(here);
+        try { marks = LogMarks.Load(dir); } catch (Exception) { marks = new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase); }
         Dictionary<string, bool> known = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
         List<SpravkaRec> recs;
         try { recs = SpravkaJournal.Load(here); }
@@ -20856,7 +20999,11 @@ public class SpravkaLogForm : Form {
                 row.Rec.Saved = row.When.ToString("dd.MM.yyyy HH:mm");
                 rows.Add(row);
             }
+        // удалённые из списка (их файлы - в «Удалённые»); вернули справку в папку вручную - снова в списке
+        rows.RemoveAll(delegate(Row r) { return LogMarks.Mark(marks, r.Rec.Name) == LogMarks.Removed && !File.Exists(r.Docx); });
         foreach (Row r in rows) {
+            r.Mark = LogMarks.Mark(marks, r.Rec.Name);
+            r.MarkWhen = LogMarks.When(marks, r.Rec.Name);
             r.Answers = SpravkaJournal.Answers(here, r.Rec.Name);
             r.AnswerTime = DateTime.MinValue;
             foreach (string f in r.Answers) { DateTime t = File.GetLastWriteTime(f); if (t > r.AnswerTime) r.AnswerTime = t; }
@@ -20875,23 +21022,24 @@ public class SpravkaLogForm : Form {
         list.Items.Clear();
         int back = 0, wait = 0;
         foreach (Row r in rows) {
-            bool got = r.Answers.Count > 0;
-            if (got) back++;
-            else if (r.Rec.Id.Length > 0) wait++;
-            if (filter.Index == 1 && got || filter.Index == 2 && !got) continue;
+            bool got = r.Answers.Count > 0, ready = r.Ready;
+            if (ready) back++;
+            else wait++;
+            if (filter.Index == 1 && ready || filter.Index == 2 && !ready) continue;
             if (q.Length > 0 && (r.Rec.Name + " " + r.Rec.Ls + " " + r.Rec.Fio + " " + r.Rec.Id + " " + r.Rec.Address).ToLowerInvariant().IndexOf(q) < 0) continue;
             string ans;
-            if (got) ans = "вернулась " + r.AnswerTime.ToString("dd.MM.yyyy") + " (" + Files(r.Answers.Count) + ")";
+            if (got) ans = "вернулась " + r.AnswerTime.ToString("dd.MM.yyyy") + " (" + Files(r.Answers.Count) + ")" + (r.Manual ? ", отмечена" : "");
+            else if (r.Manual) ans = "готово (вручную" + (r.MarkWhen.Length > 0 ? ", " + r.MarkWhen : "") + ")";
             else if (r.Rec.Id.Length == 0) ans = "без QR-кода - ответ вручную";
             else ans = "ждём" + (r.When != DateTime.MinValue ? " (" + Days((DateTime.Today - r.When.Date).Days) + ")" : "");
             ListViewItem it = new ListViewItem(new string[] { r.Rec.Id.Length > 0 ? r.Rec.Id : "-", r.Rec.Saved, r.Rec.Name, r.Rec.Ls, r.Rec.Fio, ans });
             it.Tag = r;
-            if (got) it.BackColor = Returned;
+            if (ready) it.BackColor = Returned;
             else if (!File.Exists(r.Docx)) it.ForeColor = St.Hint;
             list.Items.Add(it);
         }
         list.EndUpdate();
-        count.Text = "справок " + rows.Count + ", вернулись " + back + ", ждём ответа " + wait;
+        count.Text = "справок " + rows.Count + ", готовы " + back + ", ждём " + wait;
     }
 
     static string Files(int n) {
@@ -20911,6 +21059,10 @@ public class SpravkaLogForm : Form {
         Row r = Selected();
         openDoc.Enabled = r != null && !busy;
         openAns.Enabled = r != null && r.Answers.Count > 0 && !busy;
+        // вернулась с ответом - и так зелёная: отметка нужна только без ответа (или снять поставленную)
+        markBtn.Enabled = r != null && !busy && (r.Manual || r.Answers.Count == 0);
+        markBtn.Text = r != null && r.Manual ? "Снять «готово»" : "Отметить готовой";
+        delBtn.Enabled = r != null && !busy;
         take.Enabled = !busy;
         add.Enabled = !busy;
     }
@@ -20928,6 +21080,45 @@ public class SpravkaLogForm : Form {
         string d = SpravkaJournal.AnswerDir(here, r.Rec.Name);
         if (!Directory.Exists(d)) { MessageBox.Show(this, "Ответа на эту справку пока нет.", Text); return; }
         try { Process.Start("explorer.exe", "\"" + d + "\""); } catch (Exception ex) { MessageBox.Show(this, ex.Message, Text); }
+    }
+
+    // ---------- отметка «готово», удаление, папка ----------
+
+    // отметить выбранную справку готовой вручную - или снять отметку
+    public void ToggleReady() {
+        Row r = Selected();
+        if (r == null || busy) return;
+        try {
+            LogMarks.Set(SpravkaForm.Folder(here), r.Rec.Name, r.Manual ? null : LogMarks.Ready);
+            Note(r.Manual ? "Отметка «готово» снята: «" + r.Rec.Name + "»." : "Справка «" + r.Rec.Name + "» отмечена готовой.", St.Good);
+        } catch (Exception ex) { Note("Отметка не сохранилась: " + ex.Message, St.Bad); }
+        Reload();
+    }
+
+    // убрать справку из журнала - с вопросом; справка, её данные и ответ - в «Справки\Удалённые»
+    public void Remove() {
+        Row r = Selected();
+        if (r == null || busy) return;
+        string dir = SpravkaForm.Folder(here), bin = LogMarks.Bin(dir);
+        string q = "Удалить справку «" + r.Rec.Name + "» из журнала?\n\n" +
+            "Справка (файл Word), её данные" + (r.Answers.Count > 0 ? " и ответ (" + Files(r.Answers.Count) + ")" : "") +
+            " переносятся в папку «Справки\\Удалённые» - если удалили по ошибке, их можно вернуть оттуда.";
+        if (!NoQuestions && MessageBox.Show(this, q, "Удалить из списка", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
+        List<string[]> what = new List<string[]>();
+        what.Add(new string[] { r.Docx, bin });
+        what.Add(new string[] { Path.Combine(SpravkaForm.DataFolder(here), r.Rec.Name + ".txt"), Path.Combine(bin, "данные") });
+        what.Add(new string[] { SpravkaJournal.AnswerDir(here, r.Rec.Name), bin });
+        string err;
+        try { err = LogMarks.Move(what); } catch (Exception ex) { err = ex.Message; }
+        if (err != null) { Note("Справка не удалена: " + err + ".", St.Bad); Reload(); return; }
+        try { LogMarks.Set(dir, r.Rec.Name, LogMarks.Removed); } catch (Exception ex) { Note("Отметка не сохранилась: " + ex.Message, St.Bad); }
+        Reload();
+        Note("Справка «" + r.Rec.Name + "» удалена из журнала (файлы - в папке «Справки\\Удалённые»).", St.Good);
+    }
+
+    void OpenFolder() {
+        string d = SpravkaForm.Folder(here);
+        try { Directory.CreateDirectory(d); Process.Start("explorer.exe", "\"" + d + "\""); } catch (Exception ex) { MessageBox.Show(this, ex.Message, Text); }
     }
 
     // ---------- забрать с телефона ----------
@@ -21046,6 +21237,349 @@ public class SpravkaLogForm : Form {
         foreach (ListViewItem it in list.Items) {
             for (int i = 0; i < it.SubItems.Count; i++) sb.Append(i > 0 ? " | " : "").Append(it.SubItems[i].Text);
             sb.Append(it.BackColor == Returned ? "  [зелёная]" : "").Append('\n');
+        }
+        return sb.Append(count.Text).ToString();
+    }
+}
+
+// Журнал договоров (13.11) - как журнал справок: все договоры папки «Договоры» (дата, лицевой, потребитель, адрес, сохранён),
+// поиск, отметка «готово» вручную (зелёным), удалить из списка (с вопросом; файлы - в «Договоры\Удалённые»), папка договоров.
+// Двойной щелчок / Enter - открыть договор в программе (исправить и пересохранить); «Открыть в Word» - готовый файл.
+public class DogovorLogForm : Form {
+    readonly string outDir, dataDir, photoRoot;
+    public StartMenu Home;
+    public Form Back;
+    readonly ListView list = new ListView();
+    readonly Seg filter = new Seg("Все", "Не готовы", "Готовы");
+    readonly TextBox find = Ui.Text(1);
+    readonly Label count = new Label(), status = new Label();
+    readonly Button openProg = Ui.Button("Открыть в программе", true), openWord = Ui.Button("Открыть в Word", false),
+        markBtn = Ui.Button("Отметить готовым", false), delBtn = Ui.Button("Удалить…", false), folderBtn = Ui.Button("Папка договоров", false);
+    readonly ToolTip tip = new ToolTip();
+    Dictionary<string, string[]> marks = new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase);
+    public bool NoQuestions;                          // для проверки без окон: на вопросы - «да»
+
+    class Row {
+        public string Name, Data, Docx, Date = "", Ls = "", Fio = "", Address = "", Saved = "", Mark = "", MarkWhen = "", Photos;
+        public DateTime When;
+        public bool Ready { get { return Mark == LogMarks.Ready; } }
+    }
+    readonly List<Row> rows = new List<Row>();
+
+    public DogovorLogForm(string here) {
+        Load += delegate { St.Dress(this); };
+        Memory memory = Memory.For(Path.Combine(here, "nastroiki.txt"));
+        outDir = DogovorForm.Folder(here, memory);
+        dataDir = Path.Combine(outDir, "данные");
+        photoRoot = Path.Combine(outDir, "фото");
+        Text = "Журнал договоров";
+        Font = St.Base;
+        BackColor = St.Back;
+        StartPosition = FormStartPosition.CenterScreen;
+        Rectangle wa = Screen.PrimaryScreen.WorkingArea;
+        Size = new Size(Math.Min(1180, wa.Width), Math.Min(760, wa.Height));
+        MinimumSize = new Size(1000, 520);
+        KeyPreview = true;
+        try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
+
+        Panel top = new Panel();
+        top.Dock = DockStyle.Top;
+        top.Height = 92;
+        top.BackColor = St.Nav;
+        LinkLabel back = new LinkLabel();
+        back.Text = "← Назад";
+        back.LinkColor = St.NavText;
+        back.ActiveLinkColor = Color.White;
+        back.Font = St.Base;
+        back.AutoSize = true;
+        back.Location = new Point(24, 10);
+        back.LinkClicked += delegate { GoBack(); };
+        Label title = new Label();
+        title.Text = "Журнал договоров";
+        title.Font = new Font("Segoe UI", 16f, FontStyle.Bold);
+        title.ForeColor = Color.White;
+        title.AutoSize = true;
+        title.Location = new Point(22, 36);
+        Label sub = new Label();
+        sub.Text = "все сохранённые договоры; отмеченные «готово» - зелёным; двойной щелчок - открыть в программе; ненужный - «Удалить…»";
+        sub.Font = St.Small;
+        sub.ForeColor = St.NavText;
+        sub.AutoSize = true;
+        sub.Location = new Point(26, 68);
+        top.Controls.Add(back);
+        top.Controls.Add(title);
+        top.Controls.Add(sub);
+
+        Panel bar = new Panel();
+        bar.Dock = DockStyle.Top;
+        bar.Height = 52;
+        bar.BackColor = St.Back;
+        filter.Size = new Size(360, 30);
+        filter.Location = new Point(24, 12);
+        filter.Index = 0;
+        filter.Changed += delegate { Fill(); };
+        find.Location = new Point(400, 12);
+        find.Width = 300;
+        find.HandleCreated += delegate { Ui.Cue(find, "поиск: адрес, лицевой, Ф.И.О."); };
+        find.TextChanged += delegate { Fill(); };
+        count.AutoSize = true;
+        count.Font = St.Base;
+        count.ForeColor = St.Caption;
+        count.Location = new Point(716, 16);
+        folderBtn.Size = new Size(170, 32);
+        folderBtn.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+        folderBtn.Click += delegate { OpenFolder(); };
+        tip.SetToolTip(folderBtn, "Открыть папку «Договоры» в Проводнике");
+        bar.Controls.Add(filter);
+        bar.Controls.Add(find);
+        bar.Controls.Add(count);
+        bar.Controls.Add(folderBtn);
+        bar.Resize += delegate { folderBtn.Location = new Point(bar.ClientSize.Width - 24 - folderBtn.Width, 11); };
+
+        list.Dock = DockStyle.Fill;
+        list.View = View.Details;
+        list.FullRowSelect = true;
+        list.HideSelection = false;
+        list.MultiSelect = false;
+        list.GridLines = true;
+        list.Font = St.Base;
+        foreach (string[] c in new string[][] { new string[] { "Дата", "90" }, new string[] { "Лицевой счёт", "120" }, new string[] { "Потребитель", "230" },
+                new string[] { "Адрес объекта", "330" }, new string[] { "Сохранён", "125" }, new string[] { "Готово", "150" } })
+            list.Columns.Add(c[0], int.Parse(c[1]));
+        list.DoubleClick += delegate { OpenInProgram(); };
+        list.SelectedIndexChanged += delegate { Enable(); };
+        list.KeyDown += delegate(object s, KeyEventArgs e) {
+            if (e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; OpenInProgram(); }
+            else if (e.KeyCode == Keys.Delete) { e.SuppressKeyPress = true; Remove(); }
+        };
+        ContextMenu menu = new ContextMenu();
+        menu.MenuItems.Add("Открыть в программе", delegate { OpenInProgram(); });
+        menu.MenuItems.Add("Открыть в Word", delegate { OpenWord(); });
+        menu.MenuItems.Add("-");
+        MenuItem markItem = menu.MenuItems.Add("Отметить готовым", delegate { ToggleReady(); });
+        menu.MenuItems.Add("Удалить из списка…", delegate { Remove(); });
+        menu.MenuItems.Add("-");
+        menu.MenuItems.Add("Открыть папку договоров", delegate { OpenFolder(); });
+        menu.Popup += delegate { Row r = Selected(); markItem.Text = r != null && r.Ready ? "Снять отметку «готово»" : "Отметить готовым"; markItem.Enabled = r != null; };
+        list.ContextMenu = menu;
+        Panel mid = new Panel();
+        mid.Dock = DockStyle.Fill;
+        mid.Padding = new Padding(24, 0, 24, 8);
+        mid.Controls.Add(list);
+
+        Panel bottom = new Panel();
+        bottom.Dock = DockStyle.Bottom;
+        bottom.Height = 112;
+        bottom.BackColor = St.Surface;
+        bottom.Paint += delegate(object s, PaintEventArgs e) { using (Pen pen = new Pen(St.Border)) e.Graphics.DrawLine(pen, 0, 0, bottom.Width, 0); };
+        openProg.SetBounds(24, 14, 220, 40);
+        openProg.Click += delegate { OpenInProgram(); };
+        tip.SetToolTip(openProg, "Открыть договор в окне договора - исправить и пересохранить (то же - двойной щелчок или Enter)");
+        openWord.SetBounds(254, 14, 160, 40);
+        openWord.Click += delegate { OpenWord(); };
+        markBtn.SetBounds(424, 14, 170, 40);
+        markBtn.Click += delegate { ToggleReady(); };
+        tip.SetToolTip(markBtn, "Отметить выбранный договор готовым (зелёным) - или снять эту отметку");
+        delBtn.SetBounds(604, 14, 110, 40);
+        delBtn.Click += delegate { Remove(); };
+        tip.SetToolTip(delBtn, "Убрать договор из списка (с вопросом); файлы - в папку «Договоры\\Удалённые»");
+        status.AutoSize = false;
+        status.Font = St.Base;
+        status.SetBounds(24, 60, 900, 46);
+        status.Anchor = AnchorStyles.Left | AnchorStyles.Top | AnchorStyles.Right;
+        bottom.Controls.Add(openProg);
+        bottom.Controls.Add(openWord);
+        bottom.Controls.Add(markBtn);
+        bottom.Controls.Add(delBtn);
+        bottom.Controls.Add(status);
+        bottom.Resize += delegate { status.Width = bottom.ClientSize.Width - 48; };
+
+        Controls.Add(mid);
+        Controls.Add(bar);
+        Controls.Add(top);
+        Controls.Add(bottom);
+
+        KeyDown += delegate(object s, KeyEventArgs e) {
+            if (e.KeyCode == Keys.Escape) { e.SuppressKeyPress = true; GoBack(); }
+            else if (e.KeyCode == Keys.F5) { e.SuppressKeyPress = true; Reload(); }
+        };
+        FormClosing += delegate(object s, FormClosingEventArgs e) {
+            if (Home != null && e.CloseReason == CloseReason.UserClosing) { e.Cancel = true; GoBack(); }
+        };
+        Activated += delegate { Reload(); };
+        Reload();
+    }
+
+    public void GoBack() {
+        Hide();
+        if (Home != null) Home.Return(Back);
+        else if (Back != null && !Back.IsDisposed) { Back.Show(); Back.Activate(); }
+    }
+
+    void Note(string text, Color c) { status.Text = text; status.ForeColor = c; }
+
+    static string Get(Dictionary<string, string> d, string k) {
+        string v;
+        return d.TryGetValue(k, out v) && v != null ? v : "";
+    }
+
+    // договоры: данные в «Договоры\данные» (сохранённые программой) и файлы Word без данных
+    public void Reload() {
+        Row sel = Selected();
+        string keep = sel != null ? sel.Name : null;
+        rows.Clear();
+        try { marks = LogMarks.Load(outDir); } catch (Exception) { marks = new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase); }
+        Dictionary<string, bool> known = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+        try {
+            if (Directory.Exists(dataDir))
+                foreach (string f in Directory.GetFiles(dataDir, "*.txt")) {
+                    Row r = new Row();
+                    r.Name = Path.GetFileNameWithoutExtension(f);
+                    r.Data = f;
+                    r.Docx = Path.Combine(outDir, r.Name + ".docx");
+                    try {
+                        Dictionary<string, string> d = DogovorForm.ReadData(f);
+                        r.Date = Get(d, "data");
+                        r.Ls = Get(d, "ls");
+                        r.Fio = Get(d, "fio");
+                        r.Address = Get(d, "adres");
+                        r.Saved = Get(d, "сохранён");
+                        string ph = Get(d, "фото");
+                        if (ph.Length > 0) r.Photos = Path.IsPathRooted(ph) ? ph : Path.Combine(photoRoot, ph);
+                    } catch { }
+                    r.When = File.GetLastWriteTime(f);
+                    known[r.Name] = true;
+                    rows.Add(r);
+                }
+            if (Directory.Exists(outDir))
+                foreach (string f in Directory.GetFiles(outDir, "*.docx")) {
+                    string n = Path.GetFileNameWithoutExtension(f);
+                    if (n.StartsWith("~$") || known.ContainsKey(n)) continue;
+                    Row r = new Row();
+                    r.Name = n;
+                    r.Docx = f;
+                    r.When = File.GetLastWriteTime(f);
+                    r.Saved = r.When.ToString("dd.MM.yyyy HH:mm");
+                    r.Fio = n;
+                    rows.Add(r);
+                }
+        } catch (Exception ex) { Note("Папка договоров не читается: " + ex.Message, St.Bad); }
+        foreach (Row r in rows) {
+            r.Mark = LogMarks.Mark(marks, r.Name);
+            r.MarkWhen = LogMarks.When(marks, r.Name);
+        }
+        rows.Sort(delegate(Row a, Row b) { return b.When.CompareTo(a.When); });
+        Fill();
+        if (keep != null)
+            foreach (ListViewItem it in list.Items)
+                if (((Row)it.Tag).Name == keep) { it.Selected = true; it.EnsureVisible(); break; }
+        Enable();
+    }
+
+    void Fill() {
+        string q = find.Text.Trim().ToLowerInvariant();
+        list.BeginUpdate();
+        list.Items.Clear();
+        int ready = 0;
+        foreach (Row r in rows) {
+            if (r.Ready) ready++;
+            if (filter.Index == 1 && r.Ready || filter.Index == 2 && !r.Ready) continue;
+            if (q.Length > 0 && (r.Name + " " + r.Ls + " " + r.Fio + " " + r.Address).ToLowerInvariant().IndexOf(q) < 0) continue;
+            string mark = r.Ready ? "готово" + (r.MarkWhen.Length > 0 ? " (" + r.MarkWhen + ")" : "") : "";
+            ListViewItem it = new ListViewItem(new string[] { r.Date, r.Ls, r.Fio, r.Address, r.Saved, mark });
+            it.Tag = r;
+            if (r.Ready) it.BackColor = St.RowGood;
+            else if (r.Data == null || !File.Exists(r.Docx)) it.ForeColor = St.Hint;
+            list.Items.Add(it);
+        }
+        list.EndUpdate();
+        count.Text = "договоров " + rows.Count + ", готовы " + ready + ", не готовы " + (rows.Count - ready);
+    }
+
+    Row Selected() { return list.SelectedItems.Count > 0 ? list.SelectedItems[0].Tag as Row : null; }
+
+    void Enable() {
+        Row r = Selected();
+        openProg.Enabled = r != null && r.Data != null;
+        openWord.Enabled = r != null && File.Exists(r.Docx);
+        markBtn.Enabled = delBtn.Enabled = r != null;
+        markBtn.Text = r != null && r.Ready ? "Снять «готово»" : "Отметить готовым";
+    }
+
+    // в окне договора: как «Открыть сохранённый…» (несохранённый договор - вопрос)
+    public void OpenInProgram() {
+        Row r = Selected();
+        if (r == null) return;
+        if (r.Data == null) { Note("Этот договор сохранён не программой (нет его данных) - откройте его в Word.", St.Warn); return; }
+        if (Home == null) return;
+        // окно договора вместо журнала; несохранённый договор - вопрос («Отмена» - остаться в нём)
+        Home.OpenDogovor();
+        Hide();
+        DogovorForm d = Home.Dogovor;
+        if (d != null) d.OpenSaved(r.Data);
+    }
+
+    void OpenWord() {
+        Row r = Selected();
+        if (r == null) return;
+        if (!File.Exists(r.Docx)) { MessageBox.Show(this, "Файла договора нет в папке (удалён или переименован):\n" + r.Docx, Text); return; }
+        try { Process.Start(r.Docx); } catch (Exception ex) { MessageBox.Show(this, "Не открывается:\n" + r.Docx + "\n\n" + ex.Message, Text); }
+    }
+
+    public void ToggleReady() {
+        Row r = Selected();
+        if (r == null) return;
+        try {
+            LogMarks.Set(outDir, r.Name, r.Ready ? null : LogMarks.Ready);
+            Note(r.Ready ? "Отметка «готово» снята: «" + r.Name + "»." : "Договор «" + r.Name + "» отмечен готовым.", St.Good);
+        } catch (Exception ex) { Note("Отметка не сохранилась: " + ex.Message, St.Bad); }
+        Reload();
+    }
+
+    // убрать договор из списка - с вопросом; файл Word, данные и фото документов - в «Договоры\Удалённые»
+    public void Remove() {
+        Row r = Selected();
+        if (r == null) return;
+        DogovorForm open = Home != null ? Home.Dogovor : null;
+        if (open != null && !open.IsDisposed && r.Data != null && open.IsOpened(r.Data)) {
+            Note("Договор «" + r.Name + "» сейчас открыт в окне договора - сначала создайте там новый или откройте другой.", St.Warn);
+            return;
+        }
+        bool photos = r.Photos != null && Directory.Exists(r.Photos) && IsInside(r.Photos, photoRoot);
+        string q = "Удалить договор «" + r.Name + "» из списка?\n\n" +
+            "Файл Word, данные договора" + (photos ? " и фото документов" : "") + " переносятся в папку «Договоры\\Удалённые» - если удалили по ошибке, " +
+            "их можно вернуть оттуда. В проверке копии лицевого и в отчётах пломб этого договора больше не будет.";
+        if (!NoQuestions && MessageBox.Show(this, q, "Удалить из списка", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
+        string bin = LogMarks.Bin(outDir);
+        List<string[]> what = new List<string[]>();
+        what.Add(new string[] { r.Docx, bin });
+        if (r.Data != null) what.Add(new string[] { r.Data, Path.Combine(bin, "данные") });
+        if (photos) what.Add(new string[] { r.Photos, Path.Combine(bin, "фото") });
+        string err;
+        try { err = LogMarks.Move(what); } catch (Exception ex) { err = ex.Message; }
+        if (err != null) { Note("Договор не удалён: " + err + ".", St.Bad); Reload(); return; }
+        try { if (r.Ready) LogMarks.Set(outDir, r.Name, null); } catch { }
+        Reload();
+        Note("Договор «" + r.Name + "» удалён из списка (файлы - в папке «Договоры\\Удалённые»).", St.Good);
+    }
+
+    static bool IsInside(string dir, string root) {
+        try { return Path.GetFullPath(dir).StartsWith(Path.GetFullPath(root) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase); }
+        catch { return false; }
+    }
+
+    void OpenFolder() {
+        try { Directory.CreateDirectory(outDir); Process.Start("explorer.exe", "\"" + outDir + "\""); } catch (Exception ex) { MessageBox.Show(this, ex.Message, Text); }
+    }
+
+    // для проверки
+    public void SelectName(string name) { foreach (ListViewItem it in list.Items) it.Selected = ((Row)it.Tag).Name == name; }
+    public string Status { get { return status.Text; } }
+    public string Dump() {
+        StringBuilder sb = new StringBuilder();
+        foreach (ListViewItem it in list.Items) {
+            for (int i = 0; i < it.SubItems.Count; i++) sb.Append(i > 0 ? " | " : "").Append(it.SubItems[i].Text);
+            sb.Append(it.BackColor == St.RowGood ? "  [зелёная]" : "").Append('\n');
         }
         return sb.Append(count.Text).ToString();
     }
@@ -24545,21 +25079,44 @@ public static class SealRegistry {
             SealRow r = rows[k];
             if (r.Source.Length > 0) {
                 if (r.Source == u.Source) continue;
-                // справка по тому же лицевому (сделана из договора или пересохранена под другим именем) - та же пломба
-                if ((u.Spravka || r.FromSpravka) && u.Ls == r.Auto[2]) continue;
+                // тот же лицевой (справка из договора, справка или договор пересохранены под другим именем, новый договор на тот же
+                // лицевой при смене собственника) - то же место, та же пломба: не повтор. Главный - договор (13.11)
+                if (SameLs(u.Ls, r.Auto[2])) {
+                    if (!u.Spravka && r.FromSpravka) Take(r, u);
+                    continue;
+                }
                 r.Conflict = r.Conflict.Length > 0 ? r.Conflict + ", " + u.Source : u.Source;
                 continue;
             }
-            r.Source = u.Source;
-            r.FromSpravka = u.Spravka;
-            r.Auto[0] = u.Date;
-            r.Auto[1] = u.Address;
-            r.Auto[2] = u.Ls;
-            r.Auto[3] = u.Meter;
-            r.Auto[6] = u.Note;
+            Take(r, u);
         }
         return rows;
     }
+
+    static void Take(SealRow r, Use u) {
+        r.Source = u.Source;
+        r.FromSpravka = u.Spravka;
+        r.Auto[0] = u.Date;
+        r.Auto[1] = u.Address;
+        r.Auto[2] = u.Ls;
+        r.Auto[3] = u.Meter;
+        r.Auto[6] = u.Note;
+    }
+
+    // один лицевой: по номеру в базе - последние 9 цифр без нулей впереди («5002047766707», «047766707», «47766707»)
+    public static bool SameLs(string a, string b) {
+        string x = LsKey(a), y = LsKey(b);
+        return x.Length > 0 && x == y;
+    }
+
+    static string LsKey(string ls) {
+        StringBuilder sb = new StringBuilder();
+        foreach (char c in ls ?? "") if (char.IsDigit(c)) sb.Append(c);
+        string d = sb.ToString();
+        if (d.Length > 9) d = d.Substring(d.Length - 9);
+        return d.TrimStart('0');
+    }
+
 
     // пропущенные: не использованы, а пломбы с номерами дальше уже стоят
     public static List<SealRow> Gaps(List<SealRow> rows) {
