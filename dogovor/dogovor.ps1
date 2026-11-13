@@ -24904,6 +24904,8 @@ public class SealBatch {
     public int Since = 1;        // № п/п, с которого партию ведёт программа (раньше - писали на бумаге)
     public string Issued = "";
     public string Fio = "", Post = "";
+    // должность внизу отчёта по умолчанию (13.11: «Инженер по РПЭ»)
+    public const string DefaultPost = "Инженер по РПЭ";
     public int Layout = 2;       // порядок столбцов вписанного: 2 - с адресом (с 09.11), 1 - прежний (с № задания)
     public readonly Dictionary<string, string[]> Hand = new Dictionary<string, string[]>();   // номер -> вписанное
 
@@ -25342,11 +25344,15 @@ public class PlombyForm : Form {
         add.Click += delegate { NewBatch(); };
         Button del = Ui.Button("Удалить партию", false);
         del.Click += delegate { DeleteBatch(); };
-        left.Controls.AddRange(new Control[] { lcap, list, add, del });
+        // должность и Ф.И.О. внизу отчёта - у созданной партии тоже можно поправить
+        Button sign = Ui.Button("Должность и Ф.И.О. в отчёте…", false);
+        sign.Click += delegate { AskSign(); };
+        left.Controls.AddRange(new Control[] { lcap, list, add, sign, del });
         left.Resize += delegate {
-            list.SetBounds(14, 38, left.ClientSize.Width - 28, left.ClientSize.Height - 38 - 100);
+            list.SetBounds(14, 38, left.ClientSize.Width - 28, left.ClientSize.Height - 38 - 142);
             add.SetBounds(14, list.Bottom + 10, left.ClientSize.Width - 28, 38);
-            del.SetBounds(14, add.Bottom + 8, left.ClientSize.Width - 28, 34);
+            sign.SetBounds(14, add.Bottom + 8, left.ClientSize.Width - 28, 34);
+            del.SetBounds(14, sign.Bottom + 8, left.ClientSize.Width - 28, 34);
         };
 
         Panel main = new Panel();
@@ -25443,7 +25449,74 @@ public class PlombyForm : Form {
 
     // ---------- партии ----------
 
+    // 13.11: должность в отчёте - «Инженер по РПЭ»: прежнее «Инженер ГРП» в партиях и в запомненной должности заменяется один раз
+    void FixPost() {
+        if (memory.Get("ПломбыДолжностьРПЭ", "") == "1") return;
+        const string old = "Инженер ГРП";
+        try {
+            if (Directory.Exists(dir))
+                foreach (string f in Directory.GetFiles(dir, "*.txt")) {
+                    try {
+                        SealBatch b = SealBatch.Load(f);
+                        if (b.First.Length > 0 && string.Compare(b.Post.Trim(), old, StringComparison.OrdinalIgnoreCase) == 0) { b.Post = SealBatch.DefaultPost; b.Save(); }
+                    } catch { }
+                }
+            if (string.Compare(memory.Get("ПломбыДолжность", "").Trim(), old, StringComparison.OrdinalIgnoreCase) == 0) memory.Values["ПломбыДолжность"] = SealBatch.DefaultPost;
+            memory.Values["ПломбыДолжностьРПЭ"] = "1";
+            memory.Save();
+        } catch { }
+    }
+
+    // должность и Ф.И.О. внизу отчёта выбранной партии
+    void AskSign() {
+        if (cur == null) return;
+        using (Form f = new Form()) {
+            f.Text = "Подпись отчёта - партия " + cur.Title;
+            f.Font = St.Base;
+            f.BackColor = St.Surface;
+            f.FormBorderStyle = FormBorderStyle.FixedDialog;
+            f.StartPosition = FormStartPosition.CenterParent;
+            f.MaximizeBox = f.MinimizeBox = false;
+            f.ShowInTaskbar = false;
+            f.ClientSize = new Size(520, 196);
+            Label lp = Ui.Caption("Должность (внизу отчёта)");
+            lp.SetBounds(16, 12, 480, 20);
+            TextBox post = Ui.Text(1);
+            post.SetBounds(16, 34, 488, 26);
+            post.Text = cur.Post.Length > 0 ? cur.Post : SealBatch.DefaultPost;
+            Label lf = Ui.Caption("Ф.И.О. (внизу отчёта)");
+            lf.SetBounds(16, 72, 480, 20);
+            TextBox fio = Ui.Text(1);
+            fio.SetBounds(16, 94, 300, 26);
+            fio.Text = cur.Fio;
+            Button ok = Ui.Button("OK", true), cancel = Ui.Button("Отмена", false);
+            ok.DialogResult = DialogResult.OK;
+            cancel.DialogResult = DialogResult.Cancel;
+            ok.SetBounds(304, 144, 96, 36);
+            cancel.SetBounds(408, 144, 96, 36);
+            f.Controls.AddRange(new Control[] { lp, post, lf, fio, ok, cancel });
+            f.AcceptButton = ok;
+            f.CancelButton = cancel;
+            St.Dress(f);
+            if (f.ShowDialog(this) != DialogResult.OK) return;
+            SetSign(post.Text.Trim(), fio.Text.Trim());
+        }
+    }
+
+    // для проверки и из окна: должность и Ф.И.О. партии (и для следующих партий)
+    public void SetSign(string post, string fio) {
+        if (cur == null) return;
+        cur.Post = post;
+        cur.Fio = fio;
+        try { cur.Save(); } catch (Exception ex) { MessageBox.Show(this, "Не сохранилось: " + ex.Message, Text); return; }
+        memory.Values["ПломбыДолжность"] = post;
+        if (fio.Length > 0) memory.Values["ПломбыФИО"] = fio;
+        memory.Save();
+        Reload();
+    }
+
     public void Reload() {
+        FixPost();
         string keep = cur != null ? cur.File : memory.Get("ПломбыПартия", "");
         batches.Clear();
         try {
@@ -25750,7 +25823,7 @@ public class BatchDialog : Form {
         };
         fio.SetItems(names);
         fio.Text = memory.Get("ПломбыФИО", memory.Get("oformil", ""));
-        post.Text = memory.Get("ПломбыДолжность", "");
+        post.Text = memory.Get("ПломбыДолжность", SealBatch.DefaultPost);
         Ui.Cue(first, "например 4830401 или 0012345001");
         first.TextChanged += delegate { Check(); };
         count.TextChanged += delegate { Check(); };
