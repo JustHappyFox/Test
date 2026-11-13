@@ -1,21 +1,41 @@
-"""Обработка живого голоса для квиз-роликов (владелец 12.11: «нормальная интонация, отфильтровать шумы и
-посторонние звуки, немного заавтотюнить»; клиент: «немного изменишь голос»).
+"""Обработка живого голоса для квиз-роликов: чистый, близкий и звонкий голос из записи на телефон.
 
-  python voice_fx.py ВХОД ВЫХОД.wav [--pitch -1.5] [--tune 0.4] [--formant 1.0] [--tempo 1.0]
+  python voice_fx.py ВХОД ВЫХОД.wav [--pitch 1.0] [--tune 0] [--tempo 1.0] [--deep-filter ПУТЬ]
 
-Цепочка: срез низа, щелчки → мягкое шумоподавление (afftdn) → обрезка тишины по краям →
-Praat (PSOLA): лёгкая подтяжка высоты к ближайшей ноте («автотюн»), сдвиг высоты, при нужде — ускорение →
-эквалайзер (подъём 1,3–3,5 кГц против «зажатого носа»), мягкий компрессор → ровная громкость (RMS −18 дБ).
-Проверка 12.11 распознаванием речи: WORLD-вокодер и сдвиг тембра (formant) портят разборчивость,
-Praat с formant=1.0 — нет, поэтому по умолчанию Praat без сдвига тембра.
+Владелец 13.11 про «Машину»: «с какими-то шумами, как будто в ванной, а должен быть чистый и звонкий. Как будто
+говорит человек в комнате со мной, а там как будто разговаривает из другой комнаты».
+Что показали измерения (voice_qa.py — DNSMOS, оценки 1–5; слух у меня заменяют они):
+  запись Крис как есть      общее 2,47  речь 3,22  фон 3,05
+  прежняя обработка         общее 2,00  речь 3,17  фон 2,17   — стало ХУЖЕ записи
+  эта цепочка               общее 3,13  речь 3,47  фон 3,92   (чистый синтез Piper: 3,30 / 3,56 / 4,06)
+Причины и что сделано:
+  * шум и «ванная»: компрессор поднимал хвосты эха между слогами, afftdn/noisereduce давали призвук →
+    нейросеть DeepFilterNet3 (убирает шум и хвосты эха), компрессора нет вовсе;
+  * «из другой комнаты»: в записи почти нет верхов (1,3–10 кГц ниже нормы на 10–15 дБ), а я ещё понижал голос →
+    эквалайзер подтягивает спектр к норме женской речи; «немного изменить голос» (просьба клиента) теперь
+    сдвигом ВВЕРХ на 1 полутон вместе с тембром (простой пересчёт частоты — без вокодера, качество не падает);
+  * автотюн (PSOLA) стоит ~0,1 балла — по умолчанию выключен (--tune 0.3 включает).
 """
 import argparse
+import os
+import shutil
 import subprocess
+import sys
+import tempfile
 from pathlib import Path
 
 import numpy as np
 
 FS = 48000
+HERE = Path(__file__).resolve().parent
+# Спектр к норме женской речи (после DeepFilterNet3 и сдвига +1): по полосам в пределах ~3 дБ от нормы.
+EQ = ["highpass=f=90:r=f64",
+      "equalizer=f=200:t=q:w=0.8:g=-1:r=f64",
+      "equalizer=f=650:t=q:w=1.0:g=-3:r=f64",      # «гнусавость»
+      "equalizer=f=1000:t=q:w=1.4:g=-4:r=f64",     # «зажатый нос», «коробка»
+      "equalizer=f=1900:t=q:w=0.9:g=8:r=f64",      # открыть голос: в записи тут провал
+      "equalizer=f=3300:t=q:w=1.0:g=1:r=f64",
+      "highshelf=f=5000:g=6:r=f64"]                # звонкость и «воздух»
 
 
 def decode(src: Path, sr: int = FS) -> np.ndarray:
@@ -52,95 +72,69 @@ def trim(x: np.ndarray, sr: int = FS, thr_db: float = -38, pad: float = 0.06) ->
     return y
 
 
-def retune(x: np.ndarray, sr: int, pitch: float, tune: float, formant: float, expand: float) -> np.ndarray:
-    """WORLD: высота голоса — к ближайшей ноте на долю tune, сдвиг на pitch полутонов, тембр × formant."""
-    import pyworld as pw
-    xd = x.astype(np.float64)
-    f0, t = pw.harvest(xd, sr, f0_floor=70, f0_ceil=700, frame_period=5.0)
-    sp = pw.cheaptrick(xd, f0, t, sr)
-    ap = pw.d4c(xd, f0, t, sr)
-    voiced = f0 > 0
-    if voiced.any():
-        m = 12 * np.log2(f0[voiced] / 440.0)
-        center = np.median(m)
-        m = center + (m - center) * expand          # интонация: чуть живее, если чтение монотонное
-        m = m + tune * (np.round(m) - m)            # «автотюн»: подтянуть к ноте, но не до робота
-        m = m + pitch
-        f0n = f0.copy()
-        f0n[voiced] = 440.0 * 2 ** (m / 12)
-        # сгладить ступеньки между кадрами (медиана по 5 кадрам внутри звонких участков)
-        from scipy.ndimage import median_filter
-        sm = median_filter(f0n, size=5)
-        f0n = np.where(voiced & (sm > 0), sm, f0n)
-    else:
-        f0n = f0
-    if formant != 1.0:  # сдвиг формант: растягиваем огибающую спектра по частоте
-        k = np.arange(sp.shape[1])
-        src = np.clip(k / formant, 0, sp.shape[1] - 1)
-        sp = np.stack([np.interp(src, k, row) for row in sp])
-    y = pw.synthesize(f0n, sp, ap, sr, frame_period=5.0)
-    return y.astype(np.float32)
+def find_deep_filter(path: str | None = None) -> str | None:
+    """Программа deep-filter (DeepFilterNet3, модель внутри): аргумент, $DEEP_FILTER, PATH или tools/ рядом."""
+    for c in (path, os.environ.get("DEEP_FILTER"), shutil.which("deep-filter"), HERE / "tools" / "deep-filter"):
+        if c and Path(c).is_file():
+            return str(c)
+    return None
 
 
-def retune_praat(x: np.ndarray, sr: int, pitch: float, tune: float, formant: float, expand: float,
-                 tempo: float = 1.0) -> np.ndarray:
-    """То же через Praat (PSOLA): согласные не трогаются, речь разборчивее, чем через WORLD (проверка 12.11)."""
+def deep_filter(x: np.ndarray, binary: str) -> np.ndarray:
+    """Шум и хвосты эха — нейросетью DeepFilterNet3 (48 кГц). Скачанную программу запускаем без сети."""
+    import soundfile as sf
+    with tempfile.TemporaryDirectory() as d:
+        sf.write(f"{d}/a.wav", x, FS, subtype="PCM_16")
+        cmd = [binary, "-D", "-o", f"{d}/o", f"{d}/a.wav"]
+        if shutil.which("unshare"):
+            cmd = ["unshare", "-r", "-n"] + cmd
+        subprocess.run(cmd, check=True, capture_output=True)
+        y, _ = sf.read(f"{d}/o/a.wav", dtype="float32")
+    return y
+
+
+def autotune(x: np.ndarray, sr: int, tune: float) -> np.ndarray:
+    """Лёгкий «автотюн» через Praat (PSOLA): высота — к ближайшей ноте на долю tune. Стоит ~0,1 балла качества."""
     import parselmouth
     from parselmouth.praat import call
     snd = parselmouth.Sound(x.astype(np.float64), sampling_frequency=sr)
     man = call(snd, "To Manipulation", 0.01, 75, 600)
     tier = call(man, "Extract pitch tier")
     n = int(call(tier, "Get number of points"))
-    if n and (pitch or tune or expand != 1.0):
-        ts = [call(tier, "Get time from index", i + 1) for i in range(n)]
-        fs = np.array([call(tier, "Get value at index", i + 1) for i in range(n)])
-        m = 12 * np.log2(fs / 440.0)
-        c = np.median(m)
-        m = c + (m - c) * expand                      # интонация: чуть живее, если чтение монотонное
-        m = m + tune * (np.round(m) - m)              # «автотюн»: подтянуть к ноте, но не до робота
-        m = m + pitch
-        call(tier, "Remove points between", 0, snd.duration + 1)
-        for t, v in zip(ts, m):
-            call(tier, "Add point", t, 440.0 * 2 ** (v / 12))
-        call([tier, man], "Replace pitch tier")
-    if tempo != 1.0:  # ускорение тем же PSOLA — разборчивее, чем atempo
-        dt = call("Create DurationTier", "dur", 0, snd.duration)
-        call(dt, "Add point", 0, 1 / tempo)
-        call([man, dt], "Replace duration tier")
-    y = call(man, "Get resynthesis (overlap-add)")
-    if formant != 1.0:  # тембр: формантами вниз/вверх, высоту и длительность не меняем
-        y = call(y, "Change gender", 75, 600, formant, 0, 1, 1)
-    return np.asarray(y.values[0], np.float32)
+    if not n:
+        return x
+    ts = [call(tier, "Get time from index", i + 1) for i in range(n)]
+    m = 12 * np.log2(np.array([call(tier, "Get value at index", i + 1) for i in range(n)]) / 440.0)
+    m = m + tune * (np.round(m) - m)
+    call(tier, "Remove points between", 0, snd.duration + 1)
+    for t, v in zip(ts, m):
+        call(tier, "Add point", t, 440.0 * 2 ** (v / 12))
+    call([tier, man], "Replace pitch tier")
+    return np.asarray(call(man, "Get resynthesis (overlap-add)").values[0], np.float32)
 
 
-def process(src: Path, out: Path, out_sr: int, pitch: float = -1.5, tune: float = 0.4, formant: float = 1.0,
-            expand: float = 1.0, tempo: float = 1.0, denoise: str = "afftdn", engine: str = "praat") -> Path:
-    """Владелец 12.11 после «Машины»: «голос приглушённый, как будто с зажатым носом». Разбор спектра:
-    в её записях (микрофон телефона) провал 1,3–2 кГц на ~10 дБ против чистого голоса и много низов;
-    noisereduce добавлял «подводный» призвук. Поэтому: мягкий шумодав ffmpeg, подъём 1,3–3,5 кГц,
-    меньше низов, фильтры с двойной точностью, громкость — мягким ограничителем, без обрезки."""
+def process(src: Path, out: Path, out_sr: int, pitch: float = 1.0, tune: float = 0.0, tempo: float = 1.0,
+            deepfilter: str | None = None) -> Path:
+    """pitch — сдвиг высоты вместе с тембром, полутона (+ звонче, − глуше); tune — автотюн 0…1; tempo — скорость."""
     import soundfile as sf
-    x = decode(src)
-    x = ffilter(x, "highpass=f=80,adeclick")
-    if denoise == "afftdn":    # мягко: гул и шипение, голос не трогаем
+    x = ffilter(decode(src), "highpass=f=70")
+    binary = find_deep_filter(deepfilter)
+    if binary:
+        x = deep_filter(x, binary)
+    else:  # запасной вариант заметно хуже — предупреждаем
+        print("ВНИМАНИЕ: deep-filter не найден — шумы чистит простой фильтр, звук будет хуже", file=sys.stderr)
         x = ffilter(x, "afftdn=nr=10:nf=-50:tn=1")
-    elif denoise == "nr":      # старый вариант (noisereduce) — даёт призвук, не по умолчанию
-        import noisereduce as nr
-        x = nr.reduce_noise(y=x, sr=FS, stationary=True, prop_decrease=0.7, n_fft=2048).astype(np.float32)
     x = trim(x)
     x = x / (np.abs(x).max() + 1e-9) * 0.5   # запас по громкости: подъёмы эквалайзера без перегруза
-    if engine == "praat":
-        x = retune_praat(x, FS, pitch, tune, formant, expand, tempo)
-    elif pitch or tune or formant != 1.0 or expand != 1.0:
-        x = retune(x, FS, pitch, tune, formant, expand)
-    eq = ["highpass=f=90:r=f64",
-          "equalizer=f=200:t=q:w=0.8:g=-3:r=f64",     # меньше «бубнения» и гула
-          "equalizer=f=700:t=q:w=1.2:g=-3:r=f64",     # «гнусавость»: избыток 500–800 Гц
-          "equalizer=f=1600:t=q:w=0.8:g=8:r=f64",     # открыть голос: провал 1,3–2 кГц — тот самый «нос»
-          "equalizer=f=3200:t=q:w=1.0:g=3:r=f64",     # разборчивость согласных
-          "highshelf=f=7000:g=2:r=f64",               # немного воздуха
-          "acompressor=threshold=-26dB:ratio=2.5:attack=10:release=150"]
-    y = ffilter(x, ",".join(eq), FS, out_sr)
+    if tune:
+        x = autotune(x, FS, tune)
+    chain = []
+    ratio = 2 ** (pitch / 12)
+    if pitch:      # высота и тембр вместе: пересчёт частоты, длительность возвращаем
+        chain += [f"asetrate={FS * ratio:.0f}", f"aresample={FS}"]
+    if pitch or tempo != 1.0:
+        chain.append(f"atempo={tempo / ratio:.5f}")
+    y = ffilter(x, ",".join(chain + EQ), FS, out_sr)   # компрессора нет намеренно: он поднимает эхо и шум
     y = trim(y, out_sr, thr_db=-45, pad=0.04)
     # ровная громкость клипов: по RMS звонкой части, пики — мягким ограничителем
     w = int(out_sr * 0.05)
@@ -158,11 +152,9 @@ if __name__ == "__main__":
     ap.add_argument("src")
     ap.add_argument("out")
     ap.add_argument("--sr", type=int, default=44100)
-    ap.add_argument("--pitch", type=float, default=-1.5)
-    ap.add_argument("--tune", type=float, default=0.4)
-    ap.add_argument("--formant", type=float, default=1.0)
-    ap.add_argument("--expand", type=float, default=1.0)
+    ap.add_argument("--pitch", type=float, default=1.0, help="сдвиг высоты и тембра, полутона")
+    ap.add_argument("--tune", type=float, default=0.0, help="автотюн 0…1 (0 — выключен)")
     ap.add_argument("--tempo", type=float, default=1.0)
-    ap.add_argument("--denoise", choices=["afftdn", "nr", "none"], default="afftdn")
+    ap.add_argument("--deep-filter", help="путь к программе deep-filter (DeepFilterNet)")
     a = ap.parse_args()
-    process(Path(a.src), Path(a.out), a.sr, a.pitch, a.tune, a.formant, a.expand, a.tempo, a.denoise)
+    process(Path(a.src), Path(a.out), a.sr, a.pitch, a.tune, a.tempo, a.deep_filter)

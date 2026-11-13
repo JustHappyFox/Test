@@ -20,6 +20,7 @@ import argparse
 import hashlib
 import json
 import math
+import re
 import subprocess
 import sys
 import time
@@ -229,6 +230,16 @@ def duck(music: np.ndarray, voice: np.ndarray, depth_db: float) -> np.ndarray:
     return music * g.astype(np.float32)
 
 
+def loud_filter(audio: Path, target: float) -> str:
+    """Фильтр ffmpeg: довести дорожку до target LUFS постоянным усилением (+ ограничитель пиков).
+
+    Однопроходный loudnorm меняет усиление на ходу — в паузах поднимает шум и эхо (владелец 13.11: «с шумами»)."""
+    err = subprocess.run(["ffmpeg", "-hide_banner", "-nostats", "-i", str(audio), "-af", "ebur128=framelog=quiet",
+                          "-f", "null", "-"], capture_output=True, text=True).stderr
+    measured = float(re.findall(r"I:\s+(-?[\d.]+) LUFS", err)[-1])
+    return f"volume={target - measured:.2f}dB,alimiter=limit=0.84:attack=5:release=80:level=disabled"
+
+
 def mix(track: np.ndarray, clip: np.ndarray, at: float):
     a = int(at * SR)
     b = min(len(track), a + len(clip))
@@ -246,9 +257,10 @@ def main():
     ap.add_argument("--speed", type=float, default=0.9, help="темп речи Piper: меньше — быстрее")
     ap.add_argument("--voice-files", help="папка с записями живого голоса по порядку: вступление, вопрос 1, "
                                           "пояснение 1, …, вопрос N, пояснение N, концовка (клиент 12.11)")
-    ap.add_argument("--voice-pitch", type=float, default=-1.5, help="сдвиг живого голоса, полутона (0 — без изменений)")
-    ap.add_argument("--voice-tune", type=float, default=0.4, help="«автотюн»: доля подтяжки к нотам (0 — выкл., 1 — робот)")
-    ap.add_argument("--voice-formant", type=float, default=1.0, help="тембр живого голоса (<1 — ниже; сдвиг тембра хуже для разборчивости — проверка 12.11)")
+    ap.add_argument("--voice-pitch", type=float, default=1.0,
+                    help="«немного изменить голос»: сдвиг высоты вместе с тембром, полутона (+ звонче; 0 — как есть)")
+    ap.add_argument("--voice-tune", type=float, default=0.0,
+                    help="«автотюн»: доля подтяжки к нотам (0 — выкл.; стоит чистоты звука — проверка 13.11)")
     ap.add_argument("--voice-tempo", type=float, default=1.0, help="скорость пояснений и концовки живым голосом (1.1 — на 10%% быстрее)")
     ap.add_argument("--timer", type=float, default=10.0, help="секунд на размышление")
     ap.add_argument("--min-duration", type=float, default=62.0, help="ролик не короче, с")
@@ -326,8 +338,8 @@ def main():
         if own:
             # ускоряем только пояснения и концовку: вопросы на длину ролика не влияют (таймер 10 с)
             tempo = a.voice_tempo if name[0] in "eo" else 1.0
-            return own_voice(own[name], work, name, {"pitch": a.voice_pitch, "tune": a.voice_tune,
-                                                     "formant": a.voice_formant, "tempo": tempo})
+            return own_voice(own[name], work, name, {"pitch": a.voice_pitch, "tune": a.voice_tune, "tempo": tempo,
+                                                     "deepfilter": str(assets / "tools" / "deep-filter")})
         h = hashlib.md5(f"{text}|{a.speed}".encode()).hexdigest()[:8]
         return say(text, voice, work / f"{name}_{a.voice}_{h}.wav", a.speed)
     intro_voice = vo(quiz.get("intro_voice") or f"Квиз про {quiz['topic']}! Проверь себя!", "intro")
@@ -430,7 +442,7 @@ def main():
 
     if a.audio_only:
         subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(audio), "-af",
-                        f"loudnorm=I={a.loudness}:TP=-1.5:LRA=11", "-ar", "44100", "-b:a", "160k",
+                        loud_filter(audio, a.loudness), "-ar", "44100", "-b:a", "160k",
                         str(work / "audio.mp3")], check=True)
         log("звук:", work / "audio.mp3")
         return
@@ -439,7 +451,7 @@ def main():
     log(f"рендер кадров: {total:.1f} с ролика…")
     subprocess.run(["node", str(HERE / "render.js"), str(tl_path), str(video)], check=True)
     subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(video), "-i", str(audio), "-map", "0:v", "-map", "1:a",
-                    "-c:v", "copy", "-af", f"loudnorm=I={a.loudness}:TP=-1.5:LRA=11", "-ar", "44100", "-c:a", "aac",
+                    "-c:v", "copy", "-af", loud_filter(audio, a.loudness), "-ar", "44100", "-c:a", "aac",
                     "-b:a", "160k", "-shortest", "-movflags", "+faststart", str(out)], check=True)
     log(f"готово: {out} ({out.stat().st_size / 1e6:.1f} МБ, {total:.0f} с)")
 
