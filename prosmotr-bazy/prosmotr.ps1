@@ -2540,6 +2540,55 @@ public class LiveBase {
 
     static readonly string[] AccountFields = { "NAB", "LS", "LIC", "LSCH", "LS_ERIP" };
 
+    // Режим Excel: своя копия выгрузки быта (byt.dbf) целиком в памяти, поиск - AbonentQuery по всей таблице (индексов нет)
+    public DbfTable Mem;
+    int memLimit = FetchLimit;      // сколько найденных показывать (больше - «показана часть»)
+
+    public static LiveBase OpenMemory(string path, StreetDirectory dir) {
+        LiveBase b = new LiveBase();
+        b.FilePath = path;
+        b.Mem = DbfTable.Load(path, false);
+        b.Mem.FilePath = path;
+        b.Header = b.Mem;
+        b.Sample = b.Mem;
+        b.RecordCount = b.Mem.Count;
+        b.Dir = dir;
+        return b;
+    }
+
+    // поиск в памяти (режим Excel): как перебор, только таблица уже прочитана; ФИО с адресом - «Иванов Боровляны»
+    SearchResult SearchMemory(string text, SearchMode mode, Dictionary<string, bool> selsovety, int limit, bool partial) {
+        DateTime started = DateTime.Now;
+        memLimit = mode == SearchMode.Address ? Math.Max(limit, SeekLimit) : Math.Max(limit, FetchLimit);
+        SearchResult res = MemoryOnce(text, mode, selsovety, partial, null, null);
+        if (mode == SearchMode.Name && res.Rows.Count == 0 && res.Hidden == 0) {
+            string[] w = DbfTable.SplitWords(text);
+            for (int k = w.Length - 1; k >= 1; k--) {
+                string name = string.Join(" ", w, 0, k), place = string.Join(" ", w, k, w.Length - k);
+                SearchResult a = MemoryOnce(text, mode, selsovety, partial, name, place);
+                if (a.Rows.Count > 0 || a.Hidden > 0) { res = a; break; }
+            }
+        }
+        res.How = "выгрузка в памяти (" + Mem.Count + " записей)" + (res.How.Length > 0 ? "; " + res.How : "");
+        res.Seconds = (DateTime.Now - started).TotalSeconds;
+        return res;
+    }
+
+    SearchResult MemoryOnce(string text, SearchMode mode, Dictionary<string, bool> selsovety, bool partial, string nameText, string addressText) {
+        DateTime started = DateTime.Now;
+        SearchResult res = new SearchResult();
+        res.Text = text;
+        res.Mode = mode;
+        res.Partial = partial;
+        res.NameText = nameText;
+        res.AddressText = addressText;
+        if (mode == SearchMode.Address && !partial && Dir != null) {
+            res.Address = Dir.Match(text);
+            if (res.Address.Problem != null) { res.Note = res.Address.Problem; return Finish(res, null, selsovety, started); }
+        }
+        return Finish(res, Mem, selsovety, started);
+    }
+
     public static LiveBase Open(string path) {
         LiveBase b = new LiveBase();
         b.FilePath = path;
@@ -3038,7 +3087,7 @@ public class LiveBase {
     readonly object namesLock = new object();
     public string NamesFile;               // файл индекса (в папке программы)
 
-    public bool NamesNeeded { get { return Header.FieldIndex("FIO") >= 0 && TagFor("FIO") == null; } }
+    public bool NamesNeeded { get { return Mem == null && Header.FieldIndex("FIO") >= 0 && TagFor("FIO") == null; } }
     public bool NamesReady { get { return names != null; } }
 
     // Файл индекса при запуске. Возвращает индекс, который надо (до)строить в фоне, или null - готов, строить не надо
@@ -3164,6 +3213,7 @@ public class LiveBase {
 
     // withAddress - ФИО с адресом ("Иванов Боровляны"), даже если есть индекс по ФИО
     SearchResult SearchOnce(string text, SearchMode mode, Dictionary<string, bool> selsovety, int limit, bool partial, bool withAddress) {
+        if (Mem != null) return SearchMemory(text, mode, selsovety, limit, partial);
         DateTime started = DateTime.Now;
         SearchResult res = new SearchResult();
         res.Text = text;
@@ -3271,6 +3321,7 @@ public class LiveBase {
                 foreach (int row in res.Query.Find(res.AddressText, SearchMode.Address)) here[row] = true;
                 rows = rows.FindAll(delegate(int row) { return here.ContainsKey(row); });
             }
+            if (Mem != null && part == Mem && rows.Count > memLimit) { rows.RemoveRange(memLimit, rows.Count - memLimit); res.TooMany = true; }
             int ul = part.FieldIndex("UL");
             foreach (int row in rows) {
                 if (Dir != null && ul >= 0 && selsovety != null
@@ -3354,8 +3405,8 @@ public class LiveBase {
         DbfTable tb = res.Table;
         int ulF = tb.FieldIndex("UL"), domF = tb.FieldIndex("DOM"), fioF = tb.FieldIndex("FIO");
         if (ulF < 0 || domF < 0) return;
-        IndexTag t = TagFor("UL", true);
-        if (t == null || t.Terms.Count < 2 || t.TermFields[1] != "DOM") return;
+        IndexTag t = Mem != null ? null : TagFor("UL", true);
+        if (Mem == null && (t == null || t.Terms.Count < 2 || t.TermFields[1] != "DOM")) return;
         List<int> searched = new List<int>();
         foreach (int row in res.Rows) if (!res.Added.ContainsKey(row)) searched.Add(row);
         // дома найденных (не больше 30 - иначе поиск по общему адресу читал бы слишком много)
@@ -3370,17 +3421,24 @@ public class LiveBase {
         if (houses.Count == 0) return;
         Dictionary<int, int> rowOfRec = new Dictionary<int, int>();
         for (int row = 0; row < tb.Count; row++) rowOfRec[tb.RecNos[row]] = row;
-        Seeker s = new Seeker();
-        try {
-            foreach (List<int> list in houses.Values) {
-                int r0 = list[0];
-                s.Seek(t, KeyFor(t, new string[] { Field(tb, r0, ulF), Field(tb, r0, domF) }, false));
+        List<int> foundRecs = new List<int>();
+        if (Mem != null) {
+            // режим Excel: вся таблица в памяти - дома найденных ищем перебором строк
+            for (int row = 0; row < tb.Count; row++) if (houses.ContainsKey(HouseKey(tb, row))) foundRecs.Add(tb.RecNos[row]);
+        } else {
+            Seeker s = new Seeker();
+            try {
+                foreach (List<int> list in houses.Values) {
+                    int r0 = list[0];
+                    s.Seek(t, KeyFor(t, new string[] { Field(tb, r0, ulF), Field(tb, r0, domF) }, false));
+                }
+            } finally {
+                s.Close();
             }
-        } finally {
-            s.Close();
+            foundRecs.AddRange(s.Found.Keys);
         }
         List<int> missing = new List<int>();
-        foreach (int rec in s.Found.Keys) if (!rowOfRec.ContainsKey(rec)) missing.Add(rec);
+        foreach (int rec in foundRecs) if (!rowOfRec.ContainsKey(rec)) missing.Add(rec);
         bool grown = false;
         if (missing.Count > 0) {
             int deleted;
@@ -3397,7 +3455,7 @@ public class LiveBase {
         Dictionary<int, bool> shown = new Dictionary<int, bool>();
         foreach (int row in res.Rows) shown[row] = true;
         int added = 0;
-        foreach (int rec in s.Found.Keys) {
+        foreach (int rec in foundRecs) {
             int h;
             if (!rowOfRec.TryGetValue(rec, out h) || shown.ContainsKey(h)) continue;
             List<int> list;
@@ -4615,6 +4673,8 @@ public class ScanResults : Form {
 public static class FieldNames {
     static Dictionary<string, string> names;
 
+    public static Dictionary<string, string> Excel;      // режим Excel: поле копии -> заголовок выгрузки
+
     public static string Label(string field) {
         if (names == null) {
             names = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -4632,7 +4692,9 @@ public static class FieldNames {
             for (int i = 0; i + 1 < pairs.Length; i += 2) names[pairs[i]] = pairs[i + 1];
         }
         string label;
-        return names.TryGetValue(field, out label) ? label : null;
+        if (names.TryGetValue(field, out label)) return label;
+        if (Excel != null && Excel.TryGetValue(field, out label) && label.Length > 0) return label;
+        return null;
     }
 
     public static string Title(string field) {
@@ -4782,9 +4844,10 @@ public class BaseCard : Form {
         nextButton = AddButton("След. (PgDn) >", delegate { Step(1); });
         extraButton = AddButton("Доп. сведения (Ctrl+D)", delegate { ToggleExtra(); });
         AddButton("Все поля (F2)", delegate { ResultColumns.ShowList(this, res, this.row, live == null ? null : live.Extra); });
-        AddButton("Оплаты (F6)", delegate { ShowOplaty(); });
+        bool excel = live != null && live.Mem != null;      // режим Excel-выгрузки: оплат и обходов нет
+        if (!excel) AddButton("Оплаты (F6)", delegate { ShowOplaty(); });
         AddButton("Наряды (Ctrl+Z)", delegate { ShowNaryady(); });
-        AddButton("Обходы (Ctrl+O)", delegate { ShowObhody(); });
+        if (!excel) AddButton("Обходы (Ctrl+O)", delegate { ShowObhody(); });
         closeButton = AddButton("Закрыть (Esc)", delegate { Close(); });
         prevButton.Enabled = nextButton.Enabled = move != null;
         Controls.Add(bar);
@@ -4839,6 +4902,7 @@ public class BaseCard : Form {
     }
 
     internal void ShowNaryady() {
+        if (live != null && live.Mem != null) { MessageBox.Show(this, (Istochnik.Missing("нарядов", Istochnik.NaryadyPath) ?? "Наряды из выгрузки нарядов подключим, когда будет образец выгрузки."), Text); return; }
         if (live == null || Field("NAB").Length == 0) { System.Media.SystemSounds.Beep.Play(); return; }
         LastWindow = new NaryadLsForm(Path.GetDirectoryName(live.FilePath), Field("NAB"), Who());
         LastWindow.Show(this);
@@ -4846,12 +4910,14 @@ public class BaseCard : Form {
 
     // F6 - оплаты лицевого (за текущий год, стрелки вверх / вниз - другой год)
     internal void ShowOplaty() {
+        if (live != null && live.Mem != null) { MessageBox.Show(this, "В Excel-выгрузке быта оплат и обходов нет.", Text); return; }
         if (live == null || Field("NAB").Length == 0) { System.Media.SystemSounds.Beep.Play(); return; }
         LastWindow = new OplataForm(Path.GetDirectoryName(live.FilePath), Field("NAB"), Who());
         LastWindow.Show(this);
     }
 
     internal void ShowObhody() {
+        if (live != null && live.Mem != null) { MessageBox.Show(this, "В Excel-выгрузке быта оплат и обходов нет.", Text); return; }
         if (live == null || Field("NAB").Length == 0) { System.Media.SystemSounds.Beep.Play(); return; }
         LastWindow = new ObhodForm(Path.GetDirectoryName(live.FilePath), Field("NAB"), Who());
         LastWindow.Show(this);
@@ -6127,6 +6193,28 @@ public class StreetDirectory {
         return w;
     }
 
+    // режим Excel: справочник улиц своей копии выгрузки (код -> н.п., улица, сельсовет; VygruzkaByt.ReadStreets)
+    public static StreetDirectory FromCopy(string file) {
+        StreetDirectory dir = new StreetDirectory();
+        dir.TableName = Path.GetFileName(file);
+        dir.KeyField = "UL";
+        foreach (KeyValuePair<string, string[]> kv in VygruzkaByt.ReadStreets(file)) {
+            string code = NormalizeCode(kv.Key), town = kv.Value[0].Trim(), own = kv.Value[1].Trim(), ss = kv.Value[2].Trim();
+            StringBuilder display = new StringBuilder(town);
+            if (own.Length > 0) display.Append((display.Length > 0 ? ", " : "") + own);
+            if (ss.Length > 0) {
+                string l = ss.ToLowerInvariant();
+                display.Append((display.Length > 0 ? ", " : "") + ss + (l.Contains("с/с") || l.Contains("сельсовет") ? "" : " с/с"));
+            }
+            dir.names[code] = display.ToString();
+            dir.lowerNames[code] = display.ToString().ToLowerInvariant().Replace('ё', 'е');
+            dir.ssOf[code] = CleanSs(ss);
+            dir.townOf[code] = town;
+            dir.streetOf[code] = own;
+        }
+        return dir;
+    }
+
     public bool HasTowns {
         get { foreach (string t in townOf.Values) if (t.Length > 0) return true; return false; }
     }
@@ -6800,6 +6888,7 @@ public class AbonentSearch : Form {
     string tableName;
     LiveBase live;                       // открытая база (null - ещё не открыта)
     bool opening;
+    bool excelMode;                      // данные - из Excel-выгрузки быта (меню: «Настройки…»), а не из базы
     SearchResult current;
     bool searching, again;               // идёт поиск; пока он шёл, запрос поменялся
     bool scanning;
@@ -7086,6 +7175,14 @@ public class AbonentSearch : Form {
     string ThemeLine { get { return themeLine ?? (Places.ReadSetting(settingsFile, 6) ?? (Look.Dark ? "тёмная" : "светлая")); } }
 
     void SaveSettings() {
+        if (excelMode) {
+            List<string> keep = new List<string>();
+            for (int i = 0; i < 6; i++) keep.Add(Places.ReadSetting(settingsFile, i) ?? "");
+            keep[2] = ((int)mode).ToString();
+            keep.Add(ThemeLine);
+            Places.SaveSettings(settingsFile, keep.ToArray());
+            return;
+        }
         if (folder == null) { if (themeLine != null) SaveTheme(); return; }
         StreetDirectory d = live == null ? null : live.Dir;
         List<string> links = new List<string>();
@@ -7142,6 +7239,8 @@ public class AbonentSearch : Form {
         modeButtons[(int)mode].Checked = true;
         hint.Text = Hints[(int)mode];
         queryBox.Focus();
+        // меню программ: «Настройки…» -> «Excel-выгрузки» - данные из своей копии выгрузки быта, база не открывается
+        if (Istochnik.UseExcel) { OpenExcel(); return; }
         SetBusy(true, "Ищу папку базы...");
         folder = Places.FindFolder(Places.ReadSetting(settingsFile, 0));
         Report.Line("Папка базы: " + folder);
@@ -7175,6 +7274,51 @@ public class AbonentSearch : Form {
             return;
         }
         OpenBase();
+    }
+
+    // ---- режим Excel: своя копия выгрузки быта (создаётся в меню: «Настройки…» -> «Обновить индексы»), целиком в памяти ----
+    internal void OpenExcel() {
+        excelMode = true;
+        Report.Line("Источник данных: Excel-выгрузка (меню программ, «Настройки…»): " + Istochnik.BytPath);
+        string problem = Istochnik.BytCacheProblem();
+        if (problem != null) {
+            Report.Line("    " + problem);
+            status.Text = problem;
+            status.ForeColor = Look.Bad;
+            return;
+        }
+        if (opening) return;
+        opening = true;
+        live = null;
+        current = null;
+        grid.RowCount = 0;
+        SetBusy(true, "Открываю " + Istochnik.BytAbout() + "...");
+        System.Threading.Thread th = new System.Threading.Thread(delegate() {
+            LiveBase b = null;
+            string error = null;
+            Dictionary<string, bool> sel = null;
+            DateTime t0 = DateTime.Now;
+            try {
+                b = LiveBase.OpenMemory(Istochnik.BytTable, StreetDirectory.FromCopy(Istochnik.BytStreets));
+                FieldNames.Excel = VygruzkaByt.Labels();
+                sel = LoadSelection(b);
+                Report.Line("Выгрузка быта: записей " + b.Mem.Count + ", улиц " + b.Dir.Count + ", прочитана за " + (DateTime.Now - t0).TotalSeconds.ToString("0.0") + " с");
+                Report.Line("--- поиски (сами слова не записываются) ---");
+            } catch (Exception ex) {
+                error = ex.Message;
+                Report.Line("ОШИБКА открытия выгрузки: " + ex.Message);
+            }
+            double seconds = (DateTime.Now - t0).TotalSeconds;
+            Post(delegate {
+                AfterOpen(b, sel, error == null ? null : error + " (меню программ: «Настройки…» -> «Обновить индексы»)", seconds);
+                if (error == null) {
+                    baseInfo = Istochnik.BytAbout();
+                    status.Text = "Открыта " + baseInfo + " за " + seconds.ToString("0.0") + " с. Наряды, обходы и оплаты в режиме выгрузки не показываются.";
+                }
+            });
+        });
+        th.IsBackground = true;
+        th.Start();
     }
 
     // ---- открытие базы: заголовок, индексы и справочники; самих абонентов не читаем ----
@@ -7860,6 +8004,11 @@ public class AbonentSearch : Form {
 
     // окно нарядов: по номеру - выполнен или нет (таблица нарядов - в папке базы)
     internal void OpenNaryady() {
+        if (excelMode) {
+            MessageBox.Show(this, "Сейчас данные берутся из Excel-выгрузки (меню программ: «Настройки…»).\n\n" +
+                (Istochnik.Missing("нарядов", Istochnik.NaryadyPath) ?? "Наряды из выгрузки нарядов подключим, когда будет образец выгрузки."), Text);
+            return;
+        }
         if (folder == null || !Directory.Exists(folder)) {
             MessageBox.Show(this, "Папка базы не найдена. Нажмите \"Где искать...\" и выберите её.", Text);
             return;
@@ -7871,6 +8020,10 @@ public class AbonentSearch : Form {
 
     // Выбор папки и таблицы абонентов, если сама не нашлась или нашлась не та
     void ChooseBase() {
+        if (excelMode) {
+            MessageBox.Show(this, "Сейчас данные берутся из Excel-выгрузки: " + Istochnik.BytPath + "\n\nПоменять файл или вернуться к базе - меню программ: «Настройки…» (потом закройте и откройте «Поиск»).", Text);
+            return;
+        }
         Form d = new Form();
         d.Font = Look.Base;
         Look.Wear(d);
