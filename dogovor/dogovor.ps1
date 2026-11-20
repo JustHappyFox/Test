@@ -27781,7 +27781,7 @@ public static class SealRegistry {
                 u.Ls = Get(d, "dog_nom").Length > 0 ? "дог. " + Get(d, "dog_nom") : "";
                 u.Meter = Get(d, "pu1_zav");
                 u.Address = Get(d, "adres_kr");
-                u.Source = "БС " + Path.GetFileNameWithoutExtension(f);
+                u.Source = "пакет документов " + Path.GetFileNameWithoutExtension(f);
                 r.Add(u);
             }
         }
@@ -28350,7 +28350,7 @@ public class PlombyForm : Form {
                 v[0] = r.Index;
                 v[1] = r.Number;
                 for (int c = 0; c < SealRow.Cols; c++) v[2 + c] = r.Get(c);
-                v[9] = r.Conflict.Length > 0 ? "! и в " + r.Conflict : r.Source.Length > 0 ? (r.FromSpravka ? r.Source : "договор " + r.Source) : r.Used ? "вписано" : r.Paper ? "на бумаге (раньше)" : "";
+                v[9] = r.Conflict.Length > 0 ? "! и в " + r.Conflict : r.Source.Length > 0 ? (r.FromSpravka || r.Source.StartsWith("пакет документов ") ? r.Source : "договор " + r.Source) : r.Used ? "вписано" : r.Paper ? "на бумаге (раньше)" : "";
                 int i = grid.Rows.Add(v);
                 DataGridViewRow gr = grid.Rows[i];
                 gr.Tag = r;
@@ -28541,7 +28541,7 @@ public class PlombyForm : Form {
             if (!r.Used && r.Source.Length == 0) continue;
             sb.Append("  ").Append(r.Number);
             for (int c = 0; c < SealRow.Cols; c++) sb.Append(" | ").Append(r.Get(c));
-            sb.Append(" | ").Append(r.Conflict.Length > 0 ? "! и в " + r.Conflict : r.Source.Length > 0 ? (r.FromSpravka ? r.Source : "договор " + r.Source) : "вписано").Append('\n');
+            sb.Append(" | ").Append(r.Conflict.Length > 0 ? "! и в " + r.Conflict : r.Source.Length > 0 ? (r.FromSpravka || r.Source.StartsWith("пакет документов ") ? r.Source : "договор " + r.Source) : "вписано").Append('\n');
         }
         return sb.ToString();
     }
