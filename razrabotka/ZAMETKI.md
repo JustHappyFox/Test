@@ -37,7 +37,7 @@
 tools/bs_templates.py); (6) юр наряд (razrabotka/src/jur_naryad.cs, шаблон - tools/jur_naryad_template.py). Исходники src/ и
 shared/ вставляются в .ps1 скриптом tools/inject.py (править только их, потом inject + check.sh). Пользователю отдан
 obnovlenie-20.11.zip (12 файлов: все изменённые с 13.11). Ждём: образцы выгрузок юр и нарядов, проверку на работе (Word, Windows 7),
-образец «справки для расчетной группы», уточнение «юр справка» = юр наряд с фото?
+образец «справки для расчетной группы». «Юр справка» = юр наряд с фото (подтверждено 20.11).
 Проверки: razrabotka/tests/*.cs (runtest.sh), вымышленная выгрузка - tests/gen_byt.py; профиль для тестов - XDG_CONFIG_HOME/
 XDG_DATA_HOME в scratchpad test/profile (Mono: APPDATA/LOCALAPPDATA = они).
 
