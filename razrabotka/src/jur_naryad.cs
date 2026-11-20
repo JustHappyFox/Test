@@ -1,7 +1,7 @@
 // ==== БЛОК ЮР НАРЯДА (исходник - razrabotka/src/jur_naryad.cs; здесь не править - вставляется скриптом inject.py) ====
 // Наряд юр лица на включение (отключение) - лист A4, по фото бланка 20.11 (шаблон jur_naryad.docx рядом с программой).
 // Пока только заполнение: поля, списки, предпросмотр, сохранение в папку «Юр наряды», открыть сохранённый; данные можно
-// взять из сохранённого пакета БС.
+// взять из сохранённого пакета документов (БС).
 public class JurNaryadForm : Form {
     readonly string here, templateFile;
     readonly Lists lists;
@@ -246,10 +246,10 @@ public class JurNaryadForm : Form {
         p.Height = 66;
         p.BackColor = St.Surface;
         p.Paint += delegate(object s, PaintEventArgs e) { using (Pen pen = new Pen(St.Border)) e.Graphics.DrawLine(pen, 0, 0, p.Width, 0); };
-        Button fromBs = Ui.Button("Из пакета БС…", false);
+        Button fromBs = Ui.Button("Из пакета документов…", false);
         fromBs.SetBounds(24, 14, 150, 38);
         fromBs.Click += delegate { FromBs(); };
-        tip.SetToolTip(fromBs, "Взять потребителя, место, адрес, объект и подписи из сохранённого пакета БС");
+        tip.SetToolTip(fromBs, "Взять потребителя, место, адрес, объект и подписи из сохранённого пакета документов (БС)");
         Button clear = Ui.Button("Очистить", false);
         clear.SetBounds(184, 14, 100, 38);
         clear.Click += delegate {
@@ -324,11 +324,11 @@ public class JurNaryadForm : Form {
         RefreshState();
     }
 
-    // из сохранённого пакета БС: потребитель, место включения, адрес с подстанцией, объект, подписи
+    // из сохранённого пакета документов (БС): потребитель, место включения, адрес с подстанцией, объект, подписи
     void FromBs() {
         string dir = BsForm.DataFolder(here);
-        if (!Directory.Exists(dir) || Directory.GetFiles(dir, "*.txt").Length == 0) { MessageBox.Show(this, "Сохранённых пакетов БС пока нет.", Text); return; }
-        if (dirty && MessageBox.Show(this, "Заменить введённое данными пакета БС?", Text, MessageBoxButtons.YesNo, MessageBoxIcon.Question,
+        if (!Directory.Exists(dir) || Directory.GetFiles(dir, "*.txt").Length == 0) { MessageBox.Show(this, "Сохранённых пакетов документов пока нет.", Text); return; }
+        if (dirty && MessageBox.Show(this, "Заменить введённое данными пакета документов?", Text, MessageBoxButtons.YesNo, MessageBoxIcon.Question,
                 MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
         using (SavedDialog dlg = new SavedDialog(dir, 3)) {
             if (dlg.ShowDialog(this) != DialogResult.OK || dlg.Chosen == null) return;
@@ -353,7 +353,7 @@ public class JurNaryadForm : Form {
         } finally { loading = false; }
         dirty = true;
         headSub.ForeColor = St.Hint;
-        headSub.Text = "Заполнено из пакета БС - проверьте место включения и объекты";
+        headSub.Text = "Заполнено из пакета документов - проверьте место включения и объекты";
         RefreshState();
     }
 

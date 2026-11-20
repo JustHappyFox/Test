@@ -919,7 +919,7 @@ public class BsForm : Form {
         dirty = false;
         Enable();
         ShemaNote();
-        head.Text = "Новый пакет БС";
+        head.Text = "Новый пакет документов";
         headSub.ForeColor = St.Hint;
         headSub.Text = "Заполните договор, объект, приборы учёта, мощность, линии - строки документов собираются сами";
         RefreshState();
@@ -937,7 +937,7 @@ public class BsForm : Form {
 
     void OpenSaved() {
         string dir = DataFolder(here);
-        if (!Directory.Exists(dir) || Directory.GetFiles(dir, "*.txt").Length == 0) { MessageBox.Show(this, "Сохранённых пакетов БС пока нет.", Text); return; }
+        if (!Directory.Exists(dir) || Directory.GetFiles(dir, "*.txt").Length == 0) { MessageBox.Show(this, "Сохранённых пакетов документов пока нет.", Text); return; }
         if (dirty && MessageBox.Show(this, "Пакет не сохранён. Открыть другой? Введённое здесь пропадёт.", Text, MessageBoxButtons.YesNo, MessageBoxIcon.Question,
                 MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
         using (SavedDialog dlg = new SavedDialog(dir, 3)) {
@@ -1180,7 +1180,7 @@ public class BsForm : Form {
         string n = V("paket");
         foreach (char ch in Path.GetInvalidFileNameChars()) n = n.Replace(ch, '_');
         n = n.Trim().TrimEnd('.');
-        return n.Length > 0 ? n : "Пакет БС " + DateTime.Now.ToString("yyyy-MM-dd HH-mm");
+        return n.Length > 0 ? n : "Пакет документов " + DateTime.Now.ToString("yyyy-MM-dd HH-mm");
     }
 
     // сформировать пакет: отмеченные документы - в папку «БС\<название>»; openFolder - открыть папку. Возвращает папку или null
@@ -1303,7 +1303,7 @@ public class BsForm : Form {
 
     public bool AskSaveBeforeExit() {
         if (!dirty) return true;
-        DialogResult r = MessageBox.Show(this, "Пакет БС не сформирован. Сформировать его?\n\nДа - сформировать и выйти\nНет - выйти без сохранения\nОтмена - вернуться", Text,
+        DialogResult r = MessageBox.Show(this, "Пакет документов не сформирован. Сформировать его?\n\nДа - сформировать и выйти\nНет - выйти без сохранения\nОтмена - вернуться", Text,
             MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
         if (r == DialogResult.Cancel) return false;
         if (r == DialogResult.Yes) return Save(false, true) != null;

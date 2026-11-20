@@ -2255,12 +2255,17 @@ public static class St {
     public static Tint TintOf(string card) {
         switch (card) {
             case "Договор": case "Справка": case "Наряд": return new Tint(236, 243, 252, 211, 227, 248, 52, 110, 190);
-            case "Фото документов": case "Второй наряд": return new Tint(243, 240, 251, 225, 218, 246, 118, 90, 190);
-            case "Потребитель": case "Абонент": return new Tint(235, 247, 238, 208, 237, 215, 46, 138, 78);
+            case "Фото документов": case "Второй наряд": case "Доп. соглашение": return new Tint(243, 240, 251, 225, 218, 246, 118, 90, 190);
+            case "Потребитель": case "Абонент": case "Договор и абонент": case "Потребитель и объект": return new Tint(235, 247, 238, 208, 237, 215, 46, 138, 78);
             case "Объект": return new Tint(253, 245, 229, 248, 229, 188, 196, 126, 24);
-            case "Счётчики": case "Прибор учёта": case "Место включения": return new Tint(232, 246, 247, 201, 234, 237, 22, 126, 138);
+            case "Счётчики": case "Прибор учёта": case "Место включения": case "Приборы учёта": return new Tint(232, 246, 247, 201, 234, 237, 22, 126, 138);
             case "Пломбы и оборудование": case "Пломбы": return new Tint(252, 238, 241, 245, 212, 219, 184, 68, 94);
-            case "Дополнительно": case "Текст справки": return new Tint(244, 246, 230, 228, 235, 196, 116, 138, 26);
+            case "Дополнительно": case "Текст справки": case "Мощность": return new Tint(244, 246, 230, 228, 235, 196, 116, 138, 26);
+            // разделы БС и юр наряда - каждый своим цветом, соседние не сливаются
+            case "Электроснабжение": return new Tint(237, 238, 252, 216, 219, 247, 80, 90, 200);
+            case "Потери": return new Tint(250, 242, 232, 240, 222, 198, 160, 100, 40);
+            case "Подписи и даты": case "Подписи": return new Tint(232, 244, 252, 204, 230, 247, 30, 120, 180);
+            case "Документы": return new Tint(240, 240, 246, 220, 220, 234, 110, 110, 150);
             default: return new Tint(241, 242, 244, 223, 226, 231, 100, 110, 125);
         }
     }
@@ -18031,7 +18036,7 @@ public class SavedDialog : Form {
         Load += delegate { St.Dress(this); };
         this.kind = kind;
         bool spravki = kind == 1;
-        Text = kind == 1 ? "Сохранённые справки" : kind == 2 ? "Сохранённые наряды" : kind == 3 ? "Сохранённые пакеты БС" : "Сохранённые договоры";
+        Text = kind == 1 ? "Сохранённые справки" : kind == 2 ? "Сохранённые наряды" : kind == 3 ? "Сохранённые пакеты документов" : "Сохранённые договоры";
         Font = St.Base;
         BackColor = St.Surface;
         StartPosition = FormStartPosition.CenterParent;
@@ -26674,7 +26679,7 @@ public class BsForm : Form {
         dirty = false;
         Enable();
         ShemaNote();
-        head.Text = "Новый пакет БС";
+        head.Text = "Новый пакет документов";
         headSub.ForeColor = St.Hint;
         headSub.Text = "Заполните договор, объект, приборы учёта, мощность, линии - строки документов собираются сами";
         RefreshState();
@@ -26692,7 +26697,7 @@ public class BsForm : Form {
 
     void OpenSaved() {
         string dir = DataFolder(here);
-        if (!Directory.Exists(dir) || Directory.GetFiles(dir, "*.txt").Length == 0) { MessageBox.Show(this, "Сохранённых пакетов БС пока нет.", Text); return; }
+        if (!Directory.Exists(dir) || Directory.GetFiles(dir, "*.txt").Length == 0) { MessageBox.Show(this, "Сохранённых пакетов документов пока нет.", Text); return; }
         if (dirty && MessageBox.Show(this, "Пакет не сохранён. Открыть другой? Введённое здесь пропадёт.", Text, MessageBoxButtons.YesNo, MessageBoxIcon.Question,
                 MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
         using (SavedDialog dlg = new SavedDialog(dir, 3)) {
@@ -26935,7 +26940,7 @@ public class BsForm : Form {
         string n = V("paket");
         foreach (char ch in Path.GetInvalidFileNameChars()) n = n.Replace(ch, '_');
         n = n.Trim().TrimEnd('.');
-        return n.Length > 0 ? n : "Пакет БС " + DateTime.Now.ToString("yyyy-MM-dd HH-mm");
+        return n.Length > 0 ? n : "Пакет документов " + DateTime.Now.ToString("yyyy-MM-dd HH-mm");
     }
 
     // сформировать пакет: отмеченные документы - в папку «БС\<название>»; openFolder - открыть папку. Возвращает папку или null
@@ -27058,7 +27063,7 @@ public class BsForm : Form {
 
     public bool AskSaveBeforeExit() {
         if (!dirty) return true;
-        DialogResult r = MessageBox.Show(this, "Пакет БС не сформирован. Сформировать его?\n\nДа - сформировать и выйти\nНет - выйти без сохранения\nОтмена - вернуться", Text,
+        DialogResult r = MessageBox.Show(this, "Пакет документов не сформирован. Сформировать его?\n\nДа - сформировать и выйти\nНет - выйти без сохранения\nОтмена - вернуться", Text,
             MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
         if (r == DialogResult.Cancel) return false;
         if (r == DialogResult.Yes) return Save(false, true) != null;
@@ -27070,7 +27075,7 @@ public class BsForm : Form {
 // ==== БЛОК ЮР НАРЯДА (исходник - razrabotka/src/jur_naryad.cs; здесь не править - вставляется скриптом inject.py) ====
 // Наряд юр лица на включение (отключение) - лист A4, по фото бланка 20.11 (шаблон jur_naryad.docx рядом с программой).
 // Пока только заполнение: поля, списки, предпросмотр, сохранение в папку «Юр наряды», открыть сохранённый; данные можно
-// взять из сохранённого пакета БС.
+// взять из сохранённого пакета документов (БС).
 public class JurNaryadForm : Form {
     readonly string here, templateFile;
     readonly Lists lists;
@@ -27315,10 +27320,10 @@ public class JurNaryadForm : Form {
         p.Height = 66;
         p.BackColor = St.Surface;
         p.Paint += delegate(object s, PaintEventArgs e) { using (Pen pen = new Pen(St.Border)) e.Graphics.DrawLine(pen, 0, 0, p.Width, 0); };
-        Button fromBs = Ui.Button("Из пакета БС…", false);
+        Button fromBs = Ui.Button("Из пакета документов…", false);
         fromBs.SetBounds(24, 14, 150, 38);
         fromBs.Click += delegate { FromBs(); };
-        tip.SetToolTip(fromBs, "Взять потребителя, место, адрес, объект и подписи из сохранённого пакета БС");
+        tip.SetToolTip(fromBs, "Взять потребителя, место, адрес, объект и подписи из сохранённого пакета документов (БС)");
         Button clear = Ui.Button("Очистить", false);
         clear.SetBounds(184, 14, 100, 38);
         clear.Click += delegate {
@@ -27393,11 +27398,11 @@ public class JurNaryadForm : Form {
         RefreshState();
     }
 
-    // из сохранённого пакета БС: потребитель, место включения, адрес с подстанцией, объект, подписи
+    // из сохранённого пакета документов (БС): потребитель, место включения, адрес с подстанцией, объект, подписи
     void FromBs() {
         string dir = BsForm.DataFolder(here);
-        if (!Directory.Exists(dir) || Directory.GetFiles(dir, "*.txt").Length == 0) { MessageBox.Show(this, "Сохранённых пакетов БС пока нет.", Text); return; }
-        if (dirty && MessageBox.Show(this, "Заменить введённое данными пакета БС?", Text, MessageBoxButtons.YesNo, MessageBoxIcon.Question,
+        if (!Directory.Exists(dir) || Directory.GetFiles(dir, "*.txt").Length == 0) { MessageBox.Show(this, "Сохранённых пакетов документов пока нет.", Text); return; }
+        if (dirty && MessageBox.Show(this, "Заменить введённое данными пакета документов?", Text, MessageBoxButtons.YesNo, MessageBoxIcon.Question,
                 MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
         using (SavedDialog dlg = new SavedDialog(dir, 3)) {
             if (dlg.ShowDialog(this) != DialogResult.OK || dlg.Chosen == null) return;
@@ -27422,7 +27427,7 @@ public class JurNaryadForm : Form {
         } finally { loading = false; }
         dirty = true;
         headSub.ForeColor = St.Hint;
-        headSub.Text = "Заполнено из пакета БС - проверьте место включения и объекты";
+        headSub.Text = "Заполнено из пакета документов - проверьте место включения и объекты";
         RefreshState();
     }
 
