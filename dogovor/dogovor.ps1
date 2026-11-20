@@ -17649,6 +17649,16 @@ public class StartMenu : Form {
         });
     }
 
+    // справка по данным окна перевода (адрес, счётчики, лицевой); несохранённая справка - спросит. «Назад» из справки -
+    // в окно перевода (найденное не пропадает)
+    public void CreateSpravkaFromJur(JurPick p) {
+        Dictionary<string, string> d = new Dictionary<string, string>();
+        foreach (string[] kv in p.Values()) d[kv[0]] = kv[1];
+        if (spr == null || spr.IsDisposed) { spr = new SpravkaForm(here); spr.Home = this; }
+        if (!spr.FromJur(d, p.NoQuestions)) return;
+        OpenSpravka(p, null);
+    }
+
     // окно договора или справки закрыли - показать то, откуда пришли
     public void Return(Form to) {
         if (to == null || to.IsDisposed || to == this) { RefreshTiles(); Show(); Activate(); return; }
@@ -18646,6 +18656,19 @@ public class SpravkaForm : Form {
         headSub.ForeColor = St.Hint;
         headSub.Text = "Заполнено из договора - проверьте и допишите свидетельство (ЕГРНИ), владельцев, регистрацию";
         RefreshState();
+    }
+
+    // перевод из юр в физ: новая справка по найденному в базах (адрес, счётчики, лицевой); несохранённая справка - спросить.
+    // false - отказались, справка прежняя
+    public bool FromJur(Dictionary<string, string> d, bool noQuestions) {
+        if (dirty && !noQuestions && MessageBox.Show(this, "Справка не сохранена. Создать новую по данным перевода из юр в физ? Введённое пропадёт.", Text,
+                MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2) != DialogResult.Yes) return false;
+        Clear();
+        FromContract(d);
+        head.Text = ("Справка " + V("pu1_ls")).Trim() + " - перевод из юр в физ";
+        headSub.ForeColor = St.Good;
+        headSub.Text = "Адрес, счётчик и лицевой - из баз юр и физ лиц: проверьте их и заполните Ф.И.О., свидетельство (ЕГРНИ), владельцев";
+        return true;
     }
 
     // «д. Копище, ул. Авиационная, д. 15, кв. 83» - из полей адреса договора; нет полей - строка адреса без сельсовета
@@ -23629,7 +23652,7 @@ public class JurPick : Form {
     readonly TextBox prefixBox = Ui.Text(1), lsBox = Ui.Text(1);
     readonly Label status = new Label(), lsNote = new Label(), what = new Label(), nearCap, abCap, ptCap;
     readonly ListView abons = new ListView(), points = new ListView(), near = new ListView();
-    readonly Button find = Ui.Button("Найти", true), create = Ui.Button("Создать договор по этим данным", true);
+    readonly Button find = Ui.Button("Найти", true), create = Ui.Button("Создать договор по этим данным", true), createSpr = Ui.Button("Создать справку", false);
     List<JurAbon> abList = new List<JurAbon>();
     List<JurPoint> ptList = new List<JurPoint>();
     readonly List<JurPoint> shown = new List<JurPoint>();
@@ -23688,7 +23711,7 @@ public class JurPick : Form {
         title.AutoSize = true;
         title.Location = new Point(22, 36);
         Label sub = new Label();
-        sub.Text = "адрес квартиры -> карточка в базе юр лиц, счётчик, лицевой по соседям -> «Создать договор по этим данным»";
+        sub.Text = "адрес квартиры -> карточка в базе юр лиц, счётчик, лицевой по соседям -> «Создать договор по этим данным» или «Создать справку»";
         sub.Font = St.Small;
         sub.ForeColor = St.NavText;
         sub.AutoSize = true;
@@ -23767,9 +23790,10 @@ public class JurPick : Form {
         what.AutoSize = false;
         what.ForeColor = St.Caption;
         create.Click += delegate { Create(); };
+        createSpr.Click += delegate { CreateSpravka(); };
 
         body.Controls.AddRange(new Control[] { npTipCap, npTip, npCap, npBox, ulTipCap, ulTip, ulCap, ulBox, domCap, domBox, korCap, korBox, kvCap, kvBox,
-            kpCap, kpBox, find, status, abCap, abons, ptCap, points, nearCap, near, lsCap, prefixBox, lsBox, lsNote, what, create });
+            kpCap, kpBox, find, status, abCap, abons, ptCap, points, nearCap, near, lsCap, prefixBox, lsBox, lsNote, what, create, createSpr });
         body.Resize += delegate {
             int w = body.ClientSize.Width - 48, x = 24, y = 12;
             int[] widths = { 64, 200, 76, 200, 64, 64, 74, 120 };
@@ -23801,6 +23825,7 @@ public class JurPick : Form {
             lsNote.SetBounds(rx + 214, y + 18, rw - 214, 50);
             what.SetBounds(rx, y + 72, rw, 62);
             create.SetBounds(body.ClientSize.Width - 24 - 330, body.ClientSize.Height - 54, 330, 42);
+            createSpr.SetBounds(create.Left - 12 - 180, create.Top, 180, 42);
         };
         Controls.Add(body);
         Controls.Add(top);
@@ -24046,6 +24071,7 @@ public class JurPick : Form {
         what.Text = string.Join("\n", lines.ToArray());
         what.ForeColor = ch.Count > 0 && ls.Length == 9 && lsOk ? St.Caption : Warn;
         create.Enabled = AddressText().Length > 0 || ch.Count > 0;
+        createSpr.Enabled = create.Enabled;
     }
 
     // поля нового договора: адрес, счётчики, лицевой (по порядку: модель -> корпус -> модификация -> тип)
@@ -24103,6 +24129,22 @@ public class JurPick : Form {
         string prefix = FlatLs.Digits(prefixBox.Text);
         if (prefix.Length > 0) { memory.Values["ЛицевойПриписка"] = prefix; memory.Save(); }
         if (Home != null) Home.CreateFromJur(this);
+    }
+
+    // «Создать справку» - не всегда нужен договор: новая справка с адресом, счётчиками и лицевым; это окно остаётся
+    // (из справки «Назад» - сюда, можно потом и договор создать)
+    public void CreateSpravka() {
+        List<JurPoint> ch = Chosen();
+        string ls = FlatLs.Digits(lsBox.Text);
+        if (AddressText().Length == 0 && ch.Count == 0) { Status("Сначала найдите квартиру: адрес и «Найти».", St.Bad); return; }
+        if (ls.Length > 0 && ls.Length != 9) { Status("Лицевой - 9 цифр (сейчас " + ls.Length + "), или сотрите его - впишете в справке.", St.Bad); return; }
+        if (ch.Count == 0 && !NoQuestions && MessageBox.Show(this, "Счётчик (строка точки учёта) не выбран.\n\nСоздать справку без счётчика - только адрес и лицевой?", Text,
+                MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
+        if (ls.Length == 9 && !lsOk && !NoQuestions && MessageBox.Show(this, "Лицевой " + ls + ": " + lsNote.Text + "\n\nВсё равно создать справку с этим лицевым?", Text,
+                MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
+        string prefix = FlatLs.Digits(prefixBox.Text);
+        if (prefix.Length > 0) { memory.Values["ЛицевойПриписка"] = prefix; memory.Save(); }
+        if (Home != null) Home.CreateSpravkaFromJur(this);
     }
 
     // для проверки

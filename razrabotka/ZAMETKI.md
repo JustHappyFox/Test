@@ -46,6 +46,10 @@
   20.11 все 4 программы: 0 / 0 / 0 / 0.
 - `razrabotka/tools/run.sh <menu|foto|prosmotr|dogovor> <папка программы> <сек> <png>` - запуск под Mono в Xvfb :77 + скриншот
   (сначала check.sh - он собирает *_mono.dll); путь run.sh/check.sh к программам - /home/user/Test/<папка>. Меню и Договор 20.11 запускаются.
+- ПРАВКА ФАЙЛОВ: .ps1/.txt программ - UTF-8 с BOM и CRLF. Python в текстовом режиме теряет CRLF (20.11 так и вышло - весь файл
+  в diff). Править через `razrabotka/tools/pyedit.py` (Doc(path).rep(old,new).save()) или инструментом Edit; после - `file x | grep CRLF`.
+- `razrabotka/tools/runtest.sh <prog> <тест.cs> <папка> <png-префикс> <сек...>` - сценарий-проверка (C#, поля через отражение),
+  тесты - `razrabotka/tests/`. `razrabotka/tools/pack.py program|update|all` - архивы для пользователя.
 - Договор -> PDF: `soffice --headless --convert-to pdf`. Текст из doc/docx: `--convert-to 'txt:Text (encoded):UTF8'`.
 - Классы запуска: MenuApp, FotoApp, AbonentSearch, DogovorApp - `X.Run(папка, строка)`.
 - Нет (потеряны с прошлыми сессиями, в git не было): dogtools/extract_engine.py (движок базы из «Поиска» в «Договор» -
