@@ -6,6 +6,7 @@ SP=/tmp/claude-0/-home-user-Test/ecddb7b9-ba2d-55d0-b8b6-3d6ae08ebda9/scratchpad
 n=$1; cs=$2; dir=$3; png=$4; shift 4
 t=$(basename "$cs" .cs)
 mcs -nologo -out:$B/$t.exe -r:$B/${n}_mono.dll -r:System.Windows.Forms.dll -r:System.Drawing.dll "$cs" || exit 1
+export XDG_CONFIG_HOME=$SP/test/profile/config XDG_DATA_HOME=$SP/test/profile/local LANG=C.UTF-8; mkdir -p $XDG_CONFIG_HOME $XDG_DATA_HOME
 export DISPLAY=:77; pgrep -f "Xvfb :77" >/dev/null || (Xvfb :77 -screen 0 1366x768x24 >/dev/null 2>&1 &); sleep 1
 (cd $B && MONO_IOMAP=all timeout 120 mono $t.exe "$dir" > $B/$t.log 2>&1 &)
 prev=0; i=0

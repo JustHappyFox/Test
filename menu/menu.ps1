@@ -673,6 +673,7 @@ public static class Pal {
     public static Color Bad { get { return Look.Bad; } }
     public static Color Good { get { return Look.Good; } }
     public static Color Link { get { return Look.Link; } }
+    public static Color Warn { get { return Look.Warn; } }
     public static readonly Font Title = new Font("Segoe UI", 17f, FontStyle.Bold), Big = new Font("Segoe UI", 13.5f, FontStyle.Bold),
         Base = new Font("Segoe UI", 10f), Small = new Font("Segoe UI", 9f), Number = new Font("Segoe UI", 22f, FontStyle.Bold);
 }
@@ -880,6 +881,14 @@ public class MenuForm : Form {
         sub.SetBounds(30, 54, 500, 20);
         Controls.Add(title);
         Controls.Add(sub);
+        // «Настройки…» - откуда «Поиск» и «Договор» берут данные: база или Excel-выгрузки (быт, юр, наряды)
+        Button data = new Button();
+        data.Text = "Настройки…";
+        data.Font = Pal.Base;
+        data.SetBounds(ClientSize.Width - 28 - 130, 22, 130, 32);
+        data.Click += delegate { OpenDataSettings(); };
+        Controls.Add(data);
+        Look.Button(data);
         for (int i = 0; i < progs.Length; i++) {
             ProgTile t = new ProgTile(progs[i], i);
             t.SetBounds(28, 84 + i * 104, 584, 92);
@@ -930,6 +939,16 @@ public class MenuForm : Form {
     }
 
     void Place(LinkLabel l, int x, int y) { l.Location = new Point(x, y); }
+
+    public DataSettingsForm DataForm;     // для проверки
+
+    public void OpenDataSettings() {
+        using (DataSettingsForm f = new DataSettingsForm()) {
+            DataForm = f;
+            f.ShowDialog(this);
+            DataForm = null;
+        }
+    }
 
     void ShortcutText() {
         shortcut.Text = File.Exists(ShortcutPath) ? "Ярлык «Программы» на рабочем столе есть - обновить" : "Создать ярлык «Программы» на рабочем столе";
@@ -1088,6 +1107,198 @@ public class MenuForm : Form {
 }
 
 // значок меню: синий квадрат со скруглёнными углами и тремя полосками разных цветов (три программы)
+// «Настройки…» меню: откуда «Поиск» и «Договор» берут данные - база (как раньше) или Excel-выгрузки (быт, юр, наряды);
+// пути к выгрузкам; «Обновить индексы» - перевести выгрузку в свою быструю копию (после замены файла выгрузки).
+// Настройки - в профиле пользователя (Istochnik.SettingsFile), общие для всех программ.
+public class DataSettingsForm : Form {
+    readonly RadioButton useBase = new RadioButton(), useExcel = new RadioButton();
+    readonly TextBox[] paths = { new TextBox(), new TextBox(), new TextBox() };
+    readonly Label[] notes = { new Label(), new Label(), new Label() };
+    readonly Label indexState = new Label(), progress = new Label();
+    readonly Button rebuild = new Button(), save = new Button(), cancel = new Button();
+    static readonly string[] Kinds = { "быта (физ лица)", "юр лиц", "нарядов" };
+    bool building;
+    public string LastResult = "";          // для проверки: чем кончилось «Обновить индексы»
+
+    public DataSettingsForm() {
+        Text = "Настройки: откуда брать данные";
+        Font = Pal.Base;
+        BackColor = Pal.Back;
+        ForeColor = Pal.Text;
+        FormBorderStyle = FormBorderStyle.FixedDialog;
+        MaximizeBox = MinimizeBox = false;
+        ShowInTaskbar = false;
+        StartPosition = FormStartPosition.CenterParent;
+        ClientSize = new Size(700, 520);
+        Label title = new Label();
+        title.Text = "Откуда «Поиск» и «Договор» берут данные";
+        title.Font = new Font("Segoe UI", 12f, FontStyle.Bold);
+        title.SetBounds(24, 16, 650, 26);
+        Controls.Add(title);
+        useBase.Text = "База, как раньше (O:\\BASAFOX, база юр лиц, наряды - по индексам самих баз)";
+        useExcel.Text = "Excel-выгрузки (файлы ниже)";
+        useBase.SetBounds(26, 50, 650, 24);
+        useExcel.SetBounds(26, 76, 650, 24);
+        Controls.Add(useBase);
+        Controls.Add(useExcel);
+        int y = 112;
+        for (int i = 0; i < 3; i++) {
+            Label cap = new Label();
+            cap.Text = "Выгрузка " + Kinds[i] + " (.xlsx)";
+            cap.ForeColor = Pal.Hint;
+            cap.Font = Pal.Small;
+            cap.SetBounds(24, y, 400, 18);
+            paths[i].SetBounds(24, y + 20, 540, 24);
+            Button pick = new Button();
+            pick.Text = "Выбрать…";
+            pick.SetBounds(574, y + 18, 100, 28);
+            int k = i;
+            pick.Click += delegate { Pick(k); };
+            paths[i].TextChanged += delegate { ShowState(); };
+            notes[i].Font = Pal.Small;
+            notes[i].SetBounds(24, y + 46, 650, 18);
+            Controls.Add(cap);
+            Controls.Add(paths[i]);
+            Controls.Add(pick);
+            Controls.Add(notes[i]);
+            y += 74;
+        }
+        indexState.SetBounds(24, y + 4, 650, 40);
+        rebuild.Text = "Обновить индексы";
+        rebuild.SetBounds(24, y + 48, 170, 32);
+        rebuild.Click += delegate { Rebuild(); };
+        progress.Font = Pal.Small;
+        progress.ForeColor = Pal.Hint;
+        progress.SetBounds(204, y + 50, 470, 44);
+        Controls.Add(indexState);
+        Controls.Add(rebuild);
+        Controls.Add(progress);
+        save.Text = "Сохранить";
+        cancel.Text = "Отмена";
+        save.SetBounds(ClientSize.Width - 24 - 120 - 10 - 110, ClientSize.Height - 46, 120, 32);
+        cancel.SetBounds(ClientSize.Width - 24 - 110, ClientSize.Height - 46, 110, 32);
+        save.Click += delegate { if (Save()) { DialogResult = DialogResult.OK; Close(); } };
+        cancel.Click += delegate { Close(); };
+        Controls.Add(save);
+        Controls.Add(cancel);
+        AcceptButton = save;
+        CancelButton = cancel;
+        useBase.CheckedChanged += delegate { ShowState(); };
+        useExcel.Checked = Istochnik.UseExcel;
+        useBase.Checked = !useExcel.Checked;
+        paths[0].Text = Istochnik.BytPath;
+        paths[1].Text = Istochnik.JurPath;
+        paths[2].Text = Istochnik.NaryadyPath;
+        Look.Dress(this);
+        Look.MainButton(save);
+        ShowState();
+        FormClosing += delegate(object o, FormClosingEventArgs e) {
+            if (building) { e.Cancel = true; progress.Text = "Подождите: индексы ещё создаются."; }
+        };
+    }
+
+    void Pick(int i) {
+        using (OpenFileDialog d = new OpenFileDialog()) {
+            d.Title = "Выгрузка " + Kinds[i];
+            d.Filter = "Книга Excel (*.xlsx)|*.xlsx|Все файлы (*.*)|*.*";
+            try { if (File.Exists(paths[i].Text.Trim())) d.InitialDirectory = Path.GetDirectoryName(paths[i].Text.Trim()); } catch { }
+            if (d.ShowDialog(this) == DialogResult.OK) paths[i].Text = d.FileName;
+        }
+    }
+
+    public void SetPaths(string byt, string jur, string nar, bool excel) {
+        paths[0].Text = byt; paths[1].Text = jur; paths[2].Text = nar;
+        useExcel.Checked = excel; useBase.Checked = !excel;
+    }
+
+    // под каждым путём - есть ли файл; ниже - состояние индексов выгрузки быта (по полям окна, ещё не сохранённым)
+    void ShowState() {
+        bool excel = useExcel.Checked;
+        for (int i = 0; i < 3; i++) {
+            string p = paths[i].Text.Trim();
+            string miss = Istochnik.Missing(Kinds[i], p);
+            if (p.Length == 0) { notes[i].Text = excel ? "не указана - " + (i == 0 ? "поиск абонентов работать не будет" : i == 1 ? "перевода из юр в физ не будет" : "нарядов не будет") : "не указана"; notes[i].ForeColor = excel ? Pal.Bad : Pal.Hint; }
+            else if (miss != null) { notes[i].Text = "файла нет: " + p; notes[i].ForeColor = Pal.Bad; }
+            else {
+                string info = "";
+                try { FileInfo fi = new FileInfo(p); info = "файл есть: " + (fi.Length / 1048576.0).ToString("0.0") + " МБ, изменён " + fi.LastWriteTime.ToString("dd.MM.yyyy HH:mm"); } catch { }
+                if (i > 0) info += " - чтение этой выгрузки подключим, когда будет её образец";
+                notes[i].Text = info;
+                notes[i].ForeColor = i == 0 ? Pal.Good : Pal.Warn;
+            }
+        }
+        string problem = IndexProblem();
+        indexState.Text = problem == null ? "Индексы выгрузки быта готовы: " + Istochnik.BytAbout() + "." : problem;
+        indexState.ForeColor = problem == null ? Pal.Good : excel ? Pal.Bad : Pal.Hint;
+        rebuild.Enabled = !building && Istochnik.Missing(Kinds[0], paths[0].Text.Trim()) == null;
+    }
+
+    // как Istochnik.BytCacheProblem, но для пути в поле окна
+    string IndexProblem() {
+        string path = paths[0].Text.Trim();
+        string miss = Istochnik.Missing(Kinds[0], path);
+        if (miss != null) return path.Length == 0 ? "Индексы: выгрузка быта не указана." : "Индексы: " + miss.Replace(" Укажите его в меню программ: «Настройки…».", "").Replace(" Проверьте путь в меню программ: «Настройки…».", "");
+        if (!File.Exists(Istochnik.BytTable) || !File.Exists(Istochnik.BytInfo)) return "Индексы выгрузки быта ещё не созданы - нажмите «Обновить индексы».";
+        Dictionary<string, string> info = Istochnik.ReadInfo(Istochnik.BytInfo);
+        string v;
+        string file = info.TryGetValue("Файл", out v) ? v : "";
+        if (string.Compare(file, Path.GetFullPath(path), StringComparison.OrdinalIgnoreCase) != 0) return "Индексы созданы по другому файлу - нажмите «Обновить индексы».";
+        try {
+            FileInfo fi = new FileInfo(path);
+            string size = info.TryGetValue("Размер", out v) ? v : "", time = info.TryGetValue("Изменён", out v) ? v : "", ver = info.TryGetValue("Версия", out v) ? v : "";
+            if (ver != VygruzkaByt.Version) return "Индексы созданы прежней версией - нажмите «Обновить индексы».";
+            if (size != fi.Length.ToString() || time != fi.LastWriteTimeUtc.Ticks.ToString()) return "Файл выгрузки заменён после создания индексов - нажмите «Обновить индексы».";
+        } catch (Exception ex) { return "Выгрузка недоступна: " + ex.Message; }
+        return null;
+    }
+
+    bool Save() {
+        bool excel = useExcel.Checked;
+        try { Istochnik.Save(excel, paths[0].Text, paths[1].Text, paths[2].Text); }
+        catch (Exception ex) { MessageBox.Show(this, "Настройки не сохранились:\n" + ex.Message, Text, MessageBoxButtons.OK, MessageBoxIcon.Error); return false; }
+        if (excel && IndexProblem() != null && Istochnik.Missing(Kinds[0], paths[0].Text.Trim()) == null
+            && MessageBox.Show(this, "Индексы выгрузки быта не готовы:\n" + IndexProblem() + "\n\nСоздать их сейчас? (Без них «Поиск» и «Договор» не найдут абонентов.)", Text,
+                MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes) {
+            Rebuild();
+            return false;      // окно остаётся, пока индексы создаются; потом - «Сохранить» ещё раз или закрыть
+        }
+        return true;
+    }
+
+    // перевести выгрузку быта в свою копию - в фоне, окно показывает ход
+    public void Rebuild() {
+        string path = paths[0].Text.Trim();
+        if (building || Istochnik.Missing(Kinds[0], path) != null) return;
+        building = true;
+        rebuild.Enabled = save.Enabled = false;
+        progress.ForeColor = Pal.Hint;
+        progress.Text = "Создаю индексы выгрузки быта (один раз после замены файла; большая выгрузка - около минуты)...";
+        System.Threading.Thread th = new System.Threading.Thread(delegate() {
+            string result;
+            bool ok = true;
+            try {
+                result = VygruzkaByt.Build(path, delegate(string text) {
+                    try { BeginInvoke((MethodInvoker)delegate { progress.Text = text; }); } catch { }
+                });
+            } catch (Exception ex) { result = "Индексы не созданы: " + ex.Message; ok = false; }
+            try {
+                BeginInvoke((MethodInvoker)delegate {
+                    building = false;
+                    save.Enabled = true;
+                    LastResult = result;
+                    progress.Text = result;
+                    progress.ForeColor = ok ? Pal.Good : Pal.Bad;
+                    ShowState();
+                });
+            } catch { }
+        });
+        th.IsBackground = true;
+        th.Start();
+    }
+
+    public bool Building { get { return building; } }
+}
+
 public static class MenuIcon {
     static Bitmap Draw(int size) {
         Bitmap bmp = new Bitmap(size, size, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
