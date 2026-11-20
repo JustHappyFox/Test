@@ -7060,6 +7060,7 @@ public class AbonentSearch : Form {
         bottom.Controls.Add(BottomButton("Отчёт", delegate { OpenReport(); }));
         bottom.Controls.Add(BottomButton("Все таблицы...", delegate { new DbfViewer(this.viewerSettings).Show(); }));
         bottom.Controls.Add(BottomButton("Где искать...", delegate { ChooseBase(); }));
+        bottom.Controls.Add(BottomButton("История", delegate { OpenHistory(); }));
         // тема окон - как в «Договоре»: тёмная / светлая, меняется при следующем запуске; справа в первой строке
         LinkLabel theme = Look.Switch(delegate(bool dark) { themeLine = dark ? "тёмная" : "светлая"; SaveSettings(); });
         theme.Anchor = AnchorStyles.Top | AnchorStyles.Right;
@@ -7075,7 +7076,7 @@ public class AbonentSearch : Form {
         timer.Interval = 400;
         timer.Tick += delegate { timer.Stop(); StartSearch(); };
         logTimer.Interval = 2000;
-        logTimer.Tick += delegate { logTimer.Stop(); LogSearch(); };
+        logTimer.Tick += delegate { logTimer.Stop(); LogSearch(); AddHistory(); };
 
         Controls.Add(grid);
         Controls.Add(bottom);
@@ -7757,6 +7758,47 @@ public class AbonentSearch : Form {
         logTimer.Stop();
         if (r != null) logTimer.Start();
         UpdateStatus();
+    }
+
+    string HistoryFile { get { return Path.Combine(Dir, "istoriya.txt"); } }
+
+    // поиск - в историю (30 последних): что искали и найденные строки, как в списке
+    internal void AddHistory() {
+        SearchResult r = current;
+        if (r == null || r.Error != null || DbfTable.SplitWords(r.Text ?? "").Length == 0) return;
+        try {
+            SearchHistory.Entry e = new SearchHistory.Entry();
+            e.When = DateTime.Now;
+            e.Mode = (int)r.Mode;
+            e.Query = r.Text;
+            e.Found = r.Rows.Count == 0 ? "не найдено" : r.Searched + (r.Added.Count > 0 ? " (+" + r.Added.Count + ")" : "");
+            string[] titles = new string[grid.Columns.Count];
+            for (int c = 0; c < titles.Length; c++) titles[c] = grid.Columns[c].HeaderText;
+            e.Titles = titles;
+            for (int i = 0; i < r.Rows.Count && i < SearchHistory.RowsPerSearch; i++) {
+                string[] cells = new string[kinds.Count];
+                for (int c = 0; c < kinds.Count; c++) { object v = ResultColumns.Text(r, r.Rows[i], kinds[c]); cells[c] = v == null ? "" : v.ToString(); }
+                e.Rows.Add(cells);
+            }
+            SearchHistory.Add(HistoryFile, e);
+        } catch (Exception ex) { Report.Line("История поисков не записалась: " + ex.Message); }
+    }
+
+    internal HistoryForm LastHistory;
+
+    internal void OpenHistory() {
+        LogSearch();
+        AddHistory();
+        string[] titles = new string[grid.Columns.Count];
+        for (int c = 0; c < titles.Length; c++) titles[c] = grid.Columns[c].HeaderText;
+        HistoryForm h = new HistoryForm(HistoryFile, titles);
+        h.OnRepeat = delegate(int m, string q) {
+            if (m >= 0 && m < modeButtons.Length) modeButtons[m].Checked = true;
+            queryBox.Text = q;
+            StartSearch();
+        };
+        LastHistory = h;
+        h.Show(this);
     }
 
     void UpdateStatus() {
@@ -11333,6 +11375,183 @@ public class NaryadSetupDialog : Form {
 
 // Копирование из таблиц и списков: поля (ячейки) выделяются мышью (протянуть, Shift/Ctrl+щелчок),
 // копируются Ctrl+C или правой кнопкой «Копировать»; в базу ничего не пишется
+// История поисков: 30 последних (новые сверху) - что искали и что нашлось (строки как в списке найденного), чтобы найти
+// адрес, если программу случайно закрыли. Файл istoriya.txt в папке программы (на этом компьютере; в нём данные абонентов).
+// Уточнение того же поиска (дописали адрес, исправили букву) за 2 минуты - заменяет прежнюю запись, а не добавляет новую.
+public static class SearchHistory {
+    public const int Keep = 30;
+    public const int RowsPerSearch = 15;
+
+    public class Entry {
+        public DateTime When;
+        public int Mode;
+        public string Query = "", Found = "";
+        public string[] Titles = new string[0];
+        public List<string[]> Rows = new List<string[]>();
+    }
+
+    static string Esc(string s) { return (s ?? "").Replace("\\", "\\\\").Replace("\t", "\\t").Replace("\r", " ").Replace("\n", "\\n"); }
+    static string Unesc(string s) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < s.Length; i++) {
+            if (s[i] == '\\' && i + 1 < s.Length) { char c = s[++i]; sb.Append(c == 't' ? '\t' : c == 'n' ? '\n' : c); }
+            else sb.Append(s[i]);
+        }
+        return sb.ToString();
+    }
+
+    static string[] Split(string line) {
+        string[] p = line.Split('\t');
+        for (int i = 0; i < p.Length; i++) p[i] = Unesc(p[i]);
+        return p;
+    }
+
+    static string Join(string[] p) {
+        string[] e = new string[p.Length];
+        for (int i = 0; i < p.Length; i++) e[i] = Esc(p[i]);
+        return string.Join("\t", e);
+    }
+
+    public static List<Entry> Load(string file) {
+        List<Entry> list = new List<Entry>();
+        try {
+            if (!File.Exists(file)) return list;
+            Entry cur = null;
+            foreach (string line in File.ReadAllLines(file, Encoding.UTF8)) {
+                if (line.StartsWith("П\t")) {
+                    string[] p = Split(line.Substring(2));
+                    cur = new Entry();
+                    DateTime w;
+                    if (p.Length > 0 && DateTime.TryParseExact(p[0], "dd.MM.yyyy HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out w)) cur.When = w;
+                    int m;
+                    if (p.Length > 1 && int.TryParse(p[1], out m)) cur.Mode = m;
+                    if (p.Length > 2) cur.Query = p[2];
+                    if (p.Length > 3) cur.Found = p[3];
+                    list.Add(cur);
+                } else if (cur != null && line.StartsWith("З\t")) cur.Titles = Split(line.Substring(2));
+                else if (cur != null && line.StartsWith("С\t")) cur.Rows.Add(Split(line.Substring(2)));
+            }
+        } catch { }
+        return list;
+    }
+
+    public static void Save(string file, List<Entry> list) {
+        StringBuilder sb = new StringBuilder();
+        sb.Append("# История поисков «Поиска абонента»: 30 последних (новые сверху). Можно удалить - начнётся заново.\r\n");
+        foreach (Entry e in list) {
+            sb.Append("П\t").Append(Join(new string[] { e.When.ToString("dd.MM.yyyy HH:mm:ss"), e.Mode.ToString(), e.Query, e.Found })).Append("\r\n");
+            sb.Append("З\t").Append(Join(e.Titles)).Append("\r\n");
+            foreach (string[] r in e.Rows) sb.Append("С\t").Append(Join(r)).Append("\r\n");
+        }
+        string tmp = file + ".tmp";
+        File.WriteAllText(tmp, sb.ToString(), new UTF8Encoding(true));
+        if (File.Exists(file)) File.Delete(file);
+        File.Move(tmp, file);
+    }
+
+    static string Norm(string s) { return string.Join(" ", DbfTable.SplitWords((s ?? "").ToLowerInvariant())); }
+
+    // добавить поиск: уточнение прежнего (тот же вид, одно начинается с другого, не позже 2 минут) - заменяет его
+    public static void Add(string file, Entry e) {
+        List<Entry> list = Load(file);
+        if (list.Count > 0) {
+            Entry last = list[0];
+            string a = Norm(last.Query), b = Norm(e.Query);
+            if (last.Mode == e.Mode && (e.When - last.When).TotalSeconds < 120 && (b.StartsWith(a) || a.StartsWith(b) || a == b)) list.RemoveAt(0);
+        }
+        list.Insert(0, e);
+        while (list.Count > Keep) list.RemoveAt(list.Count - 1);
+        Save(file, list);
+    }
+}
+
+// Окно «История поисков»: новые сверху; у каждого поиска - когда, по чему, что вписано, сколько нашлось, и найденные строки
+// (как в списке). Двойной щелчок (или Enter) - искать снова. Ctrl+C / правая кнопка - копировать.
+public class HistoryForm : Form {
+    readonly DataGridView grid = new DataGridView();
+    readonly List<int> entryOf = new List<int>();
+    readonly List<SearchHistory.Entry> list;
+    public delegate void Repeat(int mode, string query);
+    public Repeat OnRepeat;
+    static readonly string[] ModeNames = { "лицевой", "адрес", "счётчик", "ФИО" };
+
+    public HistoryForm(string file, string[] titles) {
+        list = SearchHistory.Load(file);
+        Text = "История поисков - " + list.Count + " последних (новые сверху)";
+        Font = Look.Base;
+        Look.Wear(this);
+        StartPosition = FormStartPosition.CenterParent;
+        Rectangle wa = Screen.PrimaryScreen.WorkingArea;
+        Size = new Size(Math.Min(1300, wa.Width - 40), Math.Min(700, wa.Height - 40));
+        KeyPreview = true;
+        Label hint = new Label();
+        hint.Dock = DockStyle.Top;
+        hint.Height = 26;
+        hint.Padding = new Padding(8, 6, 8, 0);
+        hint.Text = "Двойной щелчок по строке (или Enter) - искать снова. Ctrl+C, правая кнопка - копировать. Esc - закрыть.";
+        grid.Dock = DockStyle.Fill;
+        grid.ReadOnly = true;
+        grid.AllowUserToAddRows = false;
+        grid.AllowUserToDeleteRows = false;
+        grid.RowHeadersVisible = false;
+        grid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
+        grid.SelectionMode = DataGridViewSelectionMode.CellSelect;
+        // столбцы: когда, по чему, что вписано, найдено + столбцы списка найденного
+        List<string> cols = new List<string>(new string[] { "Когда", "Искал по", "Что вписано", "Найдено" });
+        cols.AddRange(titles);
+        foreach (string c in cols) {
+            DataGridViewTextBoxColumn col = new DataGridViewTextBoxColumn();
+            col.HeaderText = c;
+            col.SortMode = DataGridViewColumnSortMode.NotSortable;
+            col.FillWeight = c == "Ф.И.О." || c == "Что вписано" || c.StartsWith("Населённый") ? 180 : c == "Когда" ? 90 : 70;
+            grid.Columns.Add(col);
+        }
+        Look.Grid(grid);
+        for (int i = 0; i < list.Count; i++) {
+            SearchHistory.Entry e = list[i];
+            bool odd = i % 2 == 1;
+            int rows = Math.Max(1, e.Rows.Count);
+            for (int k = 0; k < rows; k++) {
+                object[] v = new object[cols.Count];
+                for (int c = 0; c < v.Length; c++) v[c] = "";
+                if (k == 0) {
+                    v[0] = e.When.ToString("dd.MM HH:mm");
+                    v[1] = e.Mode >= 0 && e.Mode < ModeNames.Length ? ModeNames[e.Mode] : "";
+                    v[2] = e.Query;
+                    v[3] = e.Found;
+                }
+                if (k < e.Rows.Count)
+                    for (int c = 0; c < titles.Length; c++) {
+                        int j = Array.IndexOf(e.Titles, titles[c]);
+                        if (j >= 0 && j < e.Rows[k].Length) v[4 + c] = e.Rows[k][j];
+                    }
+                int r = grid.Rows.Add(v);
+                if (odd) grid.Rows[r].DefaultCellStyle.BackColor = Look.RowOther;
+                if (k == 0) grid.Rows[r].Cells[2].Style.Font = new Font(Look.Base, FontStyle.Bold);
+                entryOf.Add(i);
+            }
+        }
+        if (list.Count == 0) { grid.Rows.Add(new object[] { "", "", "Поисков пока не было", "" }); entryOf.Add(-1); }
+        CopyText.Grid(grid);
+        grid.CellDoubleClick += delegate(object s, DataGridViewCellEventArgs e) { if (e.RowIndex >= 0) Again(e.RowIndex); };
+        KeyDown += delegate(object s, KeyEventArgs e) {
+            if (e.KeyCode == Keys.Escape) { e.SuppressKeyPress = true; Close(); }
+            else if (e.KeyCode == Keys.Enter && grid.CurrentCell != null) { e.SuppressKeyPress = true; Again(grid.CurrentCell.RowIndex); }
+        };
+        Controls.Add(grid);
+        Controls.Add(hint);
+    }
+
+    public int Count { get { return list.Count; } }
+
+    void Again(int row) {
+        if (row < 0 || row >= entryOf.Count || entryOf[row] < 0) return;
+        SearchHistory.Entry e = list[entryOf[row]];
+        if (OnRepeat != null) OnRepeat(e.Mode, e.Query);
+        Close();
+    }
+}
+
 public static class CopyText {
     // таблица: выделяются ячейки, а не строка целиком; текущая строка - в рамке
     public static void Grid(DataGridView g) {
