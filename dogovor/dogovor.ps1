@@ -10673,6 +10673,55 @@ public class LiveBase {
 
     static readonly string[] AccountFields = { "NAB", "LS", "LIC", "LSCH", "LS_ERIP" };
 
+    // Режим Excel: своя копия выгрузки быта (byt.dbf) целиком в памяти, поиск - AbonentQuery по всей таблице (индексов нет)
+    public DbfTable Mem;
+    int memLimit = FetchLimit;      // сколько найденных показывать (больше - «показана часть»)
+
+    public static LiveBase OpenMemory(string path, StreetDirectory dir) {
+        LiveBase b = new LiveBase();
+        b.FilePath = path;
+        b.Mem = DbfTable.Load(path, false);
+        b.Mem.FilePath = path;
+        b.Header = b.Mem;
+        b.Sample = b.Mem;
+        b.RecordCount = b.Mem.Count;
+        b.Dir = dir;
+        return b;
+    }
+
+    // поиск в памяти (режим Excel): как перебор, только таблица уже прочитана; ФИО с адресом - «Иванов Боровляны»
+    SearchResult SearchMemory(string text, SearchMode mode, Dictionary<string, bool> selsovety, int limit, bool partial) {
+        DateTime started = DateTime.Now;
+        memLimit = mode == SearchMode.Address ? Math.Max(limit, SeekLimit) : Math.Max(limit, FetchLimit);
+        SearchResult res = MemoryOnce(text, mode, selsovety, partial, null, null);
+        if (mode == SearchMode.Name && res.Rows.Count == 0 && res.Hidden == 0) {
+            string[] w = DbfTable.SplitWords(text);
+            for (int k = w.Length - 1; k >= 1; k--) {
+                string name = string.Join(" ", w, 0, k), place = string.Join(" ", w, k, w.Length - k);
+                SearchResult a = MemoryOnce(text, mode, selsovety, partial, name, place);
+                if (a.Rows.Count > 0 || a.Hidden > 0) { res = a; break; }
+            }
+        }
+        res.How = "выгрузка в памяти (" + Mem.Count + " записей)" + (res.How.Length > 0 ? "; " + res.How : "");
+        res.Seconds = (DateTime.Now - started).TotalSeconds;
+        return res;
+    }
+
+    SearchResult MemoryOnce(string text, SearchMode mode, Dictionary<string, bool> selsovety, bool partial, string nameText, string addressText) {
+        DateTime started = DateTime.Now;
+        SearchResult res = new SearchResult();
+        res.Text = text;
+        res.Mode = mode;
+        res.Partial = partial;
+        res.NameText = nameText;
+        res.AddressText = addressText;
+        if (mode == SearchMode.Address && !partial && Dir != null) {
+            res.Address = Dir.Match(text);
+            if (res.Address.Problem != null) { res.Note = res.Address.Problem; return Finish(res, null, selsovety, started); }
+        }
+        return Finish(res, Mem, selsovety, started);
+    }
+
     public static LiveBase Open(string path) {
         LiveBase b = new LiveBase();
         b.FilePath = path;
@@ -11171,7 +11220,7 @@ public class LiveBase {
     readonly object namesLock = new object();
     public string NamesFile;               // файл индекса (в папке программы)
 
-    public bool NamesNeeded { get { return Header.FieldIndex("FIO") >= 0 && TagFor("FIO") == null; } }
+    public bool NamesNeeded { get { return Mem == null && Header.FieldIndex("FIO") >= 0 && TagFor("FIO") == null; } }
     public bool NamesReady { get { return names != null; } }
 
     // «Договор»: индекс ФИО программы «Поиск абонента» (indeks_fio.dat в её папке) - только прочитать: ничего не строим и не
@@ -11284,6 +11333,7 @@ public class LiveBase {
 
     // withAddress - ФИО с адресом ("Иванов Боровляны"), даже если есть индекс по ФИО
     SearchResult SearchOnce(string text, SearchMode mode, Dictionary<string, bool> selsovety, int limit, bool partial, bool withAddress) {
+        if (Mem != null) return SearchMemory(text, mode, selsovety, limit, partial);
         DateTime started = DateTime.Now;
         SearchResult res = new SearchResult();
         res.Text = text;
@@ -11391,6 +11441,7 @@ public class LiveBase {
                 foreach (int row in res.Query.Find(res.AddressText, SearchMode.Address)) here[row] = true;
                 rows = rows.FindAll(delegate(int row) { return here.ContainsKey(row); });
             }
+            if (Mem != null && part == Mem && rows.Count > memLimit) { rows.RemoveRange(memLimit, rows.Count - memLimit); res.TooMany = true; }
             int ul = part.FieldIndex("UL");
             foreach (int row in rows) {
                 if (Dir != null && ul >= 0 && selsovety != null
@@ -11474,8 +11525,8 @@ public class LiveBase {
         DbfTable tb = res.Table;
         int ulF = tb.FieldIndex("UL"), domF = tb.FieldIndex("DOM"), fioF = tb.FieldIndex("FIO");
         if (ulF < 0 || domF < 0) return;
-        IndexTag t = TagFor("UL", true);
-        if (t == null || t.Terms.Count < 2 || t.TermFields[1] != "DOM") return;
+        IndexTag t = Mem != null ? null : TagFor("UL", true);
+        if (Mem == null && (t == null || t.Terms.Count < 2 || t.TermFields[1] != "DOM")) return;
         List<int> searched = new List<int>();
         foreach (int row in res.Rows) if (!res.Added.ContainsKey(row)) searched.Add(row);
         // дома найденных (не больше 30 - иначе поиск по общему адресу читал бы слишком много)
@@ -11490,17 +11541,24 @@ public class LiveBase {
         if (houses.Count == 0) return;
         Dictionary<int, int> rowOfRec = new Dictionary<int, int>();
         for (int row = 0; row < tb.Count; row++) rowOfRec[tb.RecNos[row]] = row;
-        Seeker s = new Seeker();
-        try {
-            foreach (List<int> list in houses.Values) {
-                int r0 = list[0];
-                s.Seek(t, KeyFor(t, new string[] { Field(tb, r0, ulF), Field(tb, r0, domF) }, false));
+        List<int> foundRecs = new List<int>();
+        if (Mem != null) {
+            // режим Excel: вся таблица в памяти - дома найденных ищем перебором строк
+            for (int row = 0; row < tb.Count; row++) if (houses.ContainsKey(HouseKey(tb, row))) foundRecs.Add(tb.RecNos[row]);
+        } else {
+            Seeker s = new Seeker();
+            try {
+                foreach (List<int> list in houses.Values) {
+                    int r0 = list[0];
+                    s.Seek(t, KeyFor(t, new string[] { Field(tb, r0, ulF), Field(tb, r0, domF) }, false));
+                }
+            } finally {
+                s.Close();
             }
-        } finally {
-            s.Close();
+            foundRecs.AddRange(s.Found.Keys);
         }
         List<int> missing = new List<int>();
-        foreach (int rec in s.Found.Keys) if (!rowOfRec.ContainsKey(rec)) missing.Add(rec);
+        foreach (int rec in foundRecs) if (!rowOfRec.ContainsKey(rec)) missing.Add(rec);
         bool grown = false;
         if (missing.Count > 0) {
             int deleted;
@@ -11517,7 +11575,7 @@ public class LiveBase {
         Dictionary<int, bool> shown = new Dictionary<int, bool>();
         foreach (int row in res.Rows) shown[row] = true;
         int added = 0;
-        foreach (int rec in s.Found.Keys) {
+        foreach (int rec in foundRecs) {
             int h;
             if (!rowOfRec.TryGetValue(rec, out h) || shown.ContainsKey(h)) continue;
             List<int> list;
@@ -12195,7 +12253,10 @@ public class AddressParts {
 public static class FieldNames {
     static Dictionary<string, string> names;
 
+    public static Dictionary<string, string> Excel;      // режим Excel: поле копии -> заголовок выгрузки
+
     public static string Label(string field) {
+        if (Excel != null) { string x; if (Excel.TryGetValue(field, out x) && x.Length > 0) return x; }
         if (names == null) {
             names = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             string[] pairs = {
@@ -13091,6 +13152,28 @@ public class StreetDirectory {
         return w;
     }
 
+    // режим Excel: справочник улиц своей копии выгрузки (код -> н.п., улица, сельсовет; VygruzkaByt.ReadStreets)
+    public static StreetDirectory FromCopy(string file) {
+        StreetDirectory dir = new StreetDirectory();
+        dir.TableName = Path.GetFileName(file);
+        dir.KeyField = "UL";
+        foreach (KeyValuePair<string, string[]> kv in VygruzkaByt.ReadStreets(file)) {
+            string code = NormalizeCode(kv.Key), town = kv.Value[0].Trim(), own = kv.Value[1].Trim(), ss = kv.Value[2].Trim();
+            StringBuilder display = new StringBuilder(town);
+            if (own.Length > 0) display.Append((display.Length > 0 ? ", " : "") + own);
+            if (ss.Length > 0) {
+                string l = ss.ToLowerInvariant();
+                display.Append((display.Length > 0 ? ", " : "") + ss + (l.Contains("с/с") || l.Contains("сельсовет") ? "" : " с/с"));
+            }
+            dir.names[code] = display.ToString();
+            dir.lowerNames[code] = display.ToString().ToLowerInvariant().Replace('ё', 'е');
+            dir.ssOf[code] = CleanSs(ss);
+            dir.townOf[code] = town;
+            dir.streetOf[code] = own;
+        }
+        return dir;
+    }
+
     public bool HasTowns {
         get { foreach (string t in townOf.Values) if (t.Length > 0) return true; return false; }
     }
@@ -13841,12 +13924,40 @@ public class BaseLink {
     public bool FromPoisk;                  // папка базы и таблица - из poisk.txt «Поиска»
     public bool Ready { get { return Base != null; } }
     // ищем только по индексам базы (CDX), перебора таблицы нет; нет индекса - проверить нельзя (а не «нет в базе»)
-    public bool AccountIndex { get { return Base != null && Base.TagFor("NAB") != null; } }
-    public bool AddressIndex { get { return Base != null && Base.TagFor("UL", true) != null; } }
+    public bool AccountIndex { get { return Base != null && (Base.Mem != null || Base.TagFor("NAB") != null); } }
+    public bool AddressIndex { get { return Base != null && (Base.Mem != null || Base.TagFor("UL", true) != null); } }
     readonly object sync = new object();
+    public bool Excel;                      // данные - из Excel-выгрузки быта (меню программ: «Настройки…»), не из базы
+
+    // режим Excel: одна копия выгрузки в памяти на всю программу (договор, справка, наряд, перевод - общая; только чтение)
+    static LiveBase excelBase;
+    static string excelStamp = "";
+    static readonly object excelGate = new object();
+
+    void OpenExcel() {
+        Excel = true;
+        Folder = Istochnik.CacheFolder;
+        Table = "выгрузка быта";
+        string problem = Istochnik.BytCacheProblem();
+        if (problem != null) { Error = problem; return; }
+        lock (excelGate) {
+            string stamp = "";
+            try { FileInfo fi = new FileInfo(Istochnik.BytTable); stamp = fi.Length + "_" + fi.LastWriteTimeUtc.Ticks; } catch { }
+            if (excelBase == null || stamp != excelStamp) {
+                excelBase = LiveBase.OpenMemory(Istochnik.BytTable, StreetDirectory.FromCopy(Istochnik.BytStreets));
+                excelStamp = stamp;
+                FieldNames.Excel = VygruzkaByt.Labels();
+            }
+            Base = excelBase;
+        }
+    }
 
     // открыть базу; запомненное (папка «Поиска», таблица, справочник улиц) - в settings, найденное заново - туда же
     public void Open(Dictionary<string, string> settings) {
+        if (Istochnik.UseExcel) {
+            try { OpenExcel(); } catch (Exception ex) { Error = "выгрузка быта не открылась: " + ex.Message + " (меню программ: «Настройки…» -> «Обновить индексы»)"; Base = null; }
+            return;
+        }
         try {
             string poisk = Get(settings, "ПоискПапка");
             if (poisk == "-") poisk = "";                       // проверка указанного: саму не искать
@@ -13932,6 +14043,7 @@ public class BaseLink {
             if (namesOk) return true;
             if ((DateTime.Now - namesAt).TotalSeconds < 60) return false;    // не вышло - снова не раньше чем через минуту
             namesAt = DateTime.Now;
+            if (Base.Mem != null) { namesOk = true; NamesNote = "Ф.И.О. - по выгрузке быта"; return true; }
             if (Base.Header.FieldIndex("FIO") < 0) { NamesNote = "в таблице абонентов нет поля FIO"; return false; }
             if (Base.TagFor("FIO") != null) { namesOk = true; NamesNote = "индекс по Ф.И.О. - в самой базе (" + Base.TagFor("FIO").Name + ")"; return true; }
             if (Poisk.Length == 0) { NamesNote = "папка программы «Поиск абонента» не найдена - укажите её: главное меню, «База абонентов…»"; return false; }
@@ -13947,7 +14059,10 @@ public class BaseLink {
         lock (sync) {
             if (naryady != null && (naryady.Ready || (DateTime.Now - naryadyAt).TotalSeconds < 60)) return naryady;
             naryadyAt = DateTime.Now;
-            if (Poisk.Length == 0) {
+            if (Excel) {
+                naryady = new NaryadLookup();
+                naryady.Note = Istochnik.Missing("нарядов", Istochnik.NaryadyPath) ?? "наряды из выгрузки нарядов подключим, когда будет образец выгрузки";
+            } else if (Poisk.Length == 0) {
                 naryady = new NaryadLookup();
                 naryady.Note = "папка программы «Поиск абонента» не найдена - укажите её: главное меню, «База абонентов…»";
             } else naryady = NaryadLookup.Open(Poisk, Folder);
@@ -16084,7 +16199,10 @@ public class DogovorForm : Form {
                         if (settings.ContainsKey(k)) memory.Values[k] = settings[k];
                     memory.Save();
                     // проверка - поиском по индексу базы (несколько чтений), не перебором всех записей
-                    if (b.AccountIndex && b.AddressIndex) {
+                    if (b.Excel) {
+                        baseLabel.Text = "Данные: " + Istochnik.BytAbout() + "\nлицевой и адрес ищутся по выгрузке";
+                        baseLabel.ForeColor = Color.FromArgb(150, 210, 170);
+                    } else if (b.AccountIndex && b.AddressIndex) {
                         baseLabel.Text = "База: " + b.Table + (b.FromPoisk ? " (как в «Поиске»)" : "") + "\nлицевой и адрес ищутся по индексу базы";
                         baseLabel.ForeColor = Color.FromArgb(150, 210, 170);
                     } else {
@@ -16093,7 +16211,7 @@ public class DogovorForm : Form {
                         baseLabel.ForeColor = Color.FromArgb(240, 150, 150);
                     }
                 } else {
-                    baseLabel.Text = "База недоступна: " + b.Error + "\nщёлкните здесь - указать папку «Поиска»";
+                    baseLabel.Text = b.Excel ? "Выгрузка: " + b.Error : "База недоступна: " + b.Error + "\nщёлкните здесь - указать папку «Поиска»";
                     baseLabel.ForeColor = Color.FromArgb(240, 150, 150);
                 }
                 Recheck(true, true);
@@ -24503,6 +24621,12 @@ public class JurPick : Form {
         int kp = 0;
         if (kpText.Length > 0 && !int.TryParse(kpText, out kp)) { Status("Номер договора юр лица - только цифры (или оставьте пустым).", St.Bad); return; }
         if (kp == 0 && (dom.Length == 0 || np.Length == 0 && ul.Length == 0)) { Status("Нужен адрес: населённый пункт или улица и дом (или номер договора юр лица).", St.Bad); return; }
+        // данные - из Excel-выгрузок (меню программ: «Настройки…»): базу юр лиц не открываем
+        if (Istochnik.UseExcel) {
+            Status("Сейчас данные берутся из Excel-выгрузок (меню программ: «Настройки…»). " + (Istochnik.Missing("юр лиц", Istochnik.JurPath)
+                ?? "Перевод из юр в физ по выгрузке юр лиц подключим, когда будет образец этой выгрузки.") + " Адрес и лицевой можно вписать и создать договор или справку.", Warn);
+            return;
+        }
         string saved = memory.Get("ЮрБазаПапка", ""), house = Query(true), street = Query(false);
         string where = (ul.Length > 0 ? ul : np) + (dom.Length > 0 ? ", д." + dom : "") + (korBox.Text.Trim().Length > 0 ? " корп." + korBox.Text.Trim() : "")
             + (kv.Length > 0 ? ", кв." + kv : "");
