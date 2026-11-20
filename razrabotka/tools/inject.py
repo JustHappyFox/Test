@@ -31,3 +31,16 @@ for prog in ('menu/menu.ps1', 'prosmotr-bazy/prosmotr.ps1', 'dogovor/dogovor.ps1
     d.t = t
     d.save()
     print(prog, 'ок')
+
+# блок формы БС (только «Договор»): razrabotka/src/bs_form.cs, перед классом SealRow
+B2, E2 = '// ==== БЛОК ФОРМЫ БС', '// ==== КОНЕЦ БЛОКА ФОРМЫ БС ===='
+bs = open(os.path.join(ROOT, 'razrabotka', 'src', 'bs_form.cs'), encoding='utf-8-sig').read().replace('\r\n', '\n').strip('\n')
+assert "\n'@" not in bs
+d = Doc(os.path.join(ROOT, 'dogovor/dogovor.ps1'))
+if B2 in d.t:
+    a = d.t.index(B2); b = d.t.index(E2) + len(E2)
+    d.t = d.t[:a] + bs + d.t[b:]
+else:
+    d.rep('public class SealRow {', bs + '\n\npublic class SealRow {')
+d.save()
+print('dogovor/dogovor.ps1 БС ок')
