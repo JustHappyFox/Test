@@ -7076,7 +7076,7 @@ public class AbonentSearch : Form {
         timer.Interval = 400;
         timer.Tick += delegate { timer.Stop(); StartSearch(); };
         logTimer.Interval = 2000;
-        logTimer.Tick += delegate { logTimer.Stop(); LogSearch(); AddHistory(); };
+        logTimer.Tick += delegate { logTimer.Stop(); LogSearch(); };
 
         Controls.Add(grid);
         Controls.Add(bottom);
@@ -7230,6 +7230,7 @@ public class AbonentSearch : Form {
 
     void Start() {
         Report.Start(Path.Combine(Dir, "otchet.txt"));
+        SearchHistory.FilePath = HistoryFile;
         if (launchInfo != null) Report.Line("Подготовка программы: " + launchInfo);
         // выборка абонентов прошлой версии больше не нужна (в ней были данные абонентов)
         foreach (string old in new string[] { "kesh_abonenty.dbf", "kesh_abonenty.txt", "kesh_abonenty.dbf.tmp" }) {
@@ -7762,24 +7763,21 @@ public class AbonentSearch : Form {
 
     string HistoryFile { get { return Path.Combine(Dir, "istoriya.txt"); } }
 
-    // поиск - в историю (30 последних): что искали и найденные строки, как в списке
-    internal void AddHistory() {
+    // открытая карточка - в историю (30 последних): строка абонента, как в списке, и что было вписано в поиск
+    internal void AddHistory(int index) {
         SearchResult r = current;
-        if (r == null || r.Error != null || DbfTable.SplitWords(r.Text ?? "").Length == 0) return;
+        if (r == null || r.Error != null || index < 0 || index >= r.Rows.Count) return;
         try {
             SearchHistory.Entry e = new SearchHistory.Entry();
             e.When = DateTime.Now;
             e.Mode = (int)r.Mode;
             e.Query = r.Text;
-            e.Found = r.Rows.Count == 0 ? "не найдено" : r.Searched + (r.Added.Count > 0 ? " (+" + r.Added.Count + ")" : "");
             string[] titles = new string[grid.Columns.Count];
             for (int c = 0; c < titles.Length; c++) titles[c] = grid.Columns[c].HeaderText;
             e.Titles = titles;
-            for (int i = 0; i < r.Rows.Count && i < SearchHistory.RowsPerSearch; i++) {
-                string[] cells = new string[kinds.Count];
-                for (int c = 0; c < kinds.Count; c++) { object v = ResultColumns.Text(r, r.Rows[i], kinds[c]); cells[c] = v == null ? "" : v.ToString(); }
-                e.Rows.Add(cells);
-            }
+            string[] cells = new string[kinds.Count];
+            for (int c = 0; c < kinds.Count; c++) { object v = ResultColumns.Text(r, r.Rows[index], kinds[c]); cells[c] = v == null ? "" : v.ToString(); }
+            e.Rows.Add(cells);
             SearchHistory.Add(HistoryFile, e);
         } catch (Exception ex) { Report.Line("История поисков не записалась: " + ex.Message); }
     }
@@ -7787,8 +7785,6 @@ public class AbonentSearch : Form {
     internal HistoryForm LastHistory;
 
     internal void OpenHistory() {
-        LogSearch();
-        AddHistory();
         string[] titles = new string[grid.Columns.Count];
         for (int c = 0; c < titles.Length; c++) titles[c] = grid.Columns[c].HeaderText;
         HistoryForm h = new HistoryForm(HistoryFile, titles);
@@ -7888,6 +7884,7 @@ public class AbonentSearch : Form {
     internal void OpenCard(int index) {
         SearchResult r = current;
         if (r == null || index < 0 || index >= r.Rows.Count) return;
+        AddHistory(index);
         int pos = index;
         // PgUp/PgDn в карточке - соседний абонент этого же списка
         CardMove move = delegate(int delta, out SearchResult rr, out int row) {
@@ -8589,6 +8586,21 @@ public class BatchSearch : Form {
     void OpenCard(int index) {
         if (index < 0 || index >= items.Count || items[index].Row < 0) return;
         Item it = items[index];
+        // открытая карточка - в историю (как из главного окна): строка списка и что было вписано
+        try {
+            if (SearchHistory.FilePath != null) {
+                SearchHistory.Entry h = new SearchHistory.Entry();
+                h.When = DateTime.Now;
+                h.Mode = 0;
+                for (int m = 0; m < modeButtons.Length; m++) if (modeButtons[m] != null && modeButtons[m].Checked) h.Mode = m;
+                h.Query = it.Text ?? "";
+                string[] titles = new string[grid.Columns.Count], cells = new string[grid.Columns.Count];
+                for (int c = 0; c < titles.Length; c++) { titles[c] = grid.Columns[c].HeaderText; object v = Cell(it, c); cells[c] = v == null ? "" : v.ToString(); }
+                h.Titles = titles;
+                h.Rows.Add(cells);
+                SearchHistory.Add(SearchHistory.FilePath, h);
+            }
+        } catch { }
         int pos = index;
         // PgUp/PgDn в карточке - следующий найденный абонент итога
         CardMove move = delegate(int delta, out SearchResult rr, out int row) {
@@ -11375,12 +11387,12 @@ public class NaryadSetupDialog : Form {
 
 // Копирование из таблиц и списков: поля (ячейки) выделяются мышью (протянуть, Shift/Ctrl+щелчок),
 // копируются Ctrl+C или правой кнопкой «Копировать»; в базу ничего не пишется
-// История поисков: 30 последних (новые сверху) - что искали и что нашлось (строки как в списке найденного), чтобы найти
-// адрес, если программу случайно закрыли. Файл istoriya.txt в папке программы (на этом компьютере; в нём данные абонентов).
-// Уточнение того же поиска (дописали адрес, исправили букву) за 2 минуты - заменяет прежнюю запись, а не добавляет новую.
+// История: 30 последних абонентов, чью карточку открывали (двойной щелчок / Enter по строке найденного), новые сверху -
+// строка как в списке найденного и что было вписано в поиск. Чтобы найти адрес, если программу случайно закрыли.
+// Файл istoriya.txt в папке программы (на этом компьютере; в нём данные абонентов). Тот же абонент ещё раз - поднимается наверх.
 public static class SearchHistory {
     public const int Keep = 30;
-    public const int RowsPerSearch = 15;
+    public static string FilePath;      // istoriya.txt в папке программы (задаёт главное окно)
 
     public class Entry {
         public DateTime When;
@@ -11449,16 +11461,13 @@ public static class SearchHistory {
         File.Move(tmp, file);
     }
 
-    static string Norm(string s) { return string.Join(" ", DbfTable.SplitWords((s ?? "").ToLowerInvariant())); }
+    static string Key(Entry e) { return e.Rows.Count > 0 ? string.Join("\t", e.Rows[0]) : e.Query; }
 
-    // добавить поиск: уточнение прежнего (тот же вид, одно начинается с другого, не позже 2 минут) - заменяет его
+    // добавить открытую карточку: тот же абонент (та же строка) уже есть - убрать его оттуда, он встанет наверх
     public static void Add(string file, Entry e) {
         List<Entry> list = Load(file);
-        if (list.Count > 0) {
-            Entry last = list[0];
-            string a = Norm(last.Query), b = Norm(e.Query);
-            if (last.Mode == e.Mode && (e.When - last.When).TotalSeconds < 120 && (b.StartsWith(a) || a.StartsWith(b) || a == b)) list.RemoveAt(0);
-        }
+        string k = Key(e);
+        list.RemoveAll(delegate(Entry x) { return Key(x) == k; });
         list.Insert(0, e);
         while (list.Count > Keep) list.RemoveAt(list.Count - 1);
         Save(file, list);
@@ -11477,7 +11486,7 @@ public class HistoryForm : Form {
 
     public HistoryForm(string file, string[] titles) {
         list = SearchHistory.Load(file);
-        Text = "История поисков - " + list.Count + " последних (новые сверху)";
+        Text = "История - " + list.Count + " последних открытых карточек (новые сверху)";
         Font = Look.Base;
         Look.Wear(this);
         StartPosition = FormStartPosition.CenterParent;
@@ -11488,7 +11497,7 @@ public class HistoryForm : Form {
         hint.Dock = DockStyle.Top;
         hint.Height = 26;
         hint.Padding = new Padding(8, 6, 8, 0);
-        hint.Text = "Двойной щелчок по строке (или Enter) - искать снова. Ctrl+C, правая кнопка - копировать. Esc - закрыть.";
+        hint.Text = "Абоненты, чью карточку открывали. Двойной щелчок по строке (или Enter) - искать снова. Ctrl+C, правая кнопка - копировать. Esc - закрыть.";
         grid.Dock = DockStyle.Fill;
         grid.ReadOnly = true;
         grid.AllowUserToAddRows = false;
@@ -11497,7 +11506,7 @@ public class HistoryForm : Form {
         grid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
         grid.SelectionMode = DataGridViewSelectionMode.CellSelect;
         // столбцы: когда, по чему, что вписано, найдено + столбцы списка найденного
-        List<string> cols = new List<string>(new string[] { "Когда", "Искал по", "Что вписано", "Найдено" });
+        List<string> cols = new List<string>(new string[] { "Когда", "Искал по", "Что вписано" });
         cols.AddRange(titles);
         foreach (string c in cols) {
             DataGridViewTextBoxColumn col = new DataGridViewTextBoxColumn();
@@ -11518,12 +11527,11 @@ public class HistoryForm : Form {
                     v[0] = e.When.ToString("dd.MM HH:mm");
                     v[1] = e.Mode >= 0 && e.Mode < ModeNames.Length ? ModeNames[e.Mode] : "";
                     v[2] = e.Query;
-                    v[3] = e.Found;
                 }
                 if (k < e.Rows.Count)
                     for (int c = 0; c < titles.Length; c++) {
                         int j = Array.IndexOf(e.Titles, titles[c]);
-                        if (j >= 0 && j < e.Rows[k].Length) v[4 + c] = e.Rows[k][j];
+                        if (j >= 0 && j < e.Rows[k].Length) v[3 + c] = e.Rows[k][j];
                     }
                 int r = grid.Rows.Add(v);
                 if (odd) grid.Rows[r].DefaultCellStyle.BackColor = Look.RowOther;
@@ -11531,7 +11539,7 @@ public class HistoryForm : Form {
                 entryOf.Add(i);
             }
         }
-        if (list.Count == 0) { grid.Rows.Add(new object[] { "", "", "Поисков пока не было", "" }); entryOf.Add(-1); }
+        if (list.Count == 0) { grid.Rows.Add(new object[] { "", "", "Карточки пока не открывали" }); entryOf.Add(-1); }
         CopyText.Grid(grid);
         grid.CellDoubleClick += delegate(object s, DataGridViewCellEventArgs e) { if (e.RowIndex >= 0) Again(e.RowIndex); };
         KeyDown += delegate(object s, KeyEventArgs e) {
