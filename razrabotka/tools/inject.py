@@ -44,3 +44,16 @@ else:
     d.rep('public class SealRow {', bs + '\n\npublic class SealRow {')
 d.save()
 print('dogovor/dogovor.ps1 БС ок')
+
+# блок юр наряда (только «Договор»): razrabotka/src/jur_naryad.cs, перед классом SealRow
+B3, E3 = '// ==== БЛОК ЮР НАРЯДА', '// ==== КОНЕЦ БЛОКА ЮР НАРЯДА ===='
+jn = open(os.path.join(ROOT, 'razrabotka', 'src', 'jur_naryad.cs'), encoding='utf-8-sig').read().replace('\r\n', '\n').strip('\n')
+assert "\n'@" not in jn
+d = Doc(os.path.join(ROOT, 'dogovor/dogovor.ps1'))
+if B3 in d.t:
+    a = d.t.index(B3); b = d.t.index(E3) + len(E3)
+    d.t = d.t[:a] + jn + d.t[b:]
+else:
+    d.rep('public class SealRow {', jn + '\n\npublic class SealRow {')
+d.save()
+print('dogovor/dogovor.ps1 юр наряд ок')
