@@ -11,3 +11,4 @@ dogovor/nastroiki.txt
 dogovor/tmp/
 dogovor/avtosohranenie.txt
 dogovor/spravochniki.txt
+__pycache__/
