@@ -1160,3 +1160,34 @@ class BlocklistTests(unittest.TestCase):
         self.assertEqual(names, {"codenamefan"})
         self.assertEqual(ids, {2454948751})
         self.assertEqual(gf.load_blocklist(None), (set(), set()))
+
+
+class PostSlotsTests(unittest.TestCase):
+    """Владелец 21.11: посты строго в 7, 12, 17 и 22 по Минску."""
+
+    def due(self, now, last=None, block=None):
+        m = lambda s: datetime.fromisoformat(s + "+03:00").astimezone(timezone.utc)
+        r = gf.slot_due(m(now), [7, 12, 17, 22], 3, m(last) if last else None, m(block) if block else None,
+                        timedelta(hours=2))
+        return r <= m(now), r.astimezone(timezone(timedelta(hours=3))).strftime("%d %H:%M")
+
+    def test_posts_at_slot_and_catches_up_late_runs(self):
+        self.assertEqual(self.due("2026-11-21T07:01", "2026-11-20T22:02"), (True, "21 07:00"))
+        self.assertEqual(self.due("2026-11-21T08:50", "2026-11-20T22:02"), (True, "21 07:00"))
+        # пост вне расписания в 10:08 не съедает слот 12:00
+        self.assertEqual(self.due("2026-11-21T12:20", "2026-11-21T10:08"), (True, "21 12:00"))
+
+    def test_one_post_per_slot_and_nothing_between_slots(self):
+        self.assertEqual(self.due("2026-11-21T07:30", "2026-11-21T07:01"), (False, "21 12:00"))
+        self.assertEqual(self.due("2026-11-21T11:16", "2026-11-21T07:01"), (False, "21 12:00"))
+        self.assertEqual(self.due("2026-11-21T09:30", "2026-11-20T22:02"), (False, "21 12:00"))
+
+    def test_night_and_owner_pause(self):
+        self.assertEqual(self.due("2026-11-21T23:40", "2026-11-21T22:01"), (False, "22 07:00"))
+        self.assertEqual(self.due("2026-11-21T12:05", "2026-11-21T07:01", block="2026-11-21T15:00"),
+                         (False, "21 17:00"))
+
+    def test_parse(self):
+        self.assertEqual(gf.parse_post_at("22, 7,12,17"), [7, 12, 17, 22])
+        with self.assertRaises(ValueError):
+            gf.parse_post_at("7,25")

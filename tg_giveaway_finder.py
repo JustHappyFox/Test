@@ -121,6 +121,38 @@ def parse_post_hours(value: str | None) -> tuple[int, int] | None:
     return a, b
 
 
+def parse_post_at(value: str | None) -> list[int]:
+    """'7,12,17,22' -> [7, 12, 17, 22]: часы публикаций по местному времени (владелец 21.11)."""
+    if not value:
+        return []
+    hours = sorted({int(x) for x in str(value).replace(" ", "").split(",") if x})
+    if not hours or not all(0 <= h <= 23 for h in hours):
+        raise ValueError(f"--post-at: нужны часы через запятую, например 7,12,17,22, а не {value!r}")
+    return hours
+
+
+def slot_due(now: datetime, hours: list[int], tz_hours: float, last_bot: datetime | None,
+             blocked_until: datetime | None, grace: timedelta) -> datetime:
+    """Время поста по фиксированному расписанию. Если сейчас идёт окно слота (от его начала прошло
+    не больше grace) и в этом слоте бот ещё не публиковал — возвращает начало слота (пора постить).
+    Иначе — начало ближайшего следующего слота. Слоты, попавшие в паузу после поста владельца
+    (blocked_until), пропускаются."""
+    tz = timezone(timedelta(hours=tz_hours))
+    loc = now.astimezone(tz)
+    slots = sorted(datetime(d.year, d.month, d.day, h, tzinfo=tz).astimezone(timezone.utc)
+                   for d in (loc.date() - timedelta(days=1), loc.date(), loc.date() + timedelta(days=1),
+                             loc.date() + timedelta(days=2))
+                   for h in hours)
+    for s in slots:
+        if blocked_until and s < blocked_until:
+            continue
+        if s > now:
+            return s
+        if now - s <= grace and (last_bot is None or last_bot < s):  # пост слота бывает только после его начала
+            return s
+    return slots[-1]
+
+
 def in_post_window(t: datetime, window: tuple[int, int] | None, tz_hours: float = 3.0) -> datetime:
     """Ближайший момент не раньше t внутри окна публикаций (по местному времени UTC+tz_hours).
     Внутри окна — сам t; ночью — начало окна (утром того же или следующего дня)."""
@@ -1523,6 +1555,11 @@ async def cmd_post_scheduled(client: TelegramClient, args: argparse.Namespace) -
     window = parse_post_hours(getattr(args, "post_hours", None))
     tz_hours = getattr(args, "tz_offset", 3.0)
     next_at = in_post_window(next_at, window, tz_hours)  # ночью не публикуем — переносим на утро
+    slots = parse_post_at(getattr(args, "post_at", None))
+    if slots:  # владелец 21.11: посты строго по расписанию (7, 12, 17, 22), окно часов не нужно
+        window = None
+        grace = timedelta(hours=getattr(args, "slot_grace_hours", 2.0) or 2.0)
+        next_at = slot_due(now, slots, tz_hours, last_bot, manual + gap if manual and gap else None, grace)
 
     allowed = parse_countries(getattr(args, "countries", None))
 
@@ -1540,7 +1577,8 @@ async def cmd_post_scheduled(client: TelegramClient, args: argparse.Namespace) -
         # 0 — публиковать один пост, только когда подошло время (раз в 3,5 ч / 5 ч после ваших постов)
         # допуск 10 минут: запуски по расписанию приходят неточно, пропускать из-за пары минут нельзя
         # (но не раньше начала окна публикаций: в 06:55 людей не будим)
-        return (last_published is None and next_at <= now + timedelta(minutes=10)
+        early = timedelta(0) if slots else timedelta(minutes=10)  # по расписанию — не раньше слота
+        return (last_published is None and next_at <= now + early
                 and in_post_window(now, window, tz_hours) == now)
 
     async def search() -> None:
@@ -1996,6 +2034,12 @@ def build_parser() -> argparse.ArgumentParser:
                     help="чёрный список каналов: их розыгрыши не публикуем (state/blocked_channels.txt)")
     ps.add_argument("--post-hours", metavar="С-ДО",
                     help="публиковать только в эти часы по местному времени, например 7-22 (ночью людей не будим)")
+    ps.add_argument("--post-at", metavar="ЧАСЫ",
+                    help="публиковать строго в эти часы по местному времени, например 7,12,17,22 "
+                         "(по одному посту на час; заменяет --post-hours и --min-interval-hours)")
+    ps.add_argument("--slot-grace-hours", type=float, default=2.0, metavar="Ч",
+                    help="для --post-at: сколько часов после начала слота ещё можно опубликовать его пост, "
+                         "если запуск GitHub опоздал (по умолчанию 2)")
     ps.add_argument("--tz-offset", type=float, default=3.0, metavar="Ч",
                     help="местное время для --post-hours: смещение от UTC в часах (3 — Минск/Москва)")
     ps.add_argument("--max-giveaway-channels", type=int, default=0, metavar="N",
