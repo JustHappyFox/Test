@@ -1,7 +1,7 @@
 name: Репост розыгрышей в @TGaGifts
 
 # Каждые 30 минут задание просто обновляется: проверяет время и ваши посты, ничего не ищет.
-# Раз в 3,5 часа (и не раньше 5 часов после вашего поста) публикует ОДИН розыгрыш из запаса —
+# Раз в 5 часов (владелец 21.11; было 3,5 ч), с 7 до 22 по Минску (и не раньше 5 часов после вашего поста) публикует ОДИН розыгрыш из запаса —
 # тот, что раньше закончится; пересылает из канала-организатора и записывает в учёт.
 # Когда запас кончается, ищет новые перебором каналов (до 10 подходящих за поиск).
 # Каналы сначала смотрит по веб-странице t.me/s/… (без аккаунта и его лимитов): модуль-розыгрыш там —
@@ -85,7 +85,7 @@ jobs:
         run: >
           python tg_giveaway_finder.py post --to TGaGifts
           --countries RU,BY,KZ --fallback-other-countries --max-giveaway-channels 4
-          --count 1 --min-hours-left 3 --min-interval-hours 3.5 --manual-gap-hours 5 --schedule-ahead 0 --reserve 10 --daily-search-hours 24 --refill-below 4 --refill-every-hours 3 --post-hours 7-22 --tz-offset 3
+          --count 1 --min-hours-left 3 --min-interval-hours 5 --manual-gap-hours 5 --schedule-ahead 0 --reserve 10 --daily-search-hours 24 --refill-below 4 --refill-every-hours 3 --post-hours 7-22 --tz-offset 3
           --careful --max-channels 1000 --search-pages 2 --source-limit 100
           --web --web-max 6000 --time-limit 30
           --discover-file state/cc_candidates.txt --web-open-max 40 --no-discover
