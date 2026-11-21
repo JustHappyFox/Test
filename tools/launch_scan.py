@@ -19,7 +19,7 @@ import tg_web_preview as wp  # noqa: E402
 
 def known_names() -> set[str]:
     known = {a.lstrip("@").lower() for a in gf.DEFAULT_AGGREGATORS} | {"tgagifts"}
-    for f in ("state/cc_candidates.txt", "state/results_organizers.txt", "state/sources.txt"):
+    for f in ("state/cc_candidates.txt", "state/results_organizers.txt"):
         p = Path(f)
         if p.is_file():
             for ln in p.read_text(encoding="utf-8").splitlines():

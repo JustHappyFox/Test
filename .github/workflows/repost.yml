@@ -79,7 +79,6 @@ jobs:
         run: |
           mkdir -p .state
           [ -f .state/posted.json ] || cp state/posted.json .state/posted.json 2>/dev/null || true
-          [ -f .state/sources.txt ] || cp state/sources.txt .state/sources.txt 2>/dev/null || true
 
       - name: Найти и переслать розыгрыш
         if: steps.check.outputs.ready == 'true'
