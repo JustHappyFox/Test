@@ -46,7 +46,7 @@ jobs:
           python tools/cc_telegram.py --out /tmp/crawl_names.txt ${CRAWLS:+--crawl $CRAWLS}
       - name: Сохранить в репозиторий
         # Новые имена дописываются в общий список, а отдельно — в state/cc_new_usernames.txt
-        # (их потом проверяет cc_scan.yml с source=state/cc_new_usernames.txt и merge).
+        # (их проверяет ежедневный launch_scan.yml вместе с общим списком).
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
