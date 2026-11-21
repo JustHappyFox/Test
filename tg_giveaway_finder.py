@@ -1274,7 +1274,8 @@ async def inspect_target(client: TelegramClient, target: Any, st: dict[str, Any]
 
 
 def queue_order(e: dict[str, Any]) -> tuple:
-    return (e["until"], bool(e.get("countries")))  # раньше кончится — раньше публикуем; при равенстве «для всех стран»
+    # владелец 21.11: приоритет — розыгрыши «для всех стран»; внутри — кто раньше кончится
+    return (bool(e.get("countries")), e["until"])
 
 
 # Цена Premium в звёздах (подарок за звёзды): чтобы сравнивать розыгрыши Premium и звёзд одной мерой
@@ -1749,8 +1750,13 @@ async def cmd_post_scheduled(client: TelegramClient, args: argparse.Namespace) -
         save_state(state_path, st)
     if args.save_sources and finder is not None:
         save_sources(filter_giveaways(finder.giveaways.values(), args), args.save_sources)
-    log.info("Отложено постов бота: %d, в очереди: %d, запасных (другие страны): %d, отдельный список "
-             "(больше %d каналов): %d", len(scheduled), len(queue), len(backup), cap, len(over))
+    log.info("Отложено постов бота: %d, в очереди: %d (для всех стран: %d), запасных (другие страны): %d, "
+             "отдельный список (больше %d каналов): %d (для всех стран: %d)", len(scheduled), len(queue),
+             sum(not e.get("countries") for e in queue), len(backup), cap, len(over),
+             sum(not e.get("countries") for e in over))
+    for e in sorted(queue, key=queue_order):
+        log.info("  очередь: %s | страны %s | каналов %d | до %s | %s", e["prize"],
+                 ",".join(e.get("countries") or []) or "все", key_channels(e["key"]), e["until"][:16], e["link"])
     for e in over:
         log.info("  отдельный список: %s | каналов %d | до %s | %s", e["prize"], key_channels(e["key"]),
                  e["until"][:16], e["link"])

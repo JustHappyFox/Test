@@ -4,12 +4,13 @@ name: Новые розыгрыши по «Канал запустил розы�
 # «Канал запустил розыгрыш» (реклама такого сообщения от Telegram получить не может).
 # Найденные каналы сразу добавляются в начало state/cc_candidates.txt — бот открывает их в каждом поиске
 # (раньше находки оставались только в логе: @NoHuClub — 7 розыгрышей за 7 дней — бот не знал).
-# По расписанию раз в 6 часов проходит все живые каналы (state/live_usernames.txt) и каналы из истории
-# агрегаторов (state/agg_organizers.txt) за 7 дней, до 20 страниц на канал (владелец 07.11: «за 7 дней, а не
-# последние сообщения»); ручной запуск по полному списку заодно обновляет список живых. Аккаунт не используется.
+# По расписанию раз в сутки (владелец 21.11: «раз в день по всем пабликам»; было раз в 6 ч по живым) проходит
+# ВСЕ имена: Common Crawl, история агрегаторов, итоги, GitHub, Wikidata — за 7 дней, до 20 страниц на канал
+# (владелец 07.11: «за 7 дней, а не последние сообщения»), и заодно обновляет список живых
+# (state/live_usernames.txt). Ручной запуск — по выбранному списку. Аккаунт не используется.
 on:
   schedule:
-    - cron: "27 */6 * * *"
+    - cron: "27 0 * * *"   # 03:27 по Минску — к утренним постам готово
   workflow_dispatch:
     inputs:
       days:
@@ -53,20 +54,21 @@ jobs:
       - name: Пройти часть списка
         run: |
           SRC="$SOURCE"
-          if [ -z "$SRC" ]; then
-            if [ -f state/live_usernames.txt ]; then
-              cat state/agg_organizers.txt state/live_usernames.txt 2>/dev/null > /tmp/names.txt
-              SRC=/tmp/names.txt
-            else
-              SRC=state/cc_usernames.txt
-            fi
+          FULL=0
+          if [ -z "$SRC" ] || [ "$SRC" = all ]; then
+            # все паблики: свежие источники организаторов первыми, без повторов
+            cat state/agg_organizers.txt state/results_organizers.txt state/cc_usernames.txt \
+                state/gh_usernames.txt state/wayback_usernames.txt 2>/dev/null \
+              | awk '{n=tolower($1); sub(/^@/,"",n)} n!="" && !seen[n]++' > /tmp/names.txt
+            SRC=/tmp/names.txt
+            FULL=1
           fi
           echo "Список: $SRC, дней: $DAYS"
           mkdir -p /tmp/out
           python tools/launch_scan.py "$SRC" --days "$DAYS" --stop-after "$STOP" \
             --shard ${{ matrix.shard }} --shards 10 \
             --out /tmp/out/found_${{ matrix.shard }}.txt --live-out /tmp/out/live_${{ matrix.shard }}.txt
-          [ "$SRC" = state/cc_usernames.txt ] || rm -f /tmp/out/live_${{ matrix.shard }}.txt
+          [ "$FULL" = 1 ] || [ "$SRC" = state/cc_usernames.txt ] || rm -f /tmp/out/live_${{ matrix.shard }}.txt
         shell: bash
       - uses: actions/upload-artifact@v4
         if: always()
