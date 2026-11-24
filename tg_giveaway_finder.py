@@ -1263,6 +1263,7 @@ def load_state(path: Path) -> dict[str, Any]:
 
 def save_state(path: Path, st: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    st = {k: v for k, v in st.items() if not k.startswith("_")}  # служебные поля одного запуска не храним
     path.write_text(json.dumps(st, ensure_ascii=False, indent=1), encoding="utf-8")
 
 
@@ -1304,6 +1305,8 @@ async def inspect_target(client: TelegramClient, target: Any, st: dict[str, Any]
             src = getattr(getattr(m, "fwd_from", None), "from_id", None)
             if sources is not None and isinstance(src, types.PeerChannel):
                 sources[giveaway_key(media)] = src.channel_id
+        if m.id in our_ids and (st.get("_own_last") is None or m.date > st["_own_last"]):
+            st["_own_last"] = m.date  # свой пост в канале, в том числе вне очереди (--post-now)
         if manual is None and m.id not in our_ids and is_manual_post(m) \
                 and not any(abs((m.date - t).total_seconds()) <= 120 for t in our_times):
             manual = m.date
@@ -1555,6 +1558,10 @@ async def cmd_post_scheduled(client: TelegramClient, args: argparse.Namespace) -
     times = [datetime.fromisoformat(e["at"]) for e in scheduled.values()] + [t for t in post_times if t <= now]
     if st.get("last_post"):
         times.append(datetime.fromisoformat(st["last_post"]))
+    # пост вне очереди, сделанный в окне слота, тоже закрывает этот слот (24.11: иначе в 22:00 вышло бы два)
+    own_last = st.pop("_own_last", None)
+    if own_last and own_last <= now:
+        times.append(own_last)
     last_bot = max(times, default=None)
     next_at = max([now] + ([last_bot + interval] if last_bot else []) + ([manual + gap] if manual and gap else []))
     window = parse_post_hours(getattr(args, "post_hours", None))
