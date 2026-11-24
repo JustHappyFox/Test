@@ -25,10 +25,10 @@ public static class T {
                     new string[] { "minus_on", "1" }, new string[] { "minus_x", "33333333" }, new string[] { "minus_y", "44444444" },
                     new string[] { "shema", shema }, new string[] { "nach_dolzh", Environment.GetEnvironmentVariable("T_DOLZH") ?? "Начальник ГРП" } };
                 foreach (string[] x in v) b.SetV(x[0], x[1]);
-                b.SetV("linii", "0,4|АВБбШв-5х16|0,05||");
+                b.SetV("linii", "0,4|АВБбШв 4х120|0,18||\n10|АПвБбШп 3х95|0,35||");
                 // как будто марку выбрали руками: r0 и Rл - сами
-                b.GetType().GetMethod("R0For", BF).Invoke(b, new object[] { 0 });
-                b.GetType().GetMethod("RFor", BF).Invoke(b, new object[] { 0 });
+                for (int i = 0; i < 2; i++) { b.GetType().GetMethod("R0For", BF).Invoke(b, new object[] { i }); b.GetType().GetMethod("RFor", BF).Invoke(b, new object[] { i }); }
+                b.GetType().GetMethod("KabelNote", BF).Invoke(b, new object[0]);
                 Console.WriteLine("адрес: " + b.V("adres"));
                 Console.WriteLine("коротко: " + b.V("adres_kr") + " | объект: " + b.V("obekt_full"));
                 Console.WriteLine("пломбы: " + b.V("plomby") + " | минус: " + b.V("minus") + " | линии: " + b.V("linii"));
@@ -36,7 +36,7 @@ public static class T {
             } else if (step == 3) {
                 Panel content = (Panel)F(b, "content");
                 System.Collections.IList cards = (System.Collections.IList)F(b, "cards");
-                Control p = (Control)F(cards[3], "Panel");
+                Control p = (Control)F(cards[7], "Panel");
                 content.AutoScrollPosition = new System.Drawing.Point(0, p.Top - content.AutoScrollPosition.Y - 4);
             } else if (step == 4) {
                 string dir = b.Save(false, false);

@@ -2298,6 +2298,7 @@ public class Lists {
         string t = System.IO.File.ReadAllText(File, Encoding.UTF8), was = t;
         if (t.Replace("\r\n", "").IndexOf('\n') >= 0) t = t.Replace("\r\n", "\n").Replace("\r", "\n").Replace("\n", "\r\n");
         t = DocxTemplate.Energo(t);
+        t = t.Replace("АВБбШв-4х95 = 0,32\r\n", "АВБбШв-4х95 = 0,326\r\n");     // 24.11: по ТКП, табл. Б.12 (алюминий 95 мм²)
         if (t != was) System.IO.File.WriteAllText(File, t, new UTF8Encoding(true));
     }
 
@@ -2685,7 +2686,7 @@ OformilMark + "\r\n" +
 "\r\n" +
 "[БС: кабель и r0]\r\n# марка, сечение = r0, Ом/км (потери: Rл = r0 · L); дописывайте свои\r\n" +
 "АВБбШв-5х16 = 1,98\r\n" +
-"АВБбШв-4х95 = 0,32\r\n" +
+"АВБбШв-4х95 = 0,326\r\n" +
 "\r\n" +
 "[БС: инженер]\r\n# Фамилия И.О. = Фамилия Имя Отчество (полностью - в акт приемки)\r\n" +
 "Черницкий Н.В. = Черницкий Николай Владимирович\r\n" +
@@ -27238,7 +27239,7 @@ public class BsForm : Form {
     readonly Dictionary<string, Control> inp = new Dictionary<string, Control>();
     readonly List<Card> cards = new List<Card>();
     readonly Panel content = new Panel();
-    readonly Label head = new Label(), headSub = new Label(), status = new Label(), shemaNote = new Label();
+    readonly Label head = new Label(), headSub = new Label(), status = new Label(), shemaNote = new Label(), kabelNote = new Label();
     readonly ToolTip tip = new ToolTip();
     public StartMenu Home;
     public Form Back;
@@ -27390,7 +27391,7 @@ public class BsForm : Form {
         v = v ?? "";
         if (key == "pu") { pu.Value = v; if (!loading) RefreshState(); return; }
         if (key == "moshn") { moshn.Value = v; if (!loading) RefreshState(); return; }
-        if (key == "linii") { linii.Value = v; if (!loading) RefreshState(); return; }
+        if (key == "linii") { linii.Value = v; KabelNote(); if (!loading) RefreshState(); return; }
         if (key == "plomba_drugoe") { seals.Value = v; return; }
         Control c;
         if (!inp.TryGetValue(key, out c)) return;
@@ -27481,16 +27482,19 @@ public class BsForm : Form {
         c.Grid.Row(F("Пункт 1 соглашения", C("punkt1", null), 0));
         c.Grid.Row(F("Тарифная группа", C("tarif", null), 0), F("ТРЭТ", T("tret", null), 8), F("Примечание", T("prim", null), 16));
 
-        c = new Card("Потери", "Приложение 8: линии 0,4 кВ (Rл = r0 · L считается само) и схема питания", 4);
+        c = new Card("Потери", "Приложение 8: линии - марка из списка (ТКП 460-2017, табл. Б.5-Б.13): r0, x0, q30 и Rл подставятся сами; схема питания", 4);
         cards.Add(c);
-        linii = new RowList(new string[] { "Uн, кВ", "Марка, сечение", "L, км", "r0, Ом/км", "Rл = r0·L, Ом" },
-            new int[] { 6, 0, 9, 9, 11 },
-            new bool[] { true, true, false, false, false },
-            new string[] { "0,4", null, null, null, null });
+        linii = new RowList(new string[] { "Uн, кВ", "Марка, сечение", "L, км", "r0, Ом/км", "Rл, Ом", "x0, Ом/км", "q30, квар/км" },
+            new int[] { 6, 0, 8, 8, 9, 8, 9 },
+            new bool[] { true, true, false, false, false, false, false },
+            new string[] { "0,4", null, null, null, null, null, null });
         linii.Name = "linii";
         Rows(linii);
-        linii.Edited += delegate(int row, int col) { if (col == 1) R0For(row); if (col == 1 || col == 2 || col == 3) RFor(row); };
+        linii.Edited += delegate(int row, int col) { if (col == 0 || col == 1) R0For(row); if (col <= 3) RFor(row); KabelNote(); };
         c.Grid.Row(F(null, linii, 0));
+        kabelNote.Font = St.Small;
+        kabelNote.ForeColor = St.Hint;
+        c.Grid.Row(F(null, kabelNote, 0));
         Button pick = Ui.Button("Выбрать схему…", false);
         pick.Name = "shemaPick";
         pick.Click += delegate { PickShema(); };
@@ -27562,7 +27566,7 @@ public class BsForm : Form {
             moshn.SetItems(2, new List<string>(new string[] { "-" }));
             moshn.SetItems(3, lists.Get("БС: время работы"));
             moshn.SetItems(4, lists.Get("БС: выходные"));
-            linii.SetItems(0, new List<string>(new string[] { "0,4", "10" }));
+            linii.SetItems(0, new List<string>(new string[] { "0,4", "0,22", "6", "10", "35", "110" }));
             linii.SetItems(1, Cables());
             seals.SetPlaces(lists.Get("Места пломб"));
         } finally { loading = was; }
@@ -27603,10 +27607,11 @@ public class BsForm : Form {
         return r;
     }
 
-    // кабели: «АВБбШв-5х16 = 1,98» (марка, сечение = r0, Ом/км)
+    // кабели: свои из справочника («АВБбШв-5х16 = 1,98»: марка, сечение = r0, Ом/км), потом - по таблицам ТКП (Kabel.Marks)
     List<string> Cables() {
         List<string> r = new List<string>();
         foreach (string s in lists.Get("БС: кабель и r0")) { int e = s.IndexOf('='); r.Add((e > 0 ? s.Substring(0, e) : s).Trim()); }
+        foreach (string s in Kabel.Marks()) if (!r.Contains(s)) r.Add(s);
         return r;
     }
 
@@ -27618,15 +27623,38 @@ public class BsForm : Form {
         return "";
     }
 
+    // марка выбрана: r0 - из своего справочника, иначе из таблиц ТКП (Б.5-Б.13); x0 и q30 - из таблиц (для 6-110 кВ)
     void R0For(int row) {
-        string r0 = R0Of(linii.Cell(row, 1));
+        string mark = linii.Cell(row, 1);
+        KabelInfo k = Kabel.Find(mark, linii.Cell(row, 0));
+        string r0 = R0Of(mark);
+        if (r0.Length == 0 && k != null) r0 = Kabel.Num(k.R0);
         if (r0.Length > 0) linii.SetCell(row, 3, r0);
+        if (k != null) { linii.SetCell(row, 5, Kabel.Num(k.X0)); linii.SetCell(row, 6, Kabel.Num(k.Q30)); }
+        else if (mark.Length > 0) { linii.SetCell(row, 5, ""); linii.SetCell(row, 6, ""); }
     }
 
+    // Rл = r0 · L; однофазная 0,22 кВ - фаза и ноль (Rф + R0 = 2·r0·L при одинаковом сечении, формула (13))
     void RFor(int row) {
         double r0, l;
-        if (Num(linii.Cell(row, 3), out r0) && Num(linii.Cell(row, 2), out l)) linii.SetCell(row, 4, Fmt(r0 * l));
+        bool one = Kabel.Volt(linii.Cell(row, 0)) < 0.3;
+        if (Num(linii.Cell(row, 3), out r0) && Num(linii.Cell(row, 2), out l)) linii.SetCell(row, 4, Fmt(r0 * l * (one ? 2 : 1)));
         else linii.SetCell(row, 4, "");
+    }
+
+    // под таблицей линий: откуда взяты величины и какой формулой считать
+    void KabelNote() {
+        List<string> lines = new List<string>();
+        for (int i = 0; i < linii.Count; i++) {
+            string mark = linii.Cell(i, 1);
+            if (mark.Length == 0) continue;
+            KabelInfo k = Kabel.Find(mark, linii.Cell(i, 0));
+            string own = R0Of(mark);
+            string from = own.Length > 0 ? "r0 - из справочника программы [БС: кабель и r0]" : k != null ? "ТКП табл. " + k.Table + " (" + k.What + ")" : "марки нет в таблицах ТКП - r0 впишите сами";
+            lines.Add("L" + (i + 1) + " " + mark + ": " + from + "; " + Kabel.Formula(k, linii.Cell(i, 0)));
+        }
+        kabelNote.Text = lines.Count == 0 ? "Марка - из списка или своя («АВБбШв 4х120», «СИП-2 3х70+1х54,6», «АС-50»): r0, x0, q30 подставятся по таблицам ТКП 460-2017" : string.Join("\n", lines.ToArray());
+        if (IsHandleCreated) LayoutCards();
     }
 
     static bool Num(string s, out double d) {
@@ -28111,6 +28139,11 @@ public class BsForm : Form {
             r["ЛДЛИНА"] = linii.Cell(i, 2);
             r["ЛR0"] = linii.Cell(i, 3);
             r["ЛR"] = linii.Cell(i, 4);
+            r["ЛX0"] = linii.Cell(i, 5);
+            r["ЛQ30"] = linii.Cell(i, 6);
+            KabelInfo kb = Kabel.Find(linii.Cell(i, 1), linii.Cell(i, 0));
+            r["ЛТАБЛ"] = kb != null ? "ТКП 460-2017, табл. " + kb.Table : "";
+            r["ЛФОРМУЛА"] = Kabel.Formula(kb, linii.Cell(i, 0));
             lRows.Add(r);
         }
         return v;
@@ -29601,6 +29634,168 @@ public class UdalenieForm : Form {
     public string StatusText { get { return status.Text; } }
 }
 // ==== КОНЕЦ БЛОКА СПРАВКИ НА УДАЛЕНИЕ ====
+
+// ==== БЛОК СПРАВОЧНИКА КАБЕЛЕЙ (исходник - razrabotka/src/kabel.cs; вставляется скриптом inject.py) ====
+// Провода и кабели по ТКП 460-2017, приложение Б (таблицы Б.5-Б.13): по марке и сечению («АВБбШв 4х120», «СИП-2 3х70+1х54,6»,
+// «АС-50», «АПвБбШп 3х95») и номинальному напряжению линии - r0, x0, q30, откуда взято и какой формулой считать потери.
+// Кабели: «Пв» в марке (АПвБбШп, АПвПу2г) - сшитый полиэтилен (Б.13), остальные (бумажная, ПВХ: ААБл, АВБбШв, АВВГ) - Б.12;
+// первая буква «А» - алюминиевые жилы. Шин в ТКП нет.
+public class KabelInfo {
+    public string Table = "", What = "", Kind = "";        // таблица Б.., описание, ВЛ / КЛ
+    public double R0 = -1, X0 = -1, Q30 = -1;              // -1 - нет в таблице
+    public int Section;
+}
+
+public static class Kabel {
+    static readonly System.Globalization.CultureInfo Inv = System.Globalization.CultureInfo.InvariantCulture;
+
+    // Б.5 - голые провода ВЛ (r0); Б.8 - ВЛ 6-10 кВ (r0 x0); Б.10 - ВЛ 35 кВ (r0 x0); Б.11 - ВЛ 110 кВ (r0 x0 q30)
+    static readonly string B5 = "А-10 2.8631;А-16 1.8007;А-25 1.1498;А-35 0.8347;А-50 0.5784;А-70 0.4131;А-95 0.3114;А-120 0.2549;" +
+        "АС-16 1.7817;АС-25 1.1521;АС-35 0.7774;АСИ-35 0.7774;АС-50 0.5951;АСИ-50 0.5951;АС-70 0.4218;АСИ-70 0.4218;АС-95 0.3007;АСИ-95 0.3007;" +
+        "АС-120 0.2459;АСИ-120 0.2459;М-4 4.6009;М-6 3.0701;М-10 1.8197;М-16 1.1573;М-25 0.74;М-35 0.54;М-50 0.39;М-70 0.28;М-95 0.1944;М-120 0.156;" +
+        "ПЗВ-35 0.79;ПЗВ-50 0.6;ПЗВ-70 0.43;ПЗВ-95 0.31;ПЗВ-120 0.25;ПЗВ-150 0.2;ПЗВ-185 0.16;ПЗВ-240 0.12;" +
+        "ПЗВГ-35 0.79;ПЗВГ-50 0.6;ПЗВГ-70 0.43;ПЗВГ-95 0.31;ПЗВГ-120 0.25;ПЗВГ-150 0.2;ПЗВГ-185 0.16;ПЗВГ-240 0.12;" +
+        "ПСТ-4 14;ПСТ-5 11;ПСС-4 12.7;ПСС-5 8.5;ПС-25 5.27;ПС-35 3.96;ПС-50 2.752;ПС-70 1.7;ПС-95 1.55;" +
+        "АН-16 1.9037;АН-25 1.29;АН-35 0.884;АН-50 0.614;АН-120 0.2609;АН-150 0.2059;АН-185 0.1669;" +
+        "АЖ-16 2.0623;АЖ-25 1.33;АЖ-35 0.96;АЖ-50 0.665;АЖ-120 0.2826;АЖ-150 0.2231;АЖ-185 0.1808";
+    static readonly string B8 = "А-16 1.772 0.39;А-25 1.14 0.38;А-35 0.918 0.37;А-50 0.63 0.36;А-70 0.45 0.35;А-95 0.33 0.34;А-120 0.27 0.34;" +
+        "АС-10 3.12 0.398;АС-16 1.772 0.39;АС-25 1.14 0.38;АС-35 0.812 0.37;АС-50 0.63 0.36;АС-70 0.45 0.35;АС-95 0.33 0.34;АС-120 0.27 0.34;" +
+        "ПСТ-4 14 5.6;ПСТ-5 11 5.6;ПСС-4 12.7 3.8;ПСС-5 8.5 3.5;ПС-25 5.27 0.55;ПС-35 3.96 0.38;ПС-50 2.752 0.24;ПС-70 1.7 0.17;ПС-95 1.55 0.08;" +
+        "АН-25 1.29 0.376;АН-35 0.884 0.362;АН-50 0.614 0.353;АЖ-25 1.33 0.376;АЖ-35 0.96 0.362;АЖ-50 0.665 0.353";
+    static readonly string B10 = "А-35 0.918 0.438;А-50 0.63 0.427;А-70 0.45 0.417;А-95 0.33 0.406;А-120 0.27 0.4;А-150 0.21 0.398;А-185 0.17 0.386;" +
+        "АС-35 0.912 0.438;АС-50 0.63 0.427;АС-70 0.45 0.417;АС-95 0.33 0.436;АС-120 0.27 0.4;АС-150 0.21 0.398;АС-185 0.17 0.386;" +
+        "АСО-150 0.21 0.398;АСО-185 0.17 0.386;АСО-240 0.13 0.2";
+    static readonly string B11 = "А-70 0.45 0.44 34;А-95 0.33 0.429 35;А-120 0.27 0.423 36;А-150 0.21 0.416 36.4;А-185 0.17 0.409 37;А-240 0.13 0.401 38;" +
+        "А-300 0.107 0.392 38.4;А-400 0.08 0.382 38.6;АС-70 0.45 0.44 34;АС-95 0.33 0.429 35;АС-120 0.27 0.423 36;АС-150 0.21 0.416 36.5;" +
+        "АС-185 0.17 0.386 37;АС-240 0.13 0.401 38;АС-300 0.107 0.392 38.5;АС-400 0.09 0.382 38.6;АСО-150 0.21 0.416 36.5;АСО-185 0.17 0.409 37;" +
+        "АСО-240 0.13 0.401 38;АСО-300 0.107 0.392 38.5;АСО-400 0.08 0.382 38.6";
+    // Б.6 СИП-1, СИП-2 (0,38 кВ); Б.7 СИП-4 (0,38 кВ): сечение r0. Б.9 СИП-3 (6-10 кВ): сечение r0 x0
+    static readonly string B6 = "16 1.91;25 1.20;35 0.87;50 0.64;70 0.44;95 0.32;120 0.25";
+    static readonly string B7 = "25 1.2;35 0.89;50 0.64;70 0.44;95 0.32;120 0.25";
+    static readonly string B9 = "35 0.99 0.099;50 0.72 0.091;70 0.49 0.091;95 0.36 0.092;120 0.29 0.088;150 0.26 0.086";
+    // Б.12 кабели с бумажной изоляцией: сечение, r0 медь, r0 алюминий, x0 6 кВ, q30 6 кВ, x0 10 кВ, q30 10 кВ, x0 35 кВ, q30 35 кВ (- нет)
+    static readonly string B12 = "10 1.84 3.1 0.110 2.3 - - - -;16 1.15 1.94 0.102 2.6 0.113 5.9 - -;25 0.74 1.24 0.091 4.1 0.099 8.6 - -;" +
+        "35 0.52 0.89 0.067 4.6 0.095 10.7 - -;50 0.37 0.62 0.083 5.2 0.090 11.7 - -;70 0.26 0.443 0.080 5.6 0.086 13.5 - -;" +
+        "95 0.194 0.326 0.078 8.7 0.083 15.6 - -;120 0.153 0.258 0.076 9.5 0.081 16.9 0.120 99;150 0.122 0.206 0.074 10.4 0.079 18.3 0.116 112;" +
+        "185 0.099 0.167 0.073 11.7 0.077 20.0 0.113 115;240 0.077 0.129 0.071 13.0 0.075 21.5 0.110 119;300 0.061 0.103 - - - - 0.097 127;" +
+        "400 0.046 0.077 - - - - - -";
+    // Б.13 сшитый полиэтилен (одножильные): сечение, r0 медь, r0 алюм., x0 6 кВ (треугольником), q30 6 кВ, x0 10 кВ, q30 10 кВ, x0 35 кВ, q30 35 кВ
+    static readonly string B13 = "35 0.668 1.113 0.127 7 0.133 7 - -;50 0.494 0.882 0.121 8 0.126 8 0.144 26;70 0.342 0.568 0.114 9 0.118 9 0.136 27;" +
+        "95 0.247 0.411 0.106 10 0.111 10 0.128 30;120 0.196 0.325 0.102 11 0.106 11 0.122 32;150 0.159 0.265 0.098 12 0.101 12 0.117 35;" +
+        "185 0.128 0.211 0.094 13 0.098 13 0.113 37;240 0.098 0.161 0.091 15 0.094 15 0.109 44;300 0.079 0.130 0.087 16 0.089 16 0.103 47;" +
+        "400 0.063 0.102 0.085 18 0.086 18 0.099 51;500 0.051 0.0804 0.083 20 0.084 20 0.096 56;630 0.041 0.0639 0.081 21 0.082 21 0.093 59;" +
+        "800 0.032 0.0505 0.079 23 0.079 23 0.088 65";
+
+    static double D(string s) { return s == "-" ? -1 : double.Parse(s, Inv); }
+
+    static string[] Row(string table, string key) {
+        foreach (string r in table.Split(';')) {
+            string[] p = r.Trim().Split(' ');
+            if (p[0] == key) return p;
+        }
+        return null;
+    }
+
+    // «4х120», «3x95+1x50», «3*70» -> 120 / 95 / 70 (сечение фазной жилы); «А-50», «АС-70/11» -> 50 / 70
+    static int SectionOf(string mark) {
+        string m = mark.Replace('x', 'х').Replace('X', 'х').Replace('Х', 'х').Replace('*', 'х').Replace('×', 'х');
+        int i = m.IndexOf('х');
+        string digits = "";
+        if (i >= 0) { for (int k = i + 1; k < m.Length && char.IsDigit(m[k]); k++) digits += m[k]; }
+        else {
+            int d = m.IndexOf('-');
+            for (int k = d + 1; d >= 0 && k < m.Length && char.IsDigit(m[k]); k++) digits += m[k];
+        }
+        int s;
+        return int.TryParse(digits, out s) ? s : 0;
+    }
+
+    // номинальное напряжение линии, кВ: «0,4» -> 0.38; «0,22» -> 0.22; «10» -> 10
+    public static double Volt(string u) {
+        double v;
+        if (!double.TryParse((u ?? "").Trim().Replace(',', '.'), System.Globalization.NumberStyles.Float, Inv, out v)) return 0.38;
+        return v;
+    }
+
+    public static KabelInfo Find(string mark, string u) {
+        KabelInfo k = new KabelInfo();
+        string m = (mark ?? "").Trim();
+        if (m.Length == 0) return null;
+        string up = m.ToUpperInvariant().Replace(" ", "");
+        double v = Volt(u);
+        int s = SectionOf(m);
+        k.Section = s;
+        if (up.StartsWith("СИП")) {
+            k.Kind = "ВЛ";
+            int p0 = 3;
+            if (p0 < up.Length && up[p0] == '-') p0++;
+            char n = p0 < up.Length ? up[p0] : ' ';
+            string[] p;
+            if (n == '3') { p = Row(B9, s.ToString()); k.Table = "Б.9"; k.What = "СИП-3 (6-10 кВ), " + s + " мм²"; if (p != null) { k.R0 = D(p[1]); k.X0 = D(p[2]); } }
+            else if (n == '4') { p = Row(B7, s.ToString()); k.Table = "Б.7"; k.What = "СИП-4 (0,38 кВ), " + s + " мм²"; if (p != null) k.R0 = D(p[1]); }
+            else { p = Row(B6, s.ToString()); k.Table = "Б.6"; k.What = "СИП-1, СИП-2 (0,38 кВ), " + s + " мм²"; if (p != null) k.R0 = D(p[1]); }
+            return k.R0 < 0 ? null : k;
+        }
+        if (m.IndexOfAny(new char[] { 'х', 'x', 'Х', 'X', '*', '×' }) < 0) {
+            // голый провод ВЛ: «А-50», «АС-70/11»
+            k.Kind = "ВЛ";
+            string key = up;
+            int slash = key.IndexOf('/');
+            if (slash > 0) key = key.Substring(0, slash);
+            string[] p = null;
+            if (v >= 100) { p = Row(B11, key); k.Table = "Б.11"; if (p != null) { k.R0 = D(p[1]); k.X0 = D(p[2]); k.Q30 = D(p[3]); } }
+            else if (v >= 20) { p = Row(B10, key); k.Table = "Б.10"; if (p != null) { k.R0 = D(p[1]); k.X0 = D(p[2]); } }
+            else if (v >= 3) { p = Row(B8, key); k.Table = "Б.8"; if (p != null) { k.R0 = D(p[1]); k.X0 = D(p[2]); } }
+            if (p == null) { p = Row(B5, key); k.Table = "Б.5"; if (p != null) k.R0 = D(p[1]); }
+            k.What = "провод " + key;
+            return k.R0 < 0 ? null : k;
+        }
+        // кабель
+        k.Kind = "КЛ";
+        bool al = up.StartsWith("А");
+        bool xlpe = m.Contains("Пв") || m.Contains("пв") || up.StartsWith("АПВП") || up.StartsWith("ПВП");
+        string[] c = Row(xlpe ? B13 : B12, s.ToString());
+        if (c == null) return null;
+        k.Table = xlpe ? "Б.13" : "Б.12";
+        k.What = "кабель, " + (al ? "алюминий" : "медь") + " " + s + " мм², " + (xlpe ? "сшитый полиэтилен" : "бумажная / ПВХ изоляция");
+        k.R0 = D(c[al ? 2 : 1]);
+        int col = v >= 20 ? 7 : v >= 8 ? 5 : v >= 3 ? 3 : -1;
+        if (col > 0) { k.X0 = D(c[col]); k.Q30 = D(c[col + 1]); }
+        return k;
+    }
+
+    // какой формулой считать потери в линии (номера формул ТКП 460-2017)
+    public static string Formula(KabelInfo k, string u) {
+        double v = Volt(u);
+        if (v < 0.3) return "однофазная 0,22 кВ: формула (12), Rл = Rфазы + Rнуля (13), реактивные потери 0";
+        if (v < 1) return "до 1 кВ: формула (10), реактивные потери и постоянные потери в линии 0";
+        string s = "формулы (10), (11) с Xл = x0·L";
+        if (k != null && k.Kind == "КЛ")
+            s += "; постоянные (3): Qз·tgδ·T, Qз = q30·L, tgδ = " + (k.Section <= 95 ? "0,03" : "0,025") + "; реактивные (4): −Qз·T";
+        else if (v >= 100) s += "; корона (3) - для 110 кВ можно не учитывать; реактивные (4): −Qз·T, Qз = q30·L";
+        else s += "; постоянные потери ВЛ ниже 110 кВ - 0";
+        return s;
+    }
+
+    public static string Num(double d) { return d < 0 ? "-" : Math.Round(d, 5).ToString("0.#####", Inv).Replace('.', ','); }
+
+    // варианты для списка марок: распространённые кабели и провода
+    public static List<string> Marks() {
+        List<string> r = new List<string>();
+        int[] cab = { 16, 25, 35, 50, 70, 95, 120, 150, 185, 240 };
+        foreach (string mk in new string[] { "АВБбШв 4х", "АВВГ 4х", "ААБл 3х", "ААШв 3х", "ВВГ 4х", "ВБбШв 4х" })
+            foreach (int s in cab) r.Add(mk + s);
+        foreach (string mk in new string[] { "АПвБбШп 3х", "АПвПу2г 1х" })
+            foreach (int s in new int[] { 35, 50, 70, 95, 120, 150, 185, 240 }) r.Add(mk + s);
+        foreach (int s in new int[] { 16, 25, 35, 50, 70, 95, 120 }) r.Add("СИП-2 3х" + s + "+1х54,6");
+        foreach (int s in new int[] { 25, 35, 50, 70, 95, 120 }) r.Add("СИП-4 4х" + s);
+        foreach (int s in new int[] { 35, 50, 70, 95, 120, 150 }) r.Add("СИП-3 1х" + s);
+        foreach (string mk in new string[] { "А-", "АС-" })
+            foreach (int s in new int[] { 16, 25, 35, 50, 70, 95, 120 }) r.Add(mk + s);
+        return r;
+    }
+}
+// ==== КОНЕЦ БЛОКА СПРАВОЧНИКА КАБЕЛЕЙ ====
 
 public class SealRow {
     // дата, адрес, № договора / лицевой, № учёта, причина, снятая пломба, примечание (до 09.11 вместо адреса был «№ задания»:

@@ -75,3 +75,16 @@ block('nar_excel.cs', '// ==== БЛОК НАРЯДОВ ИЗ ВЫГРУЗКИ', '
 block('nar_excel_form.cs', '// ==== БЛОК ОКНА НАРЯДОВ ИЗ ВЫГРУЗКИ', '// ==== КОНЕЦ БЛОКА ОКНА НАРЯДОВ ИЗ ВЫГРУЗКИ ====', 'prosmotr-bazy/prosmotr.ps1', 'public static class CopyText {')
 block('nar_excel.cs', '// ==== БЛОК НАРЯДОВ ИЗ ВЫГРУЗКИ', '// ==== КОНЕЦ БЛОКА НАРЯДОВ ИЗ ВЫГРУЗКИ ====', 'dogovor/dogovor.ps1', 'public class SealRow {')
 block('udalenie.cs', '// ==== БЛОК СПРАВКИ НА УДАЛЕНИЕ', '// ==== КОНЕЦ БЛОКА СПРАВКИ НА УДАЛЕНИЕ ====', 'dogovor/dogovor.ps1', 'public class SealRow {')
+
+# справочник кабелей по ТКП 460-2017 (только «Договор»): razrabotka/src/kabel.cs, перед классом SealRow
+B9, E9 = '// ==== БЛОК СПРАВОЧНИКА КАБЕЛЕЙ', '// ==== КОНЕЦ БЛОКА СПРАВОЧНИКА КАБЕЛЕЙ ===='
+kb = open(os.path.join(ROOT, 'razrabotka', 'src', 'kabel.cs'), encoding='utf-8-sig').read().replace('\r\n', '\n').strip('\n')
+assert "\n'@" not in kb
+d = Doc(os.path.join(ROOT, 'dogovor/dogovor.ps1'))
+if B9 in d.t:
+    a = d.t.index(B9); b = d.t.index(E9) + len(E9)
+    d.t = d.t[:a] + kb + d.t[b:]
+else:
+    d.rep('public class SealRow {', kb + '\n\npublic class SealRow {')
+d.save()
+print('dogovor/dogovor.ps1 кабели ок')

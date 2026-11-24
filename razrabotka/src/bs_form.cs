@@ -221,7 +221,7 @@ public class BsForm : Form {
     readonly Dictionary<string, Control> inp = new Dictionary<string, Control>();
     readonly List<Card> cards = new List<Card>();
     readonly Panel content = new Panel();
-    readonly Label head = new Label(), headSub = new Label(), status = new Label(), shemaNote = new Label();
+    readonly Label head = new Label(), headSub = new Label(), status = new Label(), shemaNote = new Label(), kabelNote = new Label();
     readonly ToolTip tip = new ToolTip();
     public StartMenu Home;
     public Form Back;
@@ -373,7 +373,7 @@ public class BsForm : Form {
         v = v ?? "";
         if (key == "pu") { pu.Value = v; if (!loading) RefreshState(); return; }
         if (key == "moshn") { moshn.Value = v; if (!loading) RefreshState(); return; }
-        if (key == "linii") { linii.Value = v; if (!loading) RefreshState(); return; }
+        if (key == "linii") { linii.Value = v; KabelNote(); if (!loading) RefreshState(); return; }
         if (key == "plomba_drugoe") { seals.Value = v; return; }
         Control c;
         if (!inp.TryGetValue(key, out c)) return;
@@ -464,16 +464,19 @@ public class BsForm : Form {
         c.Grid.Row(F("Пункт 1 соглашения", C("punkt1", null), 0));
         c.Grid.Row(F("Тарифная группа", C("tarif", null), 0), F("ТРЭТ", T("tret", null), 8), F("Примечание", T("prim", null), 16));
 
-        c = new Card("Потери", "Приложение 8: линии 0,4 кВ (Rл = r0 · L считается само) и схема питания", 4);
+        c = new Card("Потери", "Приложение 8: линии - марка из списка (ТКП 460-2017, табл. Б.5-Б.13): r0, x0, q30 и Rл подставятся сами; схема питания", 4);
         cards.Add(c);
-        linii = new RowList(new string[] { "Uн, кВ", "Марка, сечение", "L, км", "r0, Ом/км", "Rл = r0·L, Ом" },
-            new int[] { 6, 0, 9, 9, 11 },
-            new bool[] { true, true, false, false, false },
-            new string[] { "0,4", null, null, null, null });
+        linii = new RowList(new string[] { "Uн, кВ", "Марка, сечение", "L, км", "r0, Ом/км", "Rл, Ом", "x0, Ом/км", "q30, квар/км" },
+            new int[] { 6, 0, 8, 8, 9, 8, 9 },
+            new bool[] { true, true, false, false, false, false, false },
+            new string[] { "0,4", null, null, null, null, null, null });
         linii.Name = "linii";
         Rows(linii);
-        linii.Edited += delegate(int row, int col) { if (col == 1) R0For(row); if (col == 1 || col == 2 || col == 3) RFor(row); };
+        linii.Edited += delegate(int row, int col) { if (col == 0 || col == 1) R0For(row); if (col <= 3) RFor(row); KabelNote(); };
         c.Grid.Row(F(null, linii, 0));
+        kabelNote.Font = St.Small;
+        kabelNote.ForeColor = St.Hint;
+        c.Grid.Row(F(null, kabelNote, 0));
         Button pick = Ui.Button("Выбрать схему…", false);
         pick.Name = "shemaPick";
         pick.Click += delegate { PickShema(); };
@@ -545,7 +548,7 @@ public class BsForm : Form {
             moshn.SetItems(2, new List<string>(new string[] { "-" }));
             moshn.SetItems(3, lists.Get("БС: время работы"));
             moshn.SetItems(4, lists.Get("БС: выходные"));
-            linii.SetItems(0, new List<string>(new string[] { "0,4", "10" }));
+            linii.SetItems(0, new List<string>(new string[] { "0,4", "0,22", "6", "10", "35", "110" }));
             linii.SetItems(1, Cables());
             seals.SetPlaces(lists.Get("Места пломб"));
         } finally { loading = was; }
@@ -586,10 +589,11 @@ public class BsForm : Form {
         return r;
     }
 
-    // кабели: «АВБбШв-5х16 = 1,98» (марка, сечение = r0, Ом/км)
+    // кабели: свои из справочника («АВБбШв-5х16 = 1,98»: марка, сечение = r0, Ом/км), потом - по таблицам ТКП (Kabel.Marks)
     List<string> Cables() {
         List<string> r = new List<string>();
         foreach (string s in lists.Get("БС: кабель и r0")) { int e = s.IndexOf('='); r.Add((e > 0 ? s.Substring(0, e) : s).Trim()); }
+        foreach (string s in Kabel.Marks()) if (!r.Contains(s)) r.Add(s);
         return r;
     }
 
@@ -601,15 +605,38 @@ public class BsForm : Form {
         return "";
     }
 
+    // марка выбрана: r0 - из своего справочника, иначе из таблиц ТКП (Б.5-Б.13); x0 и q30 - из таблиц (для 6-110 кВ)
     void R0For(int row) {
-        string r0 = R0Of(linii.Cell(row, 1));
+        string mark = linii.Cell(row, 1);
+        KabelInfo k = Kabel.Find(mark, linii.Cell(row, 0));
+        string r0 = R0Of(mark);
+        if (r0.Length == 0 && k != null) r0 = Kabel.Num(k.R0);
         if (r0.Length > 0) linii.SetCell(row, 3, r0);
+        if (k != null) { linii.SetCell(row, 5, Kabel.Num(k.X0)); linii.SetCell(row, 6, Kabel.Num(k.Q30)); }
+        else if (mark.Length > 0) { linii.SetCell(row, 5, ""); linii.SetCell(row, 6, ""); }
     }
 
+    // Rл = r0 · L; однофазная 0,22 кВ - фаза и ноль (Rф + R0 = 2·r0·L при одинаковом сечении, формула (13))
     void RFor(int row) {
         double r0, l;
-        if (Num(linii.Cell(row, 3), out r0) && Num(linii.Cell(row, 2), out l)) linii.SetCell(row, 4, Fmt(r0 * l));
+        bool one = Kabel.Volt(linii.Cell(row, 0)) < 0.3;
+        if (Num(linii.Cell(row, 3), out r0) && Num(linii.Cell(row, 2), out l)) linii.SetCell(row, 4, Fmt(r0 * l * (one ? 2 : 1)));
         else linii.SetCell(row, 4, "");
+    }
+
+    // под таблицей линий: откуда взяты величины и какой формулой считать
+    void KabelNote() {
+        List<string> lines = new List<string>();
+        for (int i = 0; i < linii.Count; i++) {
+            string mark = linii.Cell(i, 1);
+            if (mark.Length == 0) continue;
+            KabelInfo k = Kabel.Find(mark, linii.Cell(i, 0));
+            string own = R0Of(mark);
+            string from = own.Length > 0 ? "r0 - из справочника программы [БС: кабель и r0]" : k != null ? "ТКП табл. " + k.Table + " (" + k.What + ")" : "марки нет в таблицах ТКП - r0 впишите сами";
+            lines.Add("L" + (i + 1) + " " + mark + ": " + from + "; " + Kabel.Formula(k, linii.Cell(i, 0)));
+        }
+        kabelNote.Text = lines.Count == 0 ? "Марка - из списка или своя («АВБбШв 4х120», «СИП-2 3х70+1х54,6», «АС-50»): r0, x0, q30 подставятся по таблицам ТКП 460-2017" : string.Join("\n", lines.ToArray());
+        if (IsHandleCreated) LayoutCards();
     }
 
     static bool Num(string s, out double d) {
@@ -1094,6 +1121,11 @@ public class BsForm : Form {
             r["ЛДЛИНА"] = linii.Cell(i, 2);
             r["ЛR0"] = linii.Cell(i, 3);
             r["ЛR"] = linii.Cell(i, 4);
+            r["ЛX0"] = linii.Cell(i, 5);
+            r["ЛQ30"] = linii.Cell(i, 6);
+            KabelInfo kb = Kabel.Find(linii.Cell(i, 1), linii.Cell(i, 0));
+            r["ЛТАБЛ"] = kb != null ? "ТКП 460-2017, табл. " + kb.Table : "";
+            r["ЛФОРМУЛА"] = Kabel.Formula(kb, linii.Cell(i, 0));
             lRows.Add(r);
         }
         return v;
