@@ -108,6 +108,70 @@ public static class Istochnik {
     }
 }
 
+// Вид выгрузки: имя (для надписей), ключевой столбец (строки без него пропускаются), файлы своей копии
+public class VygKind {
+    public string Code, Name;
+    public string[] Keys;
+    public string Table, Info, Streets;
+
+    public static VygKind Byt { get { return Make("byt", "быта", new string[] { "НОМЕР" }, true); } }
+    public static VygKind Nar { get { return Make("nar", "нарядов", new string[] { "Н_З", "НОМЕР_НЗ", "N_NAR" }, false); } }
+    public static VygKind Jur { get { return Make("jur", "юр лиц", new string[] { "KP" }, false); } }
+
+    static VygKind Make(string code, string name, string[] keys, bool streets) {
+        VygKind k = new VygKind();
+        k.Code = code;
+        k.Name = name;
+        k.Keys = keys;
+        k.Table = Path.Combine(Istochnik.CacheFolder, code + ".dbf");
+        k.Info = Path.Combine(Istochnik.CacheFolder, code + "_info.txt");
+        k.Streets = streets ? Path.Combine(Istochnik.CacheFolder, code + "_ulicy.txt") : null;
+        return k;
+    }
+
+    public string Path0 { get { return Code == "byt" ? Istochnik.BytPath : Code == "nar" ? Istochnik.NaryadyPath : Istochnik.JurPath; } }
+
+    // своя копия выгрузки по файлу path: null - готова и свежая; иначе - что не так (юр база в .dbf копии не требует)
+    public string Problem(string path) {
+        string miss = Istochnik.Missing(Name, path);
+        if (miss != null) return miss;
+        path = path.Trim();
+        if (Code == "jur" && path.EndsWith(".dbf", StringComparison.OrdinalIgnoreCase)) return null;
+        if (!File.Exists(Table) || !File.Exists(Info) || (Streets != null && !File.Exists(Streets)))
+            return "Индексы выгрузки " + Name + " ещё не созданы. Меню программ: «Настройки…» -> «Обновить индексы».";
+        Dictionary<string, string> info = Istochnik.ReadInfo(Info);
+        string v;
+        if (string.Compare(info.TryGetValue("Файл", out v) ? v : "", Path.GetFullPath(path), StringComparison.OrdinalIgnoreCase) != 0)
+            return "Индексы созданы по другому файлу выгрузки " + Name + ". Меню программ: «Настройки…» -> «Обновить индексы».";
+        if ((info.TryGetValue("Версия", out v) ? v : "") != VygruzkaByt.Version)
+            return "Индексы выгрузки " + Name + " созданы прежней версией программы. Меню программ: «Настройки…» -> «Обновить индексы».";
+        try {
+            FileInfo fi = new FileInfo(path);
+            if ((info.TryGetValue("Размер", out v) ? v : "") != fi.Length.ToString() || (info.TryGetValue("Изменён", out v) ? v : "") != fi.LastWriteTimeUtc.Ticks.ToString())
+                return "Файл выгрузки " + Name + " заменён после создания индексов. Меню программ: «Настройки…» -> «Обновить индексы».";
+        } catch (Exception ex) { return "Выгрузка " + Name + " недоступна: " + ex.Message; }
+        return null;
+    }
+
+    public string Problem() { return Problem(Path0); }
+
+    // нужна ли своя копия (юр база в .dbf - читается как есть)
+    public bool NeedsCopy(string path) { return !(Code == "jur" && (path ?? "").Trim().EndsWith(".dbf", StringComparison.OrdinalIgnoreCase)); }
+
+    // таблица для чтения: своя копия или сам .dbf юр базы
+    public string TableFor(string path) { return NeedsCopy(path) ? Table : path.Trim(); }
+
+    // «выгрузка нарядов от 14.01.2026 10:02 (152 340 записей)»
+    public string About() {
+        Dictionary<string, string> info = Istochnik.ReadInfo(Info);
+        string when, rows;
+        info.TryGetValue("ФайлДата", out when);
+        info.TryGetValue("Строк", out rows);
+        if (!NeedsCopy(Path0)) { try { when = File.GetLastWriteTime(Path0.Trim()).ToString("dd.MM.yyyy HH:mm"); rows = null; } catch { } }
+        return "выгрузка " + Name + (when != null && when.Length > 0 ? " от " + when : "") + (rows != null && rows.Length > 0 ? " (" + rows + " записей)" : "");
+    }
+}
+
 // Чтение .xlsx без Excel и сторонних программ: zip (свой разбор + DeflateStream из .NET 2.0) и XML листа потоком
 public class XlsxBook : IDisposable {
     class Entry { public string Name; public int Method; public long Offset, Packed, Size; }
@@ -349,13 +413,17 @@ public static class VygruzkaByt {
         "АСКУЭ", "ASKUE", "МЕСТО_ПУ", "MESTO_PU", "ГОД_ЗАМ_ПУ", "GOD_ZPU", "КВАР_ЗАМ_П", "KV_ZPU", "М_ТЕЛ", "M_TEL",
         "СОГЛ_СМС", "SOGL_SMS", "СЕЛЬСОВЕТ", "SELSOVET", "U", "U", "ЭЛ_ПУ", "EL_PU", "МП_ИНТ", "MP_INT", "ДАТА_НЗ", "DATA_NZ:D",
         "РАБОТА", "RABOTA", "ДАТА_ИЗВ", "DATA_IZV:D", "ВИД_ИЗВ", "VID_IZV", "ДАТА_ДОГ", "DATA_DOG:D", "Д_ПЕРЕОФ", "D_PEREOF:D",
-        "КАТ_ГР", "KAT_GR", "ПР_ПЛ", "PR_PL" };
+        "КАТ_ГР", "KAT_GR", "ПР_ПЛ", "PR_PL",
+        // наряды
+        "NAB", "NAB", "Н_З", "NZ", "ДАТА_ОФ", "DOF:D", "ФИО_ПР", "FIO_PR", "НОМЕР_СЧ", "NCH", "РАЗ", "RAS", "ГОД_П", "GODPR", "ПОК_ПР", "POK_PR",
+        "ВИД_АСКУЭ", "VID_ASKUE", "ДАТА_ВЫП", "DVIP:D", "ФИО_ВЫП", "FIO_VIP", "ПРИМЕЧАНИЕ", "PRIM" };
 
     public class Column {
         public int Source;           // номер столбца в выгрузке
         public string Header;        // как подписан в выгрузке
         public string Field;         // поле копии
         public bool Date;
+        public bool Pad = true;      // NAB - лицевой: дополнить нулями до 9 (у юр базы NAB - код абонента в договоре, не трогать)
         public int Length = 1;
     }
 
@@ -429,7 +497,7 @@ public static class VygruzkaByt {
         if (v == null) return "";
         if (c.Date) return Date(v, numeric);
         if (numeric) v = Number(v);
-        if (c.Field == "NAB") {
+        if (c.Field == "NAB" && c.Pad) {
             string digits = "";
             foreach (char ch in v) if (ch >= '0' && ch <= '9') digits += ch;
             if (digits.Length > 0 && digits.Length < 9) return digits.PadLeft(9, '0');
@@ -442,9 +510,11 @@ public static class VygruzkaByt {
         return (ss + "|" + np + "|" + ul).ToLowerInvariant().Replace('ё', 'е');
     }
 
-    // Пересоздать копию выгрузки быта. Пишется во временные файлы, готовое заменяет старое (прервалось - старое цело).
-    // Возвращает итог для окна.
-    public static string Build(string xlsx, VygProgress progress) {
+    public static string Build(string xlsx, VygProgress progress) { return Build(VygKind.Byt, xlsx, progress); }
+
+    // Пересоздать копию выгрузки (быт, наряды, юр лица). Пишется во временные файлы, готовое заменяет старое (прервалось - старое
+    // цело). Строки без ключевого столбца (у быта - НОМЕР, у нарядов - Н_З, у юр - KP) пропускаются. Возвращает итог для окна.
+    public static string Build(VygKind kind, string xlsx, VygProgress progress) {
         DateTime t0 = DateTime.Now;
         string folder = Istochnik.CacheFolder;
         Directory.CreateDirectory(folder);
@@ -456,20 +526,22 @@ public static class VygruzkaByt {
         Dictionary<string, int> streetCodes = new Dictionary<string, int>();
         List<string[]> streets = new List<string[]>();
         using (XlsxBook book = new XlsxBook(xlsx)) {
-            if (progress != null) progress("Читаю выгрузку быта: тексты...");
+            if (progress != null) progress("Читаю выгрузку " + kind.Name + ": тексты...");
             book.LoadShared();
             string sheet = book.FirstSheet();
             string[] header = book.Header(sheet, out headerRow);
             cols = MapColumns(header);
+            if (kind.Code == "jur") foreach (Column c in cols) c.Pad = false;
             Column nab = null;
             foreach (Column c in cols) {
-                if (c.Field == "NAB") nab = c;
+                if (nab == null && Array.IndexOf(kind.Keys, Norm(c.Header)) >= 0) nab = c;
                 if (c.Field == "SELSOVET") ss = c.Source;
                 if (c.Field == "NP") np = c.Source;
                 if (c.Field == "ULICA") ul = c.Source;
             }
             if (nab == null)
-                throw new InvalidDataException("В первой строке выгрузки нет столбца «НОМЕР» (лицевой). Заголовки: " + string.Join(", ", header));
+                throw new InvalidDataException("В первой строке выгрузки " + kind.Name + " нет столбца «" + kind.Keys[0] + "». Заголовки: " + string.Join(", ", header));
+            if (kind.Streets == null) { ss = np = ul = -1; }
             int width = header.Length;
             // проход 1: длины полей, коды улиц
             int seen = 0;
@@ -486,11 +558,11 @@ public static class VygruzkaByt {
                     streetCodes[k] = streets.Count + 1;
                     streets.Add(new string[] { (streets.Count + 1).ToString(), np >= 0 ? cells[np] ?? "" : "", ul >= 0 ? cells[ul] ?? "" : "", ss >= 0 ? cells[ss] ?? "" : "" });
                 }
-                if (++seen % 20000 == 0 && progress != null) progress("Читаю выгрузку быта: " + seen.ToString("#,0") + " записей...");
+                if (++seen % 20000 == 0 && progress != null) progress("Читаю выгрузку " + kind.Name + ": " + seen.ToString("#,0") + " записей...");
             });
             foreach (Column c in cols) if (c.Date) c.Length = 8;
             // проход 2: запись копии
-            string tmpTable = Istochnik.BytTable + ".tmp";
+            string tmpTable = kind.Table + ".tmp";
             int ulLen = Math.Max(1, streets.Count.ToString().Length);
             using (FileStream fs = new FileStream(tmpTable, FileMode.Create, FileAccess.Write, FileShare.None, 1 << 16)) {
                 List<string> names = new List<string>();
@@ -517,19 +589,21 @@ public static class VygruzkaByt {
                     }
                     fs.Write(rec, 0, rec.Length);
                     written++;
-                    if (written % 20000 == 0 && progress != null) progress("Создаю индексы выгрузки быта: " + written.ToString("#,0") + " из " + seen.ToString("#,0") + "...");
+                    if (written % 20000 == 0 && progress != null) progress("Создаю индексы выгрузки " + kind.Name + ": " + written.ToString("#,0") + " из " + seen.ToString("#,0") + "...");
                 });
                 fs.WriteByte(0x1A);
                 rows = written;
                 fs.Seek(0, SeekOrigin.Begin);
                 WriteHeader(fs, names, types, lens, rows, recLen);
             }
-            // справочник улиц
-            string tmpStreets = Istochnik.BytStreets + ".tmp";
-            StringBuilder sb = new StringBuilder();
-            sb.AppendLine("# код\tнаселённый пункт\tулица\tсельсовет");
-            foreach (string[] s in streets) sb.AppendLine(string.Join("\t", s));
-            File.WriteAllText(tmpStreets, sb.ToString(), new UTF8Encoding(true));
+            // справочник улиц (у быта)
+            string tmpStreets = kind.Streets == null ? null : kind.Streets + ".tmp";
+            if (tmpStreets != null) {
+                StringBuilder sb = new StringBuilder();
+                sb.AppendLine("# код\tнаселённый пункт\tулица\tсельсовет");
+                foreach (string[] s in streets) sb.AppendLine(string.Join("\t", s));
+                File.WriteAllText(tmpStreets, sb.ToString(), new UTF8Encoding(true));
+            }
             // сведения о копии (без данных абонентов)
             StringBuilder info = new StringBuilder();
             info.AppendLine("Версия=" + Version);
@@ -543,14 +617,14 @@ public static class VygruzkaByt {
             List<string> map = new List<string>();
             foreach (Column c in cols) map.Add(c.Field + ":" + c.Header);
             info.AppendLine("Столбцы=" + string.Join(";", map.ToArray()));
-            string tmpInfo = Istochnik.BytInfo + ".tmp";
+            string tmpInfo = kind.Info + ".tmp";
             File.WriteAllText(tmpInfo, info.ToString(), new UTF8Encoding(true));
-            Replace(tmpTable, Istochnik.BytTable);
-            Replace(tmpStreets, Istochnik.BytStreets);
-            Replace(tmpInfo, Istochnik.BytInfo);
+            Replace(tmpTable, kind.Table);
+            if (tmpStreets != null) Replace(tmpStreets, kind.Streets);
+            Replace(tmpInfo, kind.Info);
         }
-        return "Индексы выгрузки быта созданы: " + rows.ToString("#,0") + " записей, улиц " + streets.Count.ToString("#,0")
-            + (skipped > 0 ? ", строк без лицевого пропущено " + skipped.ToString("#,0") : "") + ", "
+        return "Индексы выгрузки " + kind.Name + " созданы: " + rows.ToString("#,0") + " записей" + (kind.Streets != null ? ", улиц " + streets.Count.ToString("#,0") : "")
+            + (skipped > 0 ? ", строк без «" + kind.Keys[0] + "» пропущено " + skipped.ToString("#,0") : "") + ", "
             + (DateTime.Now - t0).TotalSeconds.ToString("0") + " с.";
     }
 
@@ -603,10 +677,12 @@ public static class VygruzkaByt {
     }
 
     // подписи полей копии: поле -> заголовок выгрузки
-    public static Dictionary<string, string> Labels() {
+    public static Dictionary<string, string> Labels() { return Labels(VygKind.Byt); }
+
+    public static Dictionary<string, string> Labels(VygKind kind) {
         Dictionary<string, string> d = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         string cols;
-        Istochnik.ReadInfo(Istochnik.BytInfo).TryGetValue("Столбцы", out cols);
+        Istochnik.ReadInfo(kind.Info).TryGetValue("Столбцы", out cols);
         if (cols != null)
             foreach (string pair in cols.Split(';')) {
                 int c = pair.IndexOf(':');

@@ -9,7 +9,7 @@ public static class T {
         t.Tick += delegate {
             step++;
             if (step == 1) m.BeginInvoke((MethodInvoker)delegate { m.OpenDataSettings(); });           // модальное окно - дальше шаги идут, пока оно открыто
-            else if (step == 2) { m.DataForm.SetPaths(xlsx, "", "/нет/такого/файла.xlsx", true); }
+            else if (step == 2) { m.DataForm.SetPaths(xlsx, Environment.GetEnvironmentVariable("T_JUR") ?? "", Environment.GetEnvironmentVariable("T_NAR") ?? "/нет/такого/файла.xlsx", true); }
             else if (step == 4) { m.DataForm.Rebuild(); }
             else if (step > 4 && m.DataForm != null && !m.DataForm.Building && m.DataForm.LastResult.Length > 0 && step < 100) {
                 Console.WriteLine("Итог: " + m.DataForm.LastResult);
