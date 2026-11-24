@@ -185,14 +185,14 @@ public class PotScheme {
         if (l.OnePhase) {
             p = new PotStep("Величина технологического расхода электрической энергии в однофазной линии " + n + " 0,22 кВ (формулы (12), (13): Rл = Rф + R0, cosφ = 0,995; реактивные потери равны нулю), кВт·ч:");
             Through(p, prevA, "");
-            Two(p, "ΔW_{а " + n + "}", "\\frac{" + Wsum("а", prevA) + "^{2}}{cos^{2}φ·U_{н}^{2}·T}·R_{" + n + "}·d·10^{-3}", "\\frac{" + Wsum("а", prevA) + "^{2}}{0,995^{2}·0,22^{2}·T}·" + N(l.R) + "·" + N(D) + "·10^{-3}");
+            Two(p, "ΔW_{а " + n + "}", "\\frac{" + Wsum("а", prevA) + "^{2}}{cos^{2}φ·U_{н}^{2}·T}·R_{" + n + "}·d·10^{-3}", "\\frac{" + Wsum("а", prevA) + "^{2}}{0,995^{2}·" + N(l.U) + "^{2}·T}·" + N(l.R) + "·" + N(D) + "·10^{-3}");
         } else {
-            p = new PotStep("Величина технологического расхода электрической энергии на участке " + (l.Kind == "ВЛ" ? "воздушной" : "кабельной") + " линии " + n + " " + Uv(l.U) + " кВ (формула (10)" + (l.Low ? "; реактивные потери в линиях до 1 кВ равны нулю" : "") + "), кВт·ч:");
+            p = new PotStep("Величина технологического расхода электрической энергии на участке " + (l.Kind == "ВЛ" ? "воздушной" : "кабельной") + " линии " + n + " " + N(l.U) + " кВ (формула (10)" + (l.Low ? "; реактивные потери в линиях до 1 кВ равны нулю" : "") + "), кВт·ч:");
             Through(p, prevA, prevP);
             string f = "\\frac{" + Wsum("а", prevA) + "^{2}+" + Wsum("р", prevP) + "^{2}}";
-            Two(p, "ΔW_{а " + n + "}", f + "{T·U_{н}^{2}}·R_{" + n + "}·d·10^{-3}", f + "{T·" + Uv(l.U) + "^{2}}·" + N(l.R) + "·" + N(D) + "·10^{-3}");
+            Two(p, "ΔW_{а " + n + "}", f + "{T·U_{н}^{2}}·R_{" + n + "}·d·10^{-3}", f + "{T·" + N(l.U) + "^{2}}·" + N(l.R) + "·" + N(D) + "·10^{-3}");
             if (!l.Low && Reactive && l.X > 0)
-                Two(p, "ΔW_{р " + n + "}", f + "{T·U_{н}^{2}}·X_{" + n + "}·d·10^{-3}", f + "{T·" + Uv(l.U) + "^{2}}·" + N(l.X) + "·" + N(D) + "·10^{-3}");
+                Two(p, "ΔW_{р " + n + "}", f + "{T·U_{н}^{2}}·X_{" + n + "}·d·10^{-3}", f + "{T·" + N(l.U) + "^{2}}·" + N(l.X) + "·" + N(D) + "·10^{-3}");
         }
         s.Add(p);
         sumA.Add("ΔW_{а " + n + "}");
@@ -222,8 +222,9 @@ public class PotScheme {
 
     double CalcLine(PotLine l, double wa, double wp, double t, ref double ca, ref double cp, double sg, List<string> log) {
         double c = !l.Low && l.Kind == "КЛ" && l.Q30 > 0 ? l.Q30 * l.L * l.TgD * t : 0;
-        double v = l.OnePhase ? Sq(wa + ca) / (0.995 * 0.995 * 0.22 * 0.22 * t) * l.R * D * 1e-3
-            : (Sq(wa + ca) + Sq(wp + cp)) / (t * Sq(l.Low ? 0.38 : l.U)) * l.R * D * 1e-3;
+        // Uн - как у линии (0,4 / 0,38; 0,22 / 0,23): примечание к 3.1.10 допускает 0,4 и 0,23 кВ; пример А.3 книги считает с 0,4
+        double v = l.OnePhase ? Sq(wa + ca) / (0.995 * 0.995 * l.U * l.U * t) * l.R * D * 1e-3
+            : (Sq(wa + ca) + Sq(wp + cp)) / (t * Sq(l.U)) * l.R * D * 1e-3;
         if (log != null) log.Add(l.Name + " " + N(c + v));
         if (Chain) { ca += sg * v; if (!l.Low && Reactive && l.X > 0) cp += sg * (Sq(wa + ca) + Sq(wp + cp)) / (t * Sq(l.U)) * l.X * D * 1e-3; }
         return c + v;
@@ -235,7 +236,7 @@ public class PotScheme {
         e.Add("учёт " + Uv(Uuch) + " кВ " + (Uchet == 0 ? "прямого включения" : Uchet == 1 ? "через ТТ" : "через ТТ и ТН"));
         if (TT() > 0) e.Add("ТТ " + N(TT()) + " кВт·ч/мес");
         if (TN() > 0) e.Add("ТН " + N(TN()) + " кВт·ч/мес");
-        foreach (PotLine l in Near()) e.Add(l.Name + " " + l.Kind + " " + Uv(l.U) + " кВ, R = " + N(l.R) + " Ом");
+        foreach (PotLine l in Near()) e.Add(l.Name + " " + l.Kind + " " + N(l.U) + " кВ, R = " + N(l.R) + " Ом");
         if (Tr != null) e.Add("трансформатор " + Tr.Type);
         foreach (PotLine l in Far()) e.Add(l.Name + " " + l.Kind + " " + Uv(l.U) + " кВ, R = " + N(l.R) + " Ом");
         e.Add("d = " + N(D));

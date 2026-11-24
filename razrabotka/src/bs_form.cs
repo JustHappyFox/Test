@@ -805,8 +805,8 @@ public class BsForm : Form {
             foreach (PotLine l in s.Lines) if (!l.Low) hv = true;
             List<string[]> rows = new List<string[]>();
             foreach (PotLine l in s.Lines) {
-                if (hv) rows.Add(new string[] { l.Name, PotScheme.Uv(l.U), l.Kind, l.Mark, PotScheme.N(l.L), PotScheme.N(l.R0), PotScheme.N(l.R), l.X0 >= 0 ? PotScheme.N(l.X0) : "-", l.X >= 0 ? PotScheme.N(l.X) : "-", l.Q30 >= 0 ? PotScheme.N(l.Q30) : "-" });
-                else rows.Add(new string[] { l.Name, PotScheme.Uv(l.U), l.Kind, l.Mark, PotScheme.N(l.L), PotScheme.N(l.R0), PotScheme.N(l.R) });
+                if (hv) rows.Add(new string[] { l.Name, PotScheme.N(l.U), l.Kind, l.Mark, PotScheme.N(l.L), PotScheme.N(l.R0), PotScheme.N(l.R), l.X0 >= 0 ? PotScheme.N(l.X0) : "-", l.X >= 0 ? PotScheme.N(l.X) : "-", l.Q30 >= 0 ? PotScheme.N(l.Q30) : "-" });
+                else rows.Add(new string[] { l.Name, PotScheme.N(l.U), l.Kind, l.Mark, PotScheme.N(l.L), PotScheme.N(l.R0), PotScheme.N(l.R) });
             }
             if (hv) x.Append(Omml.Table(new string[] { "№", "Uн, кВ", "Вид", "Марка, сечение", "L, км", "r0, Ом/км", "Rл, Ом", "x0, Ом/км", "Xл, Ом", "q30, квар/км" }, rows,
                 new int[] { 500, 700, 600, 2300, 750, 900, 950, 850, 850, 900 }));
