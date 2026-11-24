@@ -1,6 +1,8 @@
 # Правки шаблонов .docx на месте (24.11), остальное в файле не трогается; слово может быть разбито Word'ом на куски - тоже:
 #  1) «Минскэнерго» -> «МИНСКЭНЕРГО» (всегда большими);
 #  3) акт приемки БС, п. 4: «...используется для электроснабжения базовой станции» -> поле «ДЕЯТЕЛЬНОСТЬ»;
+#  8) таблицы шире текста страницы (потери, доп. соглашение) - столбцы ужимаются до ширины текста;
+#  7) наряд БС: таблица шире листа - наряд целиком на листе, строка инженера - табуляцией;
 #  6) подписи «ЭНЕРГОСНАБЖАЮЩАЯ ОРГАНИЗАЦИЯ ... МП» из нижнего колонтитула - в конец текста документа;
 #  5) «ПУГОД» г. -> «ПУГОДГ» (год поверки с «г.», без года - пусто);
 #  4) потери: формула в ячейке, плавающая поверх схемы, - в строку ячейки;
@@ -25,9 +27,76 @@ def replace(ts, start, end, new):
         pos += len(s)
 
 V = '{urn:schemas-microsoft-com:vml}'
+def naryad_fit(root):
+    # 7) наряд БС (альбомный лист): таблица 8364+8208+8208 шире страницы - правый край наряда (средняя колонка) уходил за поле
+    #    и обрезался при печати («Допуск в эксплуатаци...»). Пустая левая колонка уже, пустая правая - узкая: наряд целиком на листе.
+    #    Строка «Инженер группы ... «ИНЖЕНЕР»» (ставилась пробелами, фамилия переносилась) - отступ под наряд и табуляция вправо.
+    n = 0
+    for tbl in root.iter(W + 'tbl'):
+        cols = tbl.findall(W + 'tblGrid/' + W + 'gridCol')
+        if [c.get(W + 'w') for c in cols] != ['8364', '8208', '8208']: continue
+        new = ['7564', '8208', '300']
+        for c, w in zip(cols, new): c.set(W + 'w', w)
+        for tr in tbl.findall(W + 'tr'):
+            for tc, w in zip(tr.findall(W + 'tc'), new):
+                tw = tc.find(W + 'tcPr/' + W + 'tcW')
+                if tw is not None: tw.set(W + 'w', w)
+        tw = tbl.find(W + 'tblPr/' + W + 'tblW')
+        if tw is not None: tw.set(W + 'w', str(sum(int(x) for x in new)))
+        n += 1
+        for p in root.iter(W + 'p'):
+            ts = runs(p)
+            text = ''.join(x.text or '' for x in ts)
+            if text.startswith('«ПРИЧИНА»'):      # длинная причина («Допуск в эксплуатацию») - без растягивания по ширине
+                jc = p.find(W + 'pPr/' + W + 'jc')
+                if jc is not None: jc.set(W + 'val', 'left')
+                for x in ts:
+                    if (x.text or '').strip().strip('_') == '' and '_' in (x.text or ''): x.text = ' '
+                continue
+            if 'Инженер группы' not in text or '«ИНЖЕНЕР»' not in text or not text.startswith('    '): continue
+            ppr = p.find(W + 'pPr')
+            tabs = ppr.find(W + 'tabs')
+            for tb in list(tabs): tabs.remove(tb)
+            tab = etree.SubElement(tabs, W + 'tab'); tab.set(W + 'val', 'right'); tab.set(W + 'pos', '15700')
+            ind = etree.SubElement(ppr, W + 'ind'); ind.set(W + 'left', '7780')
+            for x in ts:
+                s = x.text or ''
+                if s.strip() == '': x.text = ''
+                elif 'по работе с потребителями' in s: x.text = s.rstrip(); 
+                elif s == '«ИНЖЕНЕР»':
+                    r = x.getparent(); tr = etree.Element(W + 'r'); etree.SubElement(tr, W + 'tab'); r.addprevious(tr)
+            n += 1
+    return n
+
+def tables_fit(root):
+    # 8) таблица шире текста страницы (в потерях - до края листа: при печати обрезалась) - столбцы ужать пропорционально
+    sect = root.find('.//' + W + 'sectPr')
+    if sect is None: return 0
+    pg, mar = sect.find(W + 'pgSz'), sect.find(W + 'pgMar')
+    if pg is None or mar is None: return 0
+    text = int(pg.get(W + 'w')) - int(mar.get(W + 'left')) - int(mar.get(W + 'right'))
+    n = 0
+    for tbl in root.iter(W + 'tbl'):
+        if any(a.tag == W + 'tbl' for a in tbl.iterancestors()): continue
+        cols = tbl.findall(W + 'tblGrid/' + W + 'gridCol')
+        if not cols: continue
+        ind = tbl.find(W + 'tblPr/' + W + 'tblInd')
+        i = int(ind.get(W + 'w')) if ind is not None and ind.get(W + 'type', 'dxa') == 'dxa' else 0
+        g = sum(int(c.get(W + 'w')) for c in cols)
+        room = text - max(i, 0)
+        if g <= room + 20: continue
+        k = room / g
+        for c in cols: c.set(W + 'w', str(int(int(c.get(W + 'w')) * k)))
+        for tw in tbl.iter(W + 'tcW'):
+            if tw.get(W + 'type') == 'dxa': tw.set(W + 'w', str(int(int(tw.get(W + 'w')) * k)))
+        w = tbl.find(W + 'tblPr/' + W + 'tblW')
+        if w is not None and w.get(W + 'type') == 'dxa': w.set(W + 'w', str(int(int(w.get(W + 'w')) * k)))
+        n += 1
+    return n
+
 def fix(xml):
     root = etree.fromstring(xml)
-    n = 0
+    n = naryad_fit(root) + tables_fit(root)
     # 4) формула-рисунок в ячейке таблицы, плавающая с отрицательным отступом (в потерях «Wал=Wпу» налезала на схему) - в строку ячейки
     for sh in root.iter(V + 'shape'):
         st = sh.get('style') or ''
