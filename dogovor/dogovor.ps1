@@ -2283,7 +2283,9 @@ public class Lists {
         try { AddMeters(); } catch { }
         try { ClearOformil(); } catch { }
         try { AddOnce("Наряд: причина", NaryadMark); } catch { }
-        try { AddOnce("Юр наряд: должность начальника", "# список дополнен программой 24.11"); } catch { }
+        // 24.11: пакет документов - не только БС (зарядные станции электромобилей, учёт с трансформаторами тока)
+        foreach (string s in new string[] { "Юр наряд: должность начальника", "БС: объект", "БС: тип счётчика", "БС: ток счётчика", "БС: тарифная группа", "БС: кабель и r0" })
+            try { AddOnce(s, "# список дополнен программой 24.11"); } catch { }
     }
 
     // строки - всегда с переводом строки Windows (\r\n): иначе Блокнот Windows 7 показывает весь файл одной строкой
@@ -2642,6 +2644,12 @@ OformilMark + "\r\n" +
 "[БС: объект]\r\n" +
 "# БС (юр лицо, пакет документов): наименование объекта; свои - дописывайте\r\n" +
 "Возведение мобильной базовой станции\r\n" +
+"Установка зарядных станций для электромобилей\r\n" +
+"\r\n" +
+"[БС: характер деятельности]\r\n" +
+"# акт приемки приборов учета, п. 4: «...установлен следующий характер деятельности на объекте электроснабжения: ...»\r\n" +
+"электрическая энергия используется для электроснабжения базовой станции\r\n" +
+"электрическая энергия используется для зарядки электромобилей\r\n" +
 "\r\n" +
 "[БС: вид сооружения и код]\r\n" +
 "сооружение специализированное связи, код 3 07 00\r\n" +
@@ -2652,11 +2660,11 @@ OformilMark + "\r\n" +
 "\r\n" +
 "[БС: точка учёта]\r\nЩУЭ\r\nЩУНИ\r\n" +
 "\r\n" +
-"[БС: тип счётчика]\r\nМЭС-3-5/100-1/3/А\r\n" +
+"[БС: тип счётчика]\r\nМЭС-3-5/100-1/3/А\r\nСС-302.T4U1-AP1\r\n" +
 "\r\n" +
 "[БС: напряжение]\r\n3х230/400\r\n230\r\n" +
 "\r\n" +
-"[БС: ток счётчика]\r\n5(100)\r\n5(60)\r\n10(100)\r\n" +
+"[БС: ток счётчика]\r\n5(100)\r\n5(60)\r\n10(100)\r\n5(7,5)\r\n" +
 "\r\n" +
 "[БС: мощность]\r\n# в документ - «20 кВт» (число - кВт допишется само)\r\n5\r\n10\r\n15\r\n20\r\n25\r\n30\r\n" +
 "\r\n" +
@@ -2673,9 +2681,11 @@ OformilMark + "\r\n" +
 "\r\n" +
 "[БС: тарифная группа]\r\n" +
 "Промышленные и приравненные к ним потребители с присоединенной мощностью до 750 кВА\r\n" +
+"Электрическая энергия, используемая электрозарядными станциями, предназначенными для зарядки электромобилей (одноставочный)\r\n" +
 "\r\n" +
 "[БС: кабель и r0]\r\n# марка, сечение = r0, Ом/км (потери: Rл = r0 · L); дописывайте свои\r\n" +
 "АВБбШв-5х16 = 1,98\r\n" +
+"АВБбШв-4х95 = 0,32\r\n" +
 "\r\n" +
 "[БС: инженер]\r\n# Фамилия И.О. = Фамилия Имя Отчество (полностью - в акт приемки)\r\n" +
 "Черницкий Н.В. = Черницкий Николай Владимирович\r\n" +
@@ -27420,6 +27430,8 @@ public class BsForm : Form {
         c.Grid.Row(F("Адрес коротко (наряд)", T("adres_kr", null), 0));
         c.Grid.Row(F("Объект в справке, акте, потерях: «наименование по адресу: ...(код)»", T("obekt_full", null), 0));
         c.Grid.Row(F("Объект в доп. соглашении (ячейка таблицы)", T("obekt_adres", null), 0));
+        // 24.11: не только БС - характер деятельности в акте приемки (п. 4) на выбор: базовая станция, зарядка электромобилей...
+        c.Grid.Row(F("Характер деятельности (акт приемки, п. 4)", C("deyat", "электрическая энергия используется для ..."), 0));
         Field("obekt", "Объект", c.Name); Field("kod", "Вид сооружения и код", c.Name); Field("np", "Населённый пункт", c.Name); Field("dom", "Дом", c.Name);
 
         c = new Card("Электроснабжение", "откуда питание, линия, место включения, акт разграничения", 4);
@@ -27432,7 +27444,7 @@ public class BsForm : Form {
         c = new Card("Приборы учёта", "строка на каждый прибор учёта, «+» - ещё один; в справку, акт и доп. соглашение", 4);
         cards.Add(c);
         pu = new RowList(new string[] { "Точка учёта", "Тип счётчика", "№ счётчика", "В", "А", "Показания", "Пов. кв.", "Пов. год", "ТТ тока", "ТТ напр.", "К расч" },
-            new int[] { 7, 0, 12, 9, 7, 10, 5, 5, 5, 5, 4 },
+            new int[] { 8, 0, 11, 9, 7, 9, 5, 5, 10, 6, 4 },        // ТТ тока шире: «ТОП-0,66 150/5» (учёт с трансформаторами)
             new bool[] { true, true, false, true, true, false, true, false, false, false, false },
             new string[] { "ЩУЭ", null, null, "3х230/400", "5(100)", "000000,00", null, null, "-", "-", "1" });
         pu.Name = "pu";
@@ -27522,6 +27534,7 @@ public class BsForm : Form {
             Items("abonent", memory.Hist("бс абонент"));
             Items("obekt", With(lists.Get("БС: объект"), memory.Hist("бс объект")));
             Items("kod", With(lists.Get("БС: вид сооружения и код"), memory.Hist("бс код")));
+            Items("deyat", With(lists.Get("БС: характер деятельности"), memory.Hist("бс деятельность")));
             Items("obl", lists.Get("БС: область"));
             Items("rayon", lists.Get("БС: район"));
             Items("selsovet", With(lists.Get("Сельсовет"), memory.Hist("сельсовет")));
@@ -27911,6 +27924,7 @@ public class BsForm : Form {
             SetV("np_tip", "д.");
             SetV("ulica_tip", "ул.");
             SetV("kod", First(lists.Get("БС: вид сооружения и код")));
+            SetV("deyat", First(lists.Get("БС: характер деятельности")));
             SetV("plomba_marka", memory.Get("БСМаркировка", First(lists.Get("БС: маркировка пломб"))));
             SetV("punkt1", First(lists.Get("БС: доп. соглашение, пункт 1")));
             SetV("tarif", First(lists.Get("БС: тарифная группа")));
@@ -27969,6 +27983,12 @@ public class BsForm : Form {
             foreach (string k in new string[] { "pu", "moshn", "linii", "plomba_drugoe" }) { string v; if (d.TryGetValue(k, out v)) SetV(k, v); }
             foreach (string k in Composed) autos[k] = AutoOf(k);
             autos["obekt_kr"] = V("obekt");
+            // схемы по старому пути нет (другой компьютер, перенесли папку) - копия в папке пакета
+            if (V("shema").Length > 0 && !File.Exists(V("shema")))
+                foreach (string ext in new string[] { ".jpg", ".jpeg", ".png", ".bmp" }) {
+                    string f = Path.Combine(Path.Combine(Folder(here), name), ShemaName + ext);
+                    if (File.Exists(f)) { SetV("shema", f); break; }
+                }
             savedName = name;
         } finally { loading = false; }
         dirty = false;
@@ -27982,6 +28002,8 @@ public class BsForm : Form {
         headSub.Text = "открыт сохранённый (" + (when ?? "") + ") - исправьте и сформируйте заново";
         RefreshState();
     }
+
+    const string ShemaName = "Схема питания";
 
     void SaveData(string name) {
         string dir = DataFolder(here);
@@ -28008,6 +28030,8 @@ public class BsForm : Form {
         v["АБОНЕНТ"] = V("abonent");
         v["ТЕЛЕФОН"] = V("tel");
         v["ОБЪЕКТ"] = V("obekt_full");
+        string dt = V("deyat").Trim().TrimEnd('.');
+        v["ДЕЯТЕЛЬНОСТЬ"] = dt.Length > 0 ? dt : "электрическая энергия используется для электроснабжения базовой станции";
         v["ОБЪЕКТАДРЕС"] = V("obekt_adres");
         v["ОБЪЕКТКР"] = V("obekt_kr");
         v["АДРЕС"] = V("adres").TrimEnd('.');
@@ -28051,6 +28075,7 @@ public class BsForm : Form {
             r["ПУПОКАЗ"] = pu.Cell(i, 5);
             r["ПУКВ"] = kv.Length > 0 && char.IsDigit(kv[kv.Length - 1]) ? kv + " кв." : kv;
             r["ПУГОД"] = pu.Cell(i, 7);
+            r["ПУГОДГ"] = pu.Cell(i, 7).Length > 0 ? pu.Cell(i, 7) + " г." : "";
             r["ПУТТ"] = pu.Cell(i, 8);
             r["ПУТН"] = pu.Cell(i, 9);
             r["ПУК"] = pu.Cell(i, 10);
@@ -28225,6 +28250,15 @@ public class BsForm : Form {
                 try { if (File.Exists(f)) File.Delete(f); File.Move(tmp, f); }
                 catch (IOException) { busy.Add(d[2]); try { File.Delete(tmp); } catch { } }
             }
+            // 24.11: схема - копией в папку пакета: сохранённый пакет откроется со схемой и на другом компьютере
+            string sh = V("shema");
+            if (sh.Length > 0 && File.Exists(sh)) {
+                string copy = Path.Combine(dir, ShemaName + Path.GetExtension(sh).ToLowerInvariant());
+                if (string.Compare(Path.GetFullPath(sh), Path.GetFullPath(copy), StringComparison.OrdinalIgnoreCase) != 0) File.Copy(sh, copy, true);
+                bool was = loading;
+                loading = true;
+                try { SetV("shema", copy); } finally { loading = was; }
+            }
             SaveData(name);
         } catch (Exception ex) {
             MessageBox.Show(this, "Пакет не сформирован:\n" + ex.Message, Text, MessageBoxButtons.OK, MessageBoxIcon.Error);
@@ -28248,6 +28282,7 @@ public class BsForm : Form {
         memory.Remember("бс абонент", V("abonent"));
         memory.Remember("бс объект", V("obekt"));
         memory.Remember("бс код", V("kod"));
+        memory.Remember("бс деятельность", V("deyat"));
         memory.Remember("бс питание", V("pitanie"));
         memory.Remember("бс место", V("mesto"));
         memory.Remember("нп", V("np"));
