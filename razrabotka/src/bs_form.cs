@@ -500,6 +500,18 @@ public class BsForm : Form {
             F("Потребители (tgφ - табл. 6.4)", C("tg_vid", null), 0), F("tgφ", T("pot_tg", null), 6));
         c.Grid.Row(F(null, X("pot_wp", "Реактивная - по показаниям счётчика"), 32), F(null, X("pot_chain", "Потери элемента - к энергии следующего (п. 4.12)"), 46),
             F(null, X("pot_react", "Считать реактивную составляющую"), 0));
+        Label poprInfo = new Label();
+        poprInfo.Text = "!";
+        poprInfo.Font = St.Bold;
+        poprInfo.ForeColor = St.Warn;
+        poprInfo.Cursor = Cursors.Help;
+        poprInfo.TextAlign = ContentAlignment.MiddleCenter;
+        tip.SetToolTip(poprInfo, "Корректирующая поправка (ТКП 460-2017, п. 4.8, раздел 7): показания счётчика изменяются на величину потерь -\n" +
+            "прибавляются, если участок от границы до учёта на балансе абонента, вычитаются - если на балансе РУП.\n" +
+            "Применяется при расчётах всегда, для любой схемы. В документ строка «δWа = ΔWаΣ; W'а = Wа ± δWа»\n" +
+            "добавляется только с этой галочкой (в образцах «Порядка расчета» её обычно не пишут).");
+        tip.AutoPopDelay = 30000;
+        c.Grid.Row(F(null, X("pot_popr", "Строка с корректирующей поправкой"), 36), F(null, poprInfo, 2));
         potNote.Font = St.Small;
         potNote.ForeColor = St.Caption;
         c.Grid.Row(F("Проверка за месяц: Wа, кВт·ч", T("pot_test", "35000"), 14), F(null, potNote, 0));
@@ -749,6 +761,7 @@ public class BsForm : Form {
         s.WpMeter = V("pot_wp") == "1";
         s.Chain = V("pot_chain") == "1";
         s.Reactive = V("pot_react") == "1";
+        s.Popr = V("pot_popr") == "1";
         double r, x, dp, dq, unt;
         if (V("tr_tip").Length > 0 && V("tr_tip") != "нет" && Num(V("tr_r"), out r) && Num(V("tr_x"), out x) && Num(V("tr_dp"), out dp) && Num(V("tr_dq"), out dq) && Num(V("tr_u"), out unt)) {
             s.Tr = new TrafoInfo();

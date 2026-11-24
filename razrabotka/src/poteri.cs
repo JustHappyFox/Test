@@ -78,6 +78,7 @@ public class PotScheme {
     public bool WpMeter;                         // реактивная - по показаниям счётчика
     public bool Chain = true;                    // потери предыдущих элементов - к энергии следующего (п. 4.12)
     public bool Reactive;                        // считать реактивную составляющую ТРЭТ
+    public bool Popr;                            // строка «корректирующая поправка и учёт с коррекцией» (24.11: по умолчанию нет)
 
     public static string N(double d) {
         if (Math.Abs(d) >= 100) return Math.Round(d, 1).ToString("0.#", Inv).Replace('.', ',');
@@ -152,6 +153,7 @@ public class PotScheme {
         p.Math.Add("ΔW_{а Σ}=" + (sumA.Count == 0 ? "0" : string.Join("+", sumA.ToArray())));
         if (Reactive && sumP.Count > 0) p.Math.Add("ΔW_{р Σ}=" + string.Join("+", sumP.ToArray()));
         s.Add(p);
+        if (!Popr) return s;
         p = new PotStep("Корректирующая поправка и данные учета с учетом коррекции (раздел 7; участок между точкой учета и ГБП - на балансе " + (Abonent ? "абонента: поправка прибавляется" : "РУП «МИНСКЭНЕРГО»: поправка вычитается") + "), кВт·ч:");
         p.Math.Add("δW_{а}=ΔW_{а Σ};   W'_{а}=W_{а}" + Sg + "δW_{а}");
         if (Reactive && sumP.Count > 0) p.Math.Add("δW_{р}=ΔW_{р Σ};   W'_{р}=W_{р}" + Sg + "δW_{р}");
