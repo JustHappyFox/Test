@@ -24,6 +24,7 @@ public static class T {
                 Dump("Из перевода", u);
                 u.SetV("dog_name", "ООО «Тестстрой»");
                 u.SetV("opsu", "Петров П.П.");          // 24.11: начальник ОПСУ
+                u.SetV("nach_dolzh", "Начальник ОПСУ");  // 24.11: должность первого начальника - на выбор
                 Console.WriteLine("Сохранена: " + u.Save(false, false));
                 u.GoBack();
             } else if (step == 6) p.CreateSpravka();

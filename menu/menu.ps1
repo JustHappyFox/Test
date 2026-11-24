@@ -2229,11 +2229,12 @@ public static class Look {
             System.Windows.Forms.ComboBox cb = c as System.Windows.Forms.ComboBox;
             if (cb != null && Dark) cb.FlatStyle = System.Windows.Forms.FlatStyle.Flat;
             System.Windows.Forms.ListView lv = c as System.Windows.Forms.ListView;
-            if (lv != null && Dark) lv.GridLines = false;           // линии сетки Windows рисует светлыми - на тёмном режут глаз
+            if (lv != null && Dark) { lv.GridLines = false; OwnList(lv); }    // линии сетки Windows рисует светлыми - на тёмном режут глаз
         } else if (c is System.Windows.Forms.DataGridView) {
             Grid((System.Windows.Forms.DataGridView)c);
         } else if (c is System.Windows.Forms.Button) {
             Button((System.Windows.Forms.Button)c);
+            if (Dark) OwnDisabled((System.Windows.Forms.Button)c);
         } else if (c is System.Windows.Forms.LinkLabel) {
             System.Windows.Forms.LinkLabel l = (System.Windows.Forms.LinkLabel)c;
             l.LinkColor = Link;
@@ -2282,6 +2283,51 @@ public static class Look {
     }
 
     static readonly System.Collections.Generic.Dictionary<System.Windows.Forms.Control, bool> hooked = new System.Collections.Generic.Dictionary<System.Windows.Forms.Control, bool>();
+    static readonly System.Collections.Generic.Dictionary<System.Windows.Forms.Control, bool> drawn = new System.Collections.Generic.Dictionary<System.Windows.Forms.Control, bool>();
+
+    // 24.11: тёмная тема - выделенная строка списка: Windows красит её светлым, а текст светлый (не прочитать) - рисуем сами
+    static void OwnList(System.Windows.Forms.ListView lv) {
+        if (drawn.ContainsKey(lv) || lv.CheckBoxes || lv.SmallImageList != null || lv.LargeImageList != null) return;
+        drawn[lv] = true;
+        lv.Disposed += delegate { drawn.Remove(lv); };
+        lv.OwnerDraw = true;
+        lv.DrawColumnHeader += delegate(object s, System.Windows.Forms.DrawListViewColumnHeaderEventArgs e) { e.DrawDefault = true; };
+        lv.DrawItem += delegate(object s, System.Windows.Forms.DrawListViewItemEventArgs e) { if (lv.View != System.Windows.Forms.View.Details) e.DrawDefault = true; };
+        lv.DrawSubItem += delegate(object s, System.Windows.Forms.DrawListViewSubItemEventArgs e) {
+            System.Drawing.Rectangle r = e.Bounds;
+            if (e.ColumnIndex == 0 && lv.Columns.Count > 0) r.Width = lv.Columns[0].Width;
+            bool sel = e.Item.Selected, own = e.Item.UseItemStyleForSubItems || e.SubItem == null;
+            System.Drawing.Color back = sel ? (lv.Focused ? Accent : System.Drawing.Color.FromArgb(62, 84, 122)) : own ? e.Item.BackColor : e.SubItem.BackColor;
+            System.Drawing.Color fore = sel ? System.Drawing.Color.White : own ? e.Item.ForeColor : e.SubItem.ForeColor;
+            using (System.Drawing.SolidBrush b = new System.Drawing.SolidBrush(back)) e.Graphics.FillRectangle(b, r);
+            System.Windows.Forms.HorizontalAlignment al = e.ColumnIndex < lv.Columns.Count ? lv.Columns[e.ColumnIndex].TextAlign : System.Windows.Forms.HorizontalAlignment.Left;
+            System.Windows.Forms.TextFormatFlags f = System.Windows.Forms.TextFormatFlags.VerticalCenter | System.Windows.Forms.TextFormatFlags.EndEllipsis
+                | System.Windows.Forms.TextFormatFlags.SingleLine | System.Windows.Forms.TextFormatFlags.NoPrefix
+                | (al == System.Windows.Forms.HorizontalAlignment.Right ? System.Windows.Forms.TextFormatFlags.Right
+                    : al == System.Windows.Forms.HorizontalAlignment.Center ? System.Windows.Forms.TextFormatFlags.HorizontalCenter : System.Windows.Forms.TextFormatFlags.Left);
+            string text = e.SubItem != null ? e.SubItem.Text : e.Item.Text;
+            System.Windows.Forms.TextRenderer.DrawText(e.Graphics, text, e.Item.Font ?? lv.Font, new System.Drawing.Rectangle(r.X + 4, r.Y, System.Math.Max(0, r.Width - 6), r.Height), fore, f);
+        };
+        lv.MouseMove += delegate(object s, System.Windows.Forms.MouseEventArgs e) { System.Windows.Forms.ListViewItem it = lv.GetItemAt(e.X, e.Y); if (it != null) lv.Invalidate(it.Bounds); };
+        lv.GotFocus += delegate { lv.Invalidate(); };
+        lv.LostFocus += delegate { lv.Invalidate(); };
+    }
+
+    // 24.11: тёмная тема - выключенная кнопка: Windows пишет текст тёмным по тёмному - рисуем сами светло-серым
+    static void OwnDisabled(System.Windows.Forms.Button b) {
+        if (drawn.ContainsKey(b)) return;
+        drawn[b] = true;
+        b.Disposed += delegate { drawn.Remove(b); };
+        b.Paint += delegate(object s, System.Windows.Forms.PaintEventArgs e) {
+            if (b.Enabled) return;
+            System.Drawing.Rectangle r = b.ClientRectangle;
+            using (System.Drawing.SolidBrush br = new System.Drawing.SolidBrush(Surface)) e.Graphics.FillRectangle(br, r);
+            using (System.Drawing.Pen p = new System.Drawing.Pen(Hint)) e.Graphics.DrawRectangle(p, 0, 0, r.Width - 1, r.Height - 1);
+            System.Windows.Forms.TextRenderer.DrawText(e.Graphics, b.Text, b.Font, new System.Drawing.Rectangle(4, 2, r.Width - 8, r.Height - 4),
+                System.Drawing.Color.FromArgb(150, 156, 166), System.Windows.Forms.TextFormatFlags.HorizontalCenter | System.Windows.Forms.TextFormatFlags.VerticalCenter
+                | System.Windows.Forms.TextFormatFlags.WordBreak);
+        };
+    }
 
     // окно - в теме при показе (и шрифт программы)
     public static void Wear(System.Windows.Forms.Form f) {

@@ -491,9 +491,10 @@ public class BsForm : Form {
 
         c = new Card("Подписи и даты", "инженер и начальник - из справочника; даты документов", 4);
         cards.Add(c);
-        c.Grid.Row(F("Инженер (Фамилия И.О.)", C("inzh", null), 20), F("Инженер полностью (акт)", T("inzh_fio", null), 0), F("Начальник ГРП", C("nach", null), 18));
+        c.Grid.Row(F("Инженер (Фамилия И.О.)", C("inzh", null), 18), F("Инженер полностью (акт)", T("inzh_fio", null), 0),
+            F("Должность начальника", C("nach_dolzh", null), 16), F("Начальник (Фамилия И.О.)", C("nach", null), 16));
         c.Grid.Row(F("Данные ПУ на (справка)", D("data_pu"), 14), F("Дата подписей (справка)", D("data_podp"), 14), F("Дата акта", D("data_akt"), 14));
-        Field("inzh", "Инженер", c.Name); Field("inzh_fio", "Инженер полностью", c.Name); Field("nach", "Начальник ГРП", c.Name);
+        Field("inzh", "Инженер", c.Name); Field("inzh_fio", "Инженер полностью", c.Name); Field("nach", "Начальник", c.Name);
 
         c = new Card("Документы", "что сформировать в папку пакета", 4);
         cards.Add(c);
@@ -530,6 +531,7 @@ public class BsForm : Form {
             Items("prichina", With(lists.Get("Наряд: причина"), memory.Hist("наряд причина")));
             Items("inzh", Engineers());
             Items("nach", Names());
+            Items("nach_dolzh", lists.Get("Должность начальника"));
             pu.SetItems(0, lists.Get("БС: точка учёта"));
             pu.SetItems(1, With(lists.Get("БС: тип счётчика"), memory.Hist("бс счётчик")));
             pu.SetItems(3, lists.Get("БС: напряжение"));
@@ -912,6 +914,7 @@ public class BsForm : Form {
             string eng = memory.Get("БСИнженер", "");
             SetV("inzh", Engineers().Contains(eng) ? eng : First(Engineers()));
             SetV("nach", memory.Get("БСНачальник", First(Names())));
+            SetV("nach_dolzh", memory.Get("БСДолжностьНачальника", First(lists.Get("Должность начальника"))));
             string docs = memory.Get("БСДокументы", "11111");
             for (int i = 0; i < Docs.Length; i++) SetV(Docs[i][0], i < docs.Length && docs[i] == '0' ? "" : "1");
             ResetAutos();
@@ -1019,6 +1022,10 @@ public class BsForm : Form {
         v["ИНЖЕНЕР"] = V("inzh");
         v["ИНЖЕНЕРФИО"] = V("inzh_fio").Length > 0 ? V("inzh_fio") : V("inzh");
         v["НАЧАЛЬНИК"] = V("nach");
+        // 24.11: должность начальника - на выбор (ГРП / ОПСУ); в доп. соглашении у ГРП - «Начальник ГРП ОПСУ», как в образце
+        string pos = V("nach_dolzh").Length > 0 ? V("nach_dolzh") : "Начальник ГРП";
+        v["НАЧДОЛЖН"] = pos;
+        v["НАЧДОЛЖНДС"] = pos == "Начальник ГРП" ? "Начальник ГРП  ОПСУ" : pos;
         v["ДАТАПУ"] = V("data_pu");
         v["ДАТАПОДП"] = V("data_podp");
         DateTime a = ((DateBox)inp["data_akt"]).Value;
@@ -1245,6 +1252,7 @@ public class BsForm : Form {
         memory.Values["БСМаркировка"] = V("plomba_marka");
         memory.Values["БСИнженер"] = V("inzh");
         memory.Values["БСНачальник"] = V("nach");
+        memory.Values["БСДолжностьНачальника"] = V("nach_dolzh");
         StringBuilder docs = new StringBuilder();
         foreach (string[] d in Docs) docs.Append(V(d[0]) == "1" ? '1' : '0');
         memory.Values["БСДокументы"] = docs.ToString();

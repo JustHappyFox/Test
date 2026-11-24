@@ -1590,8 +1590,20 @@ public static class DocxTemplate {
         return Fill(template, output, values, null);
     }
 
+    public static string Energo(string s) {
+        return s == null ? null : System.Text.RegularExpressions.Regex.Replace(s, "минскэнерго", "МИНСКЭНЕРГО", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+    }
+
     // sizes: имя поля -> размер шрифта значения в полупунктах (длинный текст в узкой ячейке - мельче, чтобы таблица не росла)
     public static List<string> Fill(string template, string output, Dictionary<string, string> values, Dictionary<string, int> sizes) {
+        // 24.11: «МИНСКЭНЕРГО» - всегда большими буквами, откуда бы ни пришло значение (справочник, ввод, старые сохранённые)
+        if (values != null) {
+            Dictionary<string, string> up = new Dictionary<string, string>();
+            foreach (KeyValuePair<string, string> kv in values) up[kv.Key] = Energo(kv.Value);
+            // «МИНСКЭНЕРГО» в тексте шаблона похоже на поле - это не поле, оставить как есть
+            if (!up.ContainsKey("МИНСКЭНЕРГО")) up["МИНСКЭНЕРГО"] = "«МИНСКЭНЕРГО»";
+            values = up;
+        }
         List<ZipEntry> entries = Zip.Read(template);
         List<string> missing = new List<string>();
         foreach (ZipEntry e in entries) {
@@ -1825,6 +1837,13 @@ public static class DocxTemplate {
     // Строки с полем «¶drop» (старый шаблон: второй счётчик отдельной строкой) убираются. Результат - новый файл шаблона.
     public static void ExpandRows(string template, string output, string anchor, string drop, List<Dictionary<string, string>> rows,
             string[] always, string[] equal) {
+        List<Dictionary<string, string>> up = new List<Dictionary<string, string>>();       // «МИНСКЭНЕРГО» - большими (см. Fill)
+        foreach (Dictionary<string, string> row in rows) {
+            Dictionary<string, string> u = new Dictionary<string, string>();
+            foreach (KeyValuePair<string, string> kv in row) u[kv.Key] = Energo(kv.Value);
+            up.Add(u);
+        }
+        rows = up;
         List<ZipEntry> entries = Zip.Read(template);
         foreach (ZipEntry e in entries) {
             if (e.Name != "word/document.xml") continue;
@@ -2258,11 +2277,26 @@ public class Lists {
     public Lists(string file) {
         File = file;
         if (!System.IO.File.Exists(file)) System.IO.File.WriteAllText(file, Default, new UTF8Encoding(true));
+        try { FixLineEnds(); } catch { }
         Load();
         try { AddMissing(); } catch { }
         try { AddMeters(); } catch { }
         try { ClearOformil(); } catch { }
         try { AddOnce("Наряд: причина", NaryadMark); } catch { }
+        try { AddOnce("Юр наряд: должность начальника", "# список дополнен программой 24.11"); } catch { }
+    }
+
+    // строки - всегда с переводом строки Windows (\r\n): иначе Блокнот Windows 7 показывает весь файл одной строкой
+    void WriteLines(List<string> l) {
+        System.IO.File.WriteAllText(File, string.Join("\r\n", l.ToArray()) + "\r\n", new UTF8Encoding(true));
+    }
+
+    // 24.11: файл с переводами строк не Windows (\n без \r) - переписать с \r\n, содержимое то же; «Минскэнерго» - большими буквами
+    void FixLineEnds() {
+        string t = System.IO.File.ReadAllText(File, Encoding.UTF8), was = t;
+        if (t.Replace("\r\n", "").IndexOf('\n') >= 0) t = t.Replace("\r\n", "\n").Replace("\r", "\n").Replace("\n", "\r\n");
+        t = DocxTemplate.Energo(t);
+        if (t != was) System.IO.File.WriteAllText(File, t, new UTF8Encoding(true));
     }
 
     // 09.11: в список причин наряда (раздел появился днём раньше) дописать новые варианты - один раз (метка в файле)
@@ -2295,7 +2329,7 @@ public class Lists {
         }
         add.Insert(0, mark);
         lines.InsertRange(last + 1, add);
-        System.IO.File.WriteAllLines(File, lines.ToArray(), new UTF8Encoding(true));
+        WriteLines(lines);
         Load();
     }
 
@@ -2324,7 +2358,7 @@ public class Lists {
             outl.Add(line);
         }
         if (!changed) return;
-        System.IO.File.WriteAllLines(File, outl.ToArray(), new UTF8Encoding(true));
+        WriteLines(outl);
         Load();
     }
 
@@ -2364,7 +2398,7 @@ public class Lists {
         }
         add.Insert(0, MetersMark + MetersVersion + (add.Count > 0 ? " (дописано " + add.Count + ")" : ""));
         lines.InsertRange(last + 1, add);
-        System.IO.File.WriteAllLines(File, lines.ToArray(), new UTF8Encoding(true));
+        WriteLines(lines);
         Load();
     }
 
@@ -2458,7 +2492,7 @@ public class Lists {
         if (same >= 0) lines[same] = line;
         else if (section >= 0) lines.Insert(last + 1, line);
         else { lines.Add(""); lines.Add("[Подписанты]"); lines.Add(line); }
-        System.IO.File.WriteAllLines(File, lines.ToArray(), new UTF8Encoding(true));
+        WriteLines(lines);
         Load();
     }
 
@@ -2546,7 +2580,7 @@ OformilMark + "\r\n" +
 "ЩУЭ на границе участка\r\nза границей земельного участка\r\nв доме\r\nв гараже\r\nна лестничной клетке\r\n" +
 "\r\n" +
 "[Принадлежность]\r\n" +
-"Потребитель\r\nРУП «Минскэнерго»\r\n" +
+"Потребитель\r\nРУП «МИНСКЭНЕРГО»\r\n" +
 "\r\n" +
 "[Тип модема]\r\n" +
 "PLC\r\nрадио\r\nPLC и радио\r\nотсутствует\r\n" +
@@ -2576,6 +2610,11 @@ OformilMark + "\r\n" +
 "Допуск в эксплуатацию\r\n" +
 "Допуск выносного ПУ\r\n" +
 "\r\n" +
+"[Должность начальника]\r\n" +
+"# справка, справка на удаление, пакет документов БС: должность того, кто подписывает как начальник; первая - по умолчанию\r\n" +
+"Начальник ГРП\r\n" +
+"Начальник ОПСУ\r\n" +
+"\r\n" +
 "[Наряд: подпись начальника]\r\n" +
 "# наряд: кто подписывает («Начальник ГРП ___ Зенченко Д.И.»); первый - по умолчанию\r\n" +
 "Начальник ГРП\r\n" +
@@ -2594,7 +2633,7 @@ OformilMark + "\r\n" +
 "в тамбуре\r\nв доме\r\nв гараже\r\nв ЩУЭ на границе участка\r\nза границей земельного участка\r\nна лестничной клетке\r\nна опоре\r\n" +
 "\r\n" +
 "[Справка: чья собственность]\r\n" +
-"собственности абонента\r\nсобственности РУП «Минскэнерго»\r\n" +
+"собственности абонента\r\nсобственности РУП «МИНСКЭНЕРГО»\r\n" +
 "\r\n" +
 "[Места пломб]\r\n" +
 "# пломбы «другие» в договоре и справке: место - сокращение (как в отчёте пломб), после « - » пояснение; свои - дописывайте\r\n" +
@@ -2643,7 +2682,7 @@ OformilMark + "\r\n" +
 "\r\n" +
 "[Юр наряд: РЭС]\r\nРЭС-3\r\n" +
 "\r\n" +
-"[Юр наряд: должность начальника]\r\nНачальник ГРП Острошицкого ПСУ\r\n" +
+"[Юр наряд: должность начальника]\r\nНачальник ГРП Острошицкого ПСУ\r\nНачальник ОПСУ\r\n" +
 "\r\n" +
 "[Юр наряд: должность инженера]\r\nИнженер РПЭ\r\n" +
 "\r\n" +
@@ -2663,18 +2702,25 @@ public class Memory {
     static readonly Dictionary<string, Memory> open = new Dictionary<string, Memory>(StringComparer.OrdinalIgnoreCase);
     public static Memory For(string file) {
         Memory m;
-        if (!open.TryGetValue(file, out m)) { m = new Memory(file); open[file] = m; }
+        if (!open.TryGetValue(file, out m)) { m = new Memory(file); open[file] = m; if (m.dirty) m.Save(); }
         return m;
     }
+
+    // 24.11: в архив с программой по ошибке попал файл настроек с проверки - вымышленные значения (их здесь не должно быть) убираются
+    static readonly string[] TestValues = { "ООО «Тестстрой»", "Петров П.П.", "Макетино" };
 
     public Memory(string file) {
         this.file = file;
         try {
             if (!System.IO.File.Exists(file)) return;
-            foreach (string line in System.IO.File.ReadAllLines(file, Encoding.UTF8)) {
+            string[] all = System.IO.File.ReadAllLines(file, Encoding.UTF8);
+            bool test = false;
+            foreach (string line in all) foreach (string tv in TestValues) if (line.EndsWith("=" + tv)) test = true;
+            foreach (string line in all) {
                 int eq = line.IndexOf('=');
                 if (eq <= 0 || line.StartsWith("#")) continue;
                 string k = line.Substring(0, eq).Trim(), v = Unescape(line.Substring(eq + 1));
+                if (test && (Array.IndexOf(TestValues, v) >= 0 || (k == "история.улица" && v == "Полевая"))) { dirty = true; continue; }
                 if (k.StartsWith("история.")) {
                     string h = k.Substring(8);
                     if (!History.ContainsKey(h)) History[h] = new List<string>();
@@ -2683,6 +2729,9 @@ public class Memory {
             }
         } catch { }
     }
+
+    bool dirty;
+    public bool Cleaned { get { return dirty; } }
 
     public string Get(string key, string def) {
         string v;
@@ -2899,6 +2948,52 @@ public static class St {
 
     // тёмная тема для окна и всего, что в нём (и что добавится потом): белое и системное светлое - тёмное, чёрный текст - светлый.
     // Цвета, заданные программой (разделы, кнопки, подсветка), не трогаются
+    static readonly Dictionary<Control, bool> drawn = new Dictionary<Control, bool>();
+
+    // 24.11: тёмная тема - выделенная строка списка: Windows красит её светлым, а текст остаётся светлым (не прочитать). Список
+    // рисуется сам: выделенное - синим с белым текстом, остальное - цветами строк (зелёные, красные - как задала программа)
+    static void DarkList(ListView lv) {
+        if (drawn.ContainsKey(lv) || lv.CheckBoxes || lv.SmallImageList != null || lv.LargeImageList != null) return;
+        drawn[lv] = true;
+        lv.Disposed += delegate { drawn.Remove(lv); };
+        lv.OwnerDraw = true;
+        lv.DrawColumnHeader += delegate(object s, DrawListViewColumnHeaderEventArgs e) { e.DrawDefault = true; };
+        lv.DrawItem += delegate(object s, DrawListViewItemEventArgs e) { if (lv.View != View.Details) e.DrawDefault = true; };
+        lv.DrawSubItem += delegate(object s, DrawListViewSubItemEventArgs e) {
+            Rectangle r = e.Bounds;
+            if (e.ColumnIndex == 0 && lv.Columns.Count > 0) r.Width = lv.Columns[0].Width;
+            bool sel = e.Item.Selected;
+            bool own = e.Item.UseItemStyleForSubItems || e.SubItem == null;
+            Color back = sel ? (lv.Focused ? Accent : Color.FromArgb(62, 84, 122)) : own ? e.Item.BackColor : e.SubItem.BackColor;
+            Color fore = sel ? Color.White : own ? e.Item.ForeColor : e.SubItem.ForeColor;
+            using (SolidBrush b = new SolidBrush(back)) e.Graphics.FillRectangle(b, r);
+            HorizontalAlignment al = e.ColumnIndex < lv.Columns.Count ? lv.Columns[e.ColumnIndex].TextAlign : HorizontalAlignment.Left;
+            TextFormatFlags f = TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix
+                | (al == HorizontalAlignment.Right ? TextFormatFlags.Right : al == HorizontalAlignment.Center ? TextFormatFlags.HorizontalCenter : TextFormatFlags.Left);
+            string text = e.SubItem != null ? e.SubItem.Text : e.Item.Text;
+            TextRenderer.DrawText(e.Graphics, text, e.Item.Font ?? lv.Font, new Rectangle(r.X + 4, r.Y, Math.Max(0, r.Width - 6), r.Height), fore, f);
+        };
+        // при наведении мыши Windows сама перерисовывает первую ячейку - перерисовать строку целиком
+        lv.MouseMove += delegate(object s, MouseEventArgs e) { ListViewItem it = lv.GetItemAt(e.X, e.Y); if (it != null) lv.Invalidate(it.Bounds); };
+        lv.GotFocus += delegate { lv.Invalidate(); };
+        lv.LostFocus += delegate { lv.Invalidate(); };
+    }
+
+    // 24.11: тёмная тема - выключенная кнопка: Windows пишет текст тёмно-серым по тёмному (не прочитать) - рисуем сами: светло-серым
+    static void DarkDisabled(Button b) {
+        if (drawn.ContainsKey(b)) return;
+        drawn[b] = true;
+        b.Disposed += delegate { drawn.Remove(b); };
+        b.Paint += delegate(object s, PaintEventArgs e) {
+            if (b.Enabled) return;
+            Rectangle r = b.ClientRectangle;
+            using (SolidBrush br = new SolidBrush(Surface)) e.Graphics.FillRectangle(br, r);
+            using (Pen p = new Pen(Border)) e.Graphics.DrawRectangle(p, 0, 0, r.Width - 1, r.Height - 1);
+            TextRenderer.DrawText(e.Graphics, b.Text, b.Font, new Rectangle(4, 2, r.Width - 8, r.Height - 4), Color.FromArgb(150, 156, 166),
+                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.WordBreak);
+        };
+    }
+
     public static void Dress(Control c) {
         if (!DarkMode || c == null) return;
         if (c is Form) {
@@ -2908,7 +3003,7 @@ public static class St {
             if (Light(c.BackColor)) c.BackColor = c is TextBox && ((TextBox)c).ReadOnly ? Surface : Input;
             if (Black(c.ForeColor)) c.ForeColor = Text;
             // линии сетки списка Windows рисует светлыми - на тёмном фоне режут глаз
-            if (c is ListView) ((ListView)c).GridLines = false;
+            if (c is ListView) { ((ListView)c).GridLines = false; DarkList((ListView)c); }
         } else if (c is DataGridView) {
             DataGridView g = (DataGridView)c;
             g.BackgroundColor = Input;
@@ -2930,6 +3025,7 @@ public static class St {
                 b.FlatAppearance.MouseOverBackColor = Hover;
                 b.FlatAppearance.MouseDownBackColor = Pressed;
             }
+            if (b != null) DarkDisabled(b);
         }
         LinkLabel l = c as LinkLabel;
         if (l != null && Same(l.LinkColor, Color.FromArgb(35, 99, 178))) l.LinkColor = Link;
@@ -19658,8 +19754,8 @@ public class SpravkaForm : Form {
         cards.Add(c);
         DateBox date = new DateBox();
         Reg("data", date);
-        c.Grid.Row(F("Данные прибора учёта на (дата справки)", date, 14), F("Инженер по работе с потребителями", C("inzh", false, "Фамилия И.О."), 22),
-            F("Начальник ГРП", C("nach", false, "Фамилия И.О."), 22));
+        c.Grid.Row(F("Данные прибора учёта на (дата справки)", date, 14), F("Инженер по работе с потребителями", C("inzh", false, "Фамилия И.О."), 20),
+            F("Должность начальника", C("nach_dolzh", false, "Начальник ГРП"), 16), F("Начальник (подпись)", C("nach", false, "Фамилия И.О."), 20));
 
         c.Grid.Row(F(null, X("dve", "Два экземпляра на листе (линия отреза посередине)"), 40), F(null, X("qr", "QR-код на справке (для журнала ответов)"), 34));
 
@@ -20019,6 +20115,7 @@ public class SpravkaForm : Form {
             List<string> names = new List<string>();
             foreach (string[] s in lists.Signers()) names.Add(s[0]);
             Items("nach", names);
+            Items("nach_dolzh", lists.Get("Должность начальника"));
             Items("mesto", With(lists.Get("Справка: где установлен прибор учёта"), memory.Hist("место справки")));
             Items("prinadl", lists.Get("Справка: чья собственность"));
             Items("vlad", new List<string>(new string[] { "1 владелец", "2 владельца", "3 владельца", "4 владельца", "5 владельцев" }));
@@ -20282,6 +20379,7 @@ public class SpravkaForm : Form {
             string eng = memory.Get("СправкаИнженер", "");
             SetV("inzh", Engineers().Contains(eng) ? eng : First(Engineers()));
             SetV("nach", memory.Get("СправкаНачальник", First(Names())));
+            SetV("nach_dolzh", memory.Get("СправкаДолжностьНачальника", First(lists.Get("Должность начальника"))));
             SetV("vlad", "1 владелец");
             SetV("prinadl", First(lists.Get("Справка: чья собственность")));
             SetV("zakl", First(lists.Get("Справка: заключение")));
@@ -20565,6 +20663,7 @@ public class SpravkaForm : Form {
         v["РЕГИСТРАЦИЯ"] = V("reg").Length > 0 ? V("reg") : line;
         v["ИНЖЕНЕР"] = V("inzh");
         v["НАЧАЛЬНИК"] = V("nach");
+        v["НАЧДОЛЖН"] = V("nach_dolzh").Length > 0 ? V("nach_dolzh") : "Начальник ГРП";
         // строки, отключённые галочкой, - из справки убираются
         if (V("on_egrni") != "1") v["СВИДЕТЕЛЬСТВО"] = v["ВЛАДЕЛЬЦЫ"] = DocxTemplate.Drop;
         if (V("on_mesto") != "1") v["МЕСТО"] = v["ПРИНАДЛЕЖНОСТЬ"] = DocxTemplate.Drop;
@@ -20776,6 +20875,7 @@ public class SpravkaForm : Form {
             try { SaveData(name, id); } catch (Exception ex) { dataError = ex.Message; }
             memory.Values["СправкаИнженер"] = V("inzh");
             memory.Values["СправкаНачальник"] = V("nach");
+            memory.Values["СправкаДолжностьНачальника"] = V("nach_dolzh");
             memory.Values["СправкаБезСтрок"] = OffLines();
             memory.Values["СправкаQR"] = V("qr");
             memory.Values["СправкаДвеКопии"] = V("dve");
@@ -27398,9 +27498,10 @@ public class BsForm : Form {
 
         c = new Card("Подписи и даты", "инженер и начальник - из справочника; даты документов", 4);
         cards.Add(c);
-        c.Grid.Row(F("Инженер (Фамилия И.О.)", C("inzh", null), 20), F("Инженер полностью (акт)", T("inzh_fio", null), 0), F("Начальник ГРП", C("nach", null), 18));
+        c.Grid.Row(F("Инженер (Фамилия И.О.)", C("inzh", null), 18), F("Инженер полностью (акт)", T("inzh_fio", null), 0),
+            F("Должность начальника", C("nach_dolzh", null), 16), F("Начальник (Фамилия И.О.)", C("nach", null), 16));
         c.Grid.Row(F("Данные ПУ на (справка)", D("data_pu"), 14), F("Дата подписей (справка)", D("data_podp"), 14), F("Дата акта", D("data_akt"), 14));
-        Field("inzh", "Инженер", c.Name); Field("inzh_fio", "Инженер полностью", c.Name); Field("nach", "Начальник ГРП", c.Name);
+        Field("inzh", "Инженер", c.Name); Field("inzh_fio", "Инженер полностью", c.Name); Field("nach", "Начальник", c.Name);
 
         c = new Card("Документы", "что сформировать в папку пакета", 4);
         cards.Add(c);
@@ -27437,6 +27538,7 @@ public class BsForm : Form {
             Items("prichina", With(lists.Get("Наряд: причина"), memory.Hist("наряд причина")));
             Items("inzh", Engineers());
             Items("nach", Names());
+            Items("nach_dolzh", lists.Get("Должность начальника"));
             pu.SetItems(0, lists.Get("БС: точка учёта"));
             pu.SetItems(1, With(lists.Get("БС: тип счётчика"), memory.Hist("бс счётчик")));
             pu.SetItems(3, lists.Get("БС: напряжение"));
@@ -27819,6 +27921,7 @@ public class BsForm : Form {
             string eng = memory.Get("БСИнженер", "");
             SetV("inzh", Engineers().Contains(eng) ? eng : First(Engineers()));
             SetV("nach", memory.Get("БСНачальник", First(Names())));
+            SetV("nach_dolzh", memory.Get("БСДолжностьНачальника", First(lists.Get("Должность начальника"))));
             string docs = memory.Get("БСДокументы", "11111");
             for (int i = 0; i < Docs.Length; i++) SetV(Docs[i][0], i < docs.Length && docs[i] == '0' ? "" : "1");
             ResetAutos();
@@ -27926,6 +28029,10 @@ public class BsForm : Form {
         v["ИНЖЕНЕР"] = V("inzh");
         v["ИНЖЕНЕРФИО"] = V("inzh_fio").Length > 0 ? V("inzh_fio") : V("inzh");
         v["НАЧАЛЬНИК"] = V("nach");
+        // 24.11: должность начальника - на выбор (ГРП / ОПСУ); в доп. соглашении у ГРП - «Начальник ГРП ОПСУ», как в образце
+        string pos = V("nach_dolzh").Length > 0 ? V("nach_dolzh") : "Начальник ГРП";
+        v["НАЧДОЛЖН"] = pos;
+        v["НАЧДОЛЖНДС"] = pos == "Начальник ГРП" ? "Начальник ГРП  ОПСУ" : pos;
         v["ДАТАПУ"] = V("data_pu");
         v["ДАТАПОДП"] = V("data_podp");
         DateTime a = ((DateBox)inp["data_akt"]).Value;
@@ -28152,6 +28259,7 @@ public class BsForm : Form {
         memory.Values["БСМаркировка"] = V("plomba_marka");
         memory.Values["БСИнженер"] = V("inzh");
         memory.Values["БСНачальник"] = V("nach");
+        memory.Values["БСДолжностьНачальника"] = V("nach_dolzh");
         StringBuilder docs = new StringBuilder();
         foreach (string[] d in Docs) docs.Append(V(d[0]) == "1" ? '1' : '0');
         memory.Values["БСДокументы"] = docs.ToString();
@@ -29017,7 +29125,7 @@ public class UdalenieForm : Form {
         two.ForeColor = St.Text;
         two.BackColor = Color.Transparent;
         Reg("dve", two);
-        c.Grid.Row(F("Инженер", C("inzh", null), 20), F("Дата", date, 14), F("Начальник ГРП", C("nach", null), 20));
+        c.Grid.Row(F("Инженер", C("inzh", null), 18), F("Дата", date, 14), F("Должность начальника", C("nach_dolzh", null), 16), F("Начальник", C("nach", null), 18));
         // 24.11: подписывает и начальник ОПСУ (строка под начальником ГРП)
         c.Grid.Row(F("Начальник ОПСУ", C("opsu", null), 20), F(null, two, 0));
     }
@@ -29033,6 +29141,7 @@ public class UdalenieForm : Form {
             List<string> n = new List<string>();
             foreach (string[] s in lists.Signers()) n.Add(s[0]);
             Items("nach", n);
+            Items("nach_dolzh", lists.Get("Должность начальника"));
             Items("opsu", n);
             pu.SetItems(0, Types());
         } finally { loading = was; }
@@ -29200,6 +29309,7 @@ public class UdalenieForm : Form {
             foreach (string[] sg in lists.Signers()) names.Add(sg[0]);
             SetV("nach", memory.Get("УдалениеНачальник", memory.Get("СправкаНачальник", First(names))));
             SetV("opsu", memory.Get("УдалениеНачальникОПСУ", ""));
+            SetV("nach_dolzh", memory.Get("УдалениеДолжностьНачальника", First(lists.Get("Должность начальника"))));
             savedName = null;
         } finally { loading = false; }
         dirty = false;
@@ -29316,6 +29426,7 @@ public class UdalenieForm : Form {
         v["ИНЖЕНЕР"] = V("inzh");
         v["НАЧАЛЬНИК"] = V("nach");
         v["ОПСУ"] = V("opsu");
+        v["НАЧДОЛЖН"] = V("nach_dolzh").Length > 0 ? V("nach_dolzh") : "Начальник ГРП";
         v["ДАТА"] = V("data");
         v["ГОД"] = ((DateBox)inp["data"]).Value.Year.ToString();
         return v;
@@ -29336,7 +29447,7 @@ public class UdalenieForm : Form {
             case "adres": return "адрес";
             case "pu": return "прибор учёта";
             case "inzh": return "инженер";
-            case "nach": return "начальник ГРП";
+            case "nach": return "начальник";
             case "opsu": return "начальник ОПСУ";
             default: return k;
         }
@@ -29433,6 +29544,7 @@ public class UdalenieForm : Form {
         memory.Values["УдалениеИнженер"] = V("inzh");
         memory.Values["УдалениеНачальник"] = V("nach");
         memory.Values["УдалениеНачальникОПСУ"] = V("opsu");
+        memory.Values["УдалениеДолжностьНачальника"] = V("nach_dolzh");
         memory.Save();
         savedName = name;
         dirty = false;

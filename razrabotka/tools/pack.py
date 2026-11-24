@@ -7,8 +7,13 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
 SP = '/tmp/claude-0/-home-user-Test/ecddb7b9-ba2d-55d0-b8b6-3d6ae08ebda9/scratchpad'
 SKIP = {'TREBOVANIYA.md'}
 def files(folder):
-    d = os.path.join(ROOT, folder)
-    return sorted(f for f in os.listdir(d) if os.path.isfile(os.path.join(d, f)) and f not in SKIP)
+    # ТОЛЬКО файлы из git: рабочие файлы программ (nastroiki.txt, spravochniki.txt, otchet*.txt...) появляются от проверок под Mono -
+    # 24.11 они попали в архив и затёрли у пользователя его справочники и настройки. Так больше нельзя.
+    import subprocess
+    out = subprocess.run(['git', '-C', ROOT, 'ls-files', '--', folder], capture_output=True, text=True, check=True).stdout.split('\n')
+    names = sorted(os.path.basename(f) for f in out if f.strip() and os.path.dirname(f) == folder)
+    bad = {'nastroiki.txt', 'spravochniki.txt', 'otchet.txt', 'rabotaet.txt', 'oshibki.txt', 'istoriya.txt'}
+    return [n for n in names if n not in SKIP and n not in bad and os.path.isfile(os.path.join(ROOT, folder, n))]
 def write(zpath, pairs):
     with zipfile.ZipFile(zpath, 'w', zipfile.ZIP_DEFLATED) as z:
         for src, name in pairs: z.write(src, name)

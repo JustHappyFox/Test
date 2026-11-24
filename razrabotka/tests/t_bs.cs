@@ -23,7 +23,7 @@ public static class T {
                     new string[] { "moshn", "ЩУЭ|20|-|24 ч/сут.|Без выходных\nЩУНИ|5|-|24 ч/сут.|Без выходных" },
                     new string[] { "plomba_klemm", "1111111" }, new string[] { "plomba_vvod", "2222222, 2222223" }, new string[] { "va_tok", "63" },
                     new string[] { "minus_on", "1" }, new string[] { "minus_x", "33333333" }, new string[] { "minus_y", "44444444" },
-                    new string[] { "shema", shema } };
+                    new string[] { "shema", shema }, new string[] { "nach_dolzh", Environment.GetEnvironmentVariable("T_DOLZH") ?? "Начальник ГРП" } };
                 foreach (string[] x in v) b.SetV(x[0], x[1]);
                 b.SetV("linii", "0,4|АВБбШв-5х16|0,05||");
                 // как будто марку выбрали руками: r0 и Rл - сами
