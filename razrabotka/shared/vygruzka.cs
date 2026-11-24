@@ -1103,6 +1103,29 @@ public static class VygruzkaByt {
 
     public static string Build(string xlsx, VygProgress progress) { return Build(VygKind.Byt, xlsx, progress); }
 
+    // юр база в .dbf (читается как есть, своя копия не нужна): прочитать заголовок - сколько строк, есть ли нужные поля
+    public static string CheckDbf(string path, out bool ok) {
+        ok = false;
+        try {
+            byte[] h = new byte[32];
+            List<string> fields = new List<string>();
+            long count;
+            using (FileStream fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete)) {
+                if (fs.Read(h, 0, 32) < 32) return "Юр база " + Path.GetFileName(path) + " - не таблица DBF (файл слишком короткий).";
+                count = (uint)(h[4] | (h[5] << 8) | (h[6] << 16) | (h[7] << 24));
+                int headerLen = h[8] | (h[9] << 8);
+                byte[] f = new byte[32];
+                for (int p = 32; p + 32 <= headerLen && fs.Read(f, 0, 32) == 32 && f[0] != 0x0D; p += 32)
+                    fields.Add(Encoding.ASCII.GetString(f, 0, 11).Split('\0')[0].Trim().ToUpperInvariant());
+            }
+            if (fields.Count == 0) return "Юр база " + Path.GetFileName(path) + " - не таблица DBF (нет полей).";
+            if (!fields.Contains("KP") || !fields.Contains("NAB"))
+                return "В юр базе " + Path.GetFileName(path) + " нет полей KP и NAB - нужна таблица точек учёта FTU (KP, NP, NAB, NAB_NAIM, NAIM, NST, TIPSCH...).";
+            ok = true;
+            return "Юр база (DBF, читается как есть): " + count.ToString("#,0") + " строк, от " + File.GetLastWriteTime(path).ToString("dd.MM.yyyy HH:mm") + ".";
+        } catch (Exception ex) { return "Юр база " + Path.GetFileName(path) + " не читается: " + ex.Message; }
+    }
+
     // Пересоздать копию выгрузки (быт, наряды, юр лица). Пишется во временные файлы, готовое заменяет старое (прервалось - старое
     // цело). Строки без ключевого столбца (у быта - НОМЕР, у нарядов - Н_З, у юр - KP) пропускаются. Возвращает итог для окна.
     public static string Build(VygKind kind, string xlsx, VygProgress progress) {

@@ -1128,6 +1128,29 @@ public static class VygruzkaByt {
 
     public static string Build(string xlsx, VygProgress progress) { return Build(VygKind.Byt, xlsx, progress); }
 
+    // юр база в .dbf (читается как есть, своя копия не нужна): прочитать заголовок - сколько строк, есть ли нужные поля
+    public static string CheckDbf(string path, out bool ok) {
+        ok = false;
+        try {
+            byte[] h = new byte[32];
+            List<string> fields = new List<string>();
+            long count;
+            using (FileStream fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete)) {
+                if (fs.Read(h, 0, 32) < 32) return "Юр база " + Path.GetFileName(path) + " - не таблица DBF (файл слишком короткий).";
+                count = (uint)(h[4] | (h[5] << 8) | (h[6] << 16) | (h[7] << 24));
+                int headerLen = h[8] | (h[9] << 8);
+                byte[] f = new byte[32];
+                for (int p = 32; p + 32 <= headerLen && fs.Read(f, 0, 32) == 32 && f[0] != 0x0D; p += 32)
+                    fields.Add(Encoding.ASCII.GetString(f, 0, 11).Split('\0')[0].Trim().ToUpperInvariant());
+            }
+            if (fields.Count == 0) return "Юр база " + Path.GetFileName(path) + " - не таблица DBF (нет полей).";
+            if (!fields.Contains("KP") || !fields.Contains("NAB"))
+                return "В юр базе " + Path.GetFileName(path) + " нет полей KP и NAB - нужна таблица точек учёта FTU (KP, NP, NAB, NAB_NAIM, NAIM, NST, TIPSCH...).";
+            ok = true;
+            return "Юр база (DBF, читается как есть): " + count.ToString("#,0") + " строк, от " + File.GetLastWriteTime(path).ToString("dd.MM.yyyy HH:mm") + ".";
+        } catch (Exception ex) { return "Юр база " + Path.GetFileName(path) + " не читается: " + ex.Message; }
+    }
+
     // Пересоздать копию выгрузки (быт, наряды, юр лица). Пишется во временные файлы, готовое заменяет старое (прервалось - старое
     // цело). Строки без ключевого столбца (у быта - НОМЕР, у нарядов - Н_З, у юр - KP) пропускаются. Возвращает итог для окна.
     public static string Build(VygKind kind, string xlsx, VygProgress progress) {
@@ -14793,6 +14816,11 @@ public class BaseLink {
             string saved = pf != null && pf.Line(0).Length > 0 ? pf.Line(0) : Get(settings, "БазаПапка");
             FromPoisk = pf != null && pf.Line(0).Length > 0;
             Folder = Places.FindFolder(saved.Length > 0 ? saved : null);
+            // базы нет (другой компьютер, нетбук), а выгрузка быта и её индексы готовы - берётся выгрузка, хоть режим и «как раньше»
+            if (!Directory.Exists(Folder) && Istochnik.BytCacheProblem() == null) {
+                try { OpenExcel(); } catch (Exception ex) { Error = "выгрузка быта не открылась: " + ex.Message; Base = null; }
+                return;
+            }
             if (!Directory.Exists(Folder)) throw new Exception("нет доступа к папке базы " + Folder);
             Table = pf != null ? pf.Line(1) : "";
             if (Table.Length == 0 || !File.Exists(Path.Combine(Folder, Table))) Table = Get(settings, "БазаТаблица");
@@ -25052,6 +25080,12 @@ public class JurBase {
         try { return dir.Length > 0 && File.Exists(Path.Combine(dir, "TU_.DAT")) && File.Exists(Path.Combine(dir, "ABON_.DAT")); } catch { return false; }
     }
 
+    public static bool Found(string saved) {
+        if (saved != null && saved.Length > 0 && IsBase(saved)) return true;
+        foreach (string d in Usual) if (IsBase(d)) return true;
+        return false;
+    }
+
     // папка: запомненная (если в ней есть TU_ и ABON_), иначе обычные места
     public static JurBase Open(string saved) {
         List<string> places = new List<string>();
@@ -25064,7 +25098,8 @@ public class JurBase {
                 b.Updated = File.GetLastWriteTime(Path.Combine(d, "TU_.DAT"));
                 return b;
             }
-        throw new Exception("не найдена база юр лиц (таблицы TU_.DAT и ABON_.DAT) - проверьте диск L: (\\\\FSO\\dolg_vse) или укажите папку в «Перевод из юр в физ»");
+        throw new Exception("не найдена база юр лиц (таблицы TU_.DAT и ABON_.DAT) - проверьте диск L: (\\\\FSO\\dolg_vse) или укажите папку в «Перевод из юр в физ»; "
+            + "или укажите выгрузку юр лиц (таблица FTU .dbf) в меню программ: «Настройки…»");
     }
 
     static ClarionField Need(ClarionFile c, string name) {
@@ -25670,6 +25705,7 @@ public class JurPick : Form {
             y += c ? 50 : 54;
             status.SetBounds(x, y, w, c ? 38 : 58);
             y += c ? 40 : 62;
+            if (c) { Compact(body, lsCap, x, y, w); return; }
             int bottom = c ? 150 : 212, free = body.ClientSize.Height - y - bottom;
             abCap.SetBounds(x, y, w, 18);
             abons.SetBounds(x, y + 20, w, Math.Max(c ? 56 : 70, free * 2 / 5 - 22));
@@ -25700,6 +25736,53 @@ public class JurPick : Form {
             if (Home != null && e.CloseReason == CloseReason.UserClosing) { e.Cancel = true; GoBack(); }
         };
         Shown += delegate { body.PerformLayout(); OnResize(EventArgs.Empty); npBox.Focus(); ShowChoice(); };
+    }
+
+    // маленький экран (нетбук 1024x600): таблицы - в два ряда по высоте поровну, справа от них - соседи и лицевой; внизу - «В договор» и
+    // кнопки; столбцы таблиц ужимаются по ширине (без прокрутки вбок)
+    void Compact(Panel body, Label lsCap, int x, int y, int w) {
+        int H = body.ClientSize.Height, W = body.ClientSize.Width;
+        int bh = 36, by = H - 56;                  // снизу - полоса 56: «В договор» (три строки) и кнопки
+        int rw = 300, lw = w - rw - 12, rx = x + lw + 12;
+        int avail = by - 6 - y, half = Math.Max(60, (avail - 6) / 2);
+        abCap.SetBounds(x, y, lw, 18);
+        abons.SetBounds(x, y + 20, lw, half - 20);
+        nearCap.SetBounds(rx, y, rw, 18);
+        near.SetBounds(rx, y + 20, rw, half - 20);
+        int y2 = y + half + 6;
+        ptCap.SetBounds(x, y2, lw, 18);
+        points.SetBounds(x, y2 + 20, lw, Math.Max(40, by - 6 - y2 - 20));
+        lsCap.SetBounds(rx, y2, rw, 18);
+        prefixBox.SetBounds(rx, y2 + 20, 64, 26);
+        lsBox.SetBounds(rx + 72, y2 + 20, rw - 72, 26);
+        lsNote.SetBounds(rx, y2 + 50, rw, Math.Max(18, by - 6 - y2 - 50));
+        int cw = 200, sw = 150, uw = 170;
+        create.Text = "Создать договор";
+        create.SetBounds(W - 24 - cw, by + 10, cw, bh);
+        createSpr.SetBounds(create.Left - 10 - sw, by + 10, sw, bh);
+        createUd.SetBounds(createSpr.Left - 10 - uw, by + 10, uw, bh);
+        what.SetBounds(x, by, Math.Max(100, createUd.Left - 12 - x), 56);
+        // ширины столбцов для узкой таблицы: главное - договор, наименования, квартира, счётчик, тип
+        if (abons.Tag == null) abons.Tag = new int[] { 70, 190, 45, 170, 150, 150 };
+        if (points.Tag == null) points.Tag = new int[] { 130, 105, 110, 70, 85, 85, 40, 45, 90 };
+        FitColumns(abons);
+        FitColumns(points);
+        FitColumns(near);
+    }
+
+    // столбцы - по ширине таблицы (пропорционально исходным), чтобы не было прокрутки вбок
+    static void FitColumns(ListView lv) {
+        int[] base0 = lv.Tag as int[];
+        if (base0 == null) {
+            base0 = new int[lv.Columns.Count];
+            for (int i = 0; i < base0.Length; i++) base0[i] = lv.Columns[i].Width;
+            lv.Tag = base0;
+        }
+        int sum = 0;
+        foreach (int v in base0) sum += v;
+        int room = lv.ClientSize.Width - SystemInformation.VerticalScrollBarWidth - 4;
+        if (sum <= 0 || room <= 0) return;
+        for (int i = 0; i < base0.Length; i++) lv.Columns[i].Width = Math.Max(30, base0[i] * room / sum);
     }
 
     static void Columns(ListView lv, string[] heads, int[] widths) {
@@ -25763,7 +25846,11 @@ public class JurPick : Form {
             FlatLs ls = null;
             try {
                 // данные из Excel-выгрузок (меню программ: «Настройки…») - юр база из таблицы FTU, иначе - база «Долгов района»
-                jb = Istochnik.UseExcel ? JurBase.OpenFtu() : JurBase.Open(saved);
+                // какой режим ни выбран, берётся то, что есть: указана выгрузка юр лиц, а базы «Долгов района» нет (нетбук) - выгрузка;
+                // режим Excel без выгрузки юр лиц, а база «Долгов района» есть - база
+                bool export = Istochnik.Missing("юр лиц", Istochnik.JurPath) == null;
+                bool ftu = Istochnik.UseExcel ? export || !JurBase.Found(saved) : export && !JurBase.Found(saved);
+                jb = ftu ? JurBase.OpenFtu() : JurBase.Open(saved);
                 found = jb.Find(np, ul, dom, kv, kp);
             } catch (Exception ex) { err = ex.Message; }
             BaseLink b = Base();

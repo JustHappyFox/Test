@@ -1123,6 +1123,29 @@ public static class VygruzkaByt {
 
     public static string Build(string xlsx, VygProgress progress) { return Build(VygKind.Byt, xlsx, progress); }
 
+    // юр база в .dbf (читается как есть, своя копия не нужна): прочитать заголовок - сколько строк, есть ли нужные поля
+    public static string CheckDbf(string path, out bool ok) {
+        ok = false;
+        try {
+            byte[] h = new byte[32];
+            List<string> fields = new List<string>();
+            long count;
+            using (FileStream fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete)) {
+                if (fs.Read(h, 0, 32) < 32) return "Юр база " + Path.GetFileName(path) + " - не таблица DBF (файл слишком короткий).";
+                count = (uint)(h[4] | (h[5] << 8) | (h[6] << 16) | (h[7] << 24));
+                int headerLen = h[8] | (h[9] << 8);
+                byte[] f = new byte[32];
+                for (int p = 32; p + 32 <= headerLen && fs.Read(f, 0, 32) == 32 && f[0] != 0x0D; p += 32)
+                    fields.Add(Encoding.ASCII.GetString(f, 0, 11).Split('\0')[0].Trim().ToUpperInvariant());
+            }
+            if (fields.Count == 0) return "Юр база " + Path.GetFileName(path) + " - не таблица DBF (нет полей).";
+            if (!fields.Contains("KP") || !fields.Contains("NAB"))
+                return "В юр базе " + Path.GetFileName(path) + " нет полей KP и NAB - нужна таблица точек учёта FTU (KP, NP, NAB, NAB_NAIM, NAIM, NST, TIPSCH...).";
+            ok = true;
+            return "Юр база (DBF, читается как есть): " + count.ToString("#,0") + " строк, от " + File.GetLastWriteTime(path).ToString("dd.MM.yyyy HH:mm") + ".";
+        } catch (Exception ex) { return "Юр база " + Path.GetFileName(path) + " не читается: " + ex.Message; }
+    }
+
     // Пересоздать копию выгрузки (быт, наряды, юр лица). Пишется во временные файлы, готовое заменяет старое (прервалось - старое
     // цело). Строки без ключевого столбца (у быта - НОМЕР, у нарядов - Н_З, у юр - KP) пропускаются. Возвращает итог для окна.
     public static string Build(VygKind kind, string xlsx, VygProgress progress) {
@@ -1901,6 +1924,8 @@ public class DataSettingsForm : Form {
         bool bad = false;
         for (int i = 0; i < 3; i++) {
             string p = paths[i].Text.Trim();
+            // юр база .dbf - проверить таблицу (своя копия не нужна)
+            if (p.Length > 0 && !KindsOf[i].NeedsCopy(p) && File.Exists(p)) { bool ok; lines.Add(VygruzkaByt.CheckDbf(p, out ok)); if (!ok) bad = true; continue; }
             if (p.Length == 0 || !KindsOf[i].NeedsCopy(p)) continue;
             string problem = KindsOf[i].Problem(p);
             if (problem != null) { bad = true; lines.Add(problem.Replace(" Меню программ: «Настройки…» -> «Обновить индексы».", " - «Обновить индексы».").Replace(" Укажите его в меню программ: «Настройки…».", "").Replace(" Проверьте путь в меню программ: «Настройки…».", "")); }
@@ -1909,7 +1934,7 @@ public class DataSettingsForm : Form {
         if (lines.Count == 0) lines.Add("Индексы: выгрузки не указаны.");
         indexState.Text = string.Join("\n", lines.ToArray());
         indexState.ForeColor = !bad ? Pal.Good : excel ? Pal.Bad : Pal.Hint;
-        rebuild.Enabled = !building && ToBuild().Count > 0;
+        rebuild.Enabled = !building && (ToBuild().Count > 0 || JurDbf() != null);
     }
 
     // какие выгрузки переводить в свою копию: указан файл, он есть, копия нужна (не .dbf юр базы)
@@ -1920,6 +1945,12 @@ public class DataSettingsForm : Form {
             if (Istochnik.Missing(Kinds[i], p) == null && KindsOf[i].NeedsCopy(p)) r.Add(i);
         }
         return r;
+    }
+
+    // юр база - таблица .dbf (есть файл): её «Обновить индексы» только проверяет
+    string JurDbf() {
+        string p = paths[1].Text.Trim();
+        return p.Length > 0 && !KindsOf[1].NeedsCopy(p) && File.Exists(p) ? p : null;
     }
 
     bool AnyProblem() {
@@ -1943,7 +1974,8 @@ public class DataSettingsForm : Form {
     // перевести выгрузки (быт, наряды, юр в .xlsx) в свои копии - по очереди, в фоне, окно показывает ход
     public void Rebuild() {
         List<int> todo = ToBuild();
-        if (building || todo.Count == 0) return;
+        string jurDbf = JurDbf();
+        if (building || (todo.Count == 0 && jurDbf == null)) return;
         building = true;
         rebuild.Enabled = save.Enabled = false;
         progress.ForeColor = Pal.Hint;
@@ -1960,6 +1992,7 @@ public class DataSettingsForm : Form {
                     }));
                 } catch (Exception ex) { results.Add("Индексы выгрузки " + Kinds[i] + " не созданы: " + ex.Message); ok = false; }
             }
+            if (jurDbf != null) { bool fine; results.Add(VygruzkaByt.CheckDbf(jurDbf, out fine)); if (!fine) ok = false; }
             string result = string.Join("\n", results.ToArray());
             try {
                 BeginInvoke((MethodInvoker)delegate {
