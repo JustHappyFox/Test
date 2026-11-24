@@ -57,3 +57,20 @@ else:
     d.rep('public class SealRow {', jn + '\n\npublic class SealRow {')
 d.save()
 print('dogovor/dogovor.ps1 юр наряд ок')
+
+# блоки нарядов из выгрузки: данные - «Поиск» и «Договор», окно - только «Поиск» (перед классом CopyText / SealRow)
+def block(src, begin, end, prog, anchor):
+    code = open(os.path.join(ROOT, 'razrabotka', 'src', src), encoding='utf-8-sig').read().replace('\r\n', '\n').strip('\n')
+    assert "\n'@" not in code
+    d = Doc(os.path.join(ROOT, prog))
+    if begin in d.t:
+        a = d.t.index(begin); b = d.t.index(end) + len(end)
+        d.t = d.t[:a] + code + d.t[b:]
+    else:
+        d.rep(anchor, code + '\n\n' + anchor)
+    d.save()
+    print(prog, src, 'ок')
+
+block('nar_excel.cs', '// ==== БЛОК НАРЯДОВ ИЗ ВЫГРУЗКИ', '// ==== КОНЕЦ БЛОКА НАРЯДОВ ИЗ ВЫГРУЗКИ ====', 'prosmotr-bazy/prosmotr.ps1', 'public static class CopyText {')
+block('nar_excel_form.cs', '// ==== БЛОК ОКНА НАРЯДОВ ИЗ ВЫГРУЗКИ', '// ==== КОНЕЦ БЛОКА ОКНА НАРЯДОВ ИЗ ВЫГРУЗКИ ====', 'prosmotr-bazy/prosmotr.ps1', 'public static class CopyText {')
+block('nar_excel.cs', '// ==== БЛОК НАРЯДОВ ИЗ ВЫГРУЗКИ', '// ==== КОНЕЦ БЛОКА НАРЯДОВ ИЗ ВЫГРУЗКИ ====', 'dogovor/dogovor.ps1', 'public class SealRow {')

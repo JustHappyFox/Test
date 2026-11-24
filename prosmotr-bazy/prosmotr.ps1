@@ -128,6 +128,70 @@ public static class Istochnik {
     }
 }
 
+// Вид выгрузки: имя (для надписей), ключевой столбец (строки без него пропускаются), файлы своей копии
+public class VygKind {
+    public string Code, Name;
+    public string[] Keys;
+    public string Table, Info, Streets;
+
+    public static VygKind Byt { get { return Make("byt", "быта", new string[] { "НОМЕР" }, true); } }
+    public static VygKind Nar { get { return Make("nar", "нарядов", new string[] { "Н_З", "НОМЕР_НЗ", "N_NAR" }, false); } }
+    public static VygKind Jur { get { return Make("jur", "юр лиц", new string[] { "KP" }, false); } }
+
+    static VygKind Make(string code, string name, string[] keys, bool streets) {
+        VygKind k = new VygKind();
+        k.Code = code;
+        k.Name = name;
+        k.Keys = keys;
+        k.Table = Path.Combine(Istochnik.CacheFolder, code + ".dbf");
+        k.Info = Path.Combine(Istochnik.CacheFolder, code + "_info.txt");
+        k.Streets = streets ? Path.Combine(Istochnik.CacheFolder, code + "_ulicy.txt") : null;
+        return k;
+    }
+
+    public string Path0 { get { return Code == "byt" ? Istochnik.BytPath : Code == "nar" ? Istochnik.NaryadyPath : Istochnik.JurPath; } }
+
+    // своя копия выгрузки по файлу path: null - готова и свежая; иначе - что не так (юр база в .dbf копии не требует)
+    public string Problem(string path) {
+        string miss = Istochnik.Missing(Name, path);
+        if (miss != null) return miss;
+        path = path.Trim();
+        if (Code == "jur" && path.EndsWith(".dbf", StringComparison.OrdinalIgnoreCase)) return null;
+        if (!File.Exists(Table) || !File.Exists(Info) || (Streets != null && !File.Exists(Streets)))
+            return "Индексы выгрузки " + Name + " ещё не созданы. Меню программ: «Настройки…» -> «Обновить индексы».";
+        Dictionary<string, string> info = Istochnik.ReadInfo(Info);
+        string v;
+        if (string.Compare(info.TryGetValue("Файл", out v) ? v : "", Path.GetFullPath(path), StringComparison.OrdinalIgnoreCase) != 0)
+            return "Индексы созданы по другому файлу выгрузки " + Name + ". Меню программ: «Настройки…» -> «Обновить индексы».";
+        if ((info.TryGetValue("Версия", out v) ? v : "") != VygruzkaByt.Version)
+            return "Индексы выгрузки " + Name + " созданы прежней версией программы. Меню программ: «Настройки…» -> «Обновить индексы».";
+        try {
+            FileInfo fi = new FileInfo(path);
+            if ((info.TryGetValue("Размер", out v) ? v : "") != fi.Length.ToString() || (info.TryGetValue("Изменён", out v) ? v : "") != fi.LastWriteTimeUtc.Ticks.ToString())
+                return "Файл выгрузки " + Name + " заменён после создания индексов. Меню программ: «Настройки…» -> «Обновить индексы».";
+        } catch (Exception ex) { return "Выгрузка " + Name + " недоступна: " + ex.Message; }
+        return null;
+    }
+
+    public string Problem() { return Problem(Path0); }
+
+    // нужна ли своя копия (юр база в .dbf - читается как есть)
+    public bool NeedsCopy(string path) { return !(Code == "jur" && (path ?? "").Trim().EndsWith(".dbf", StringComparison.OrdinalIgnoreCase)); }
+
+    // таблица для чтения: своя копия или сам .dbf юр базы
+    public string TableFor(string path) { return NeedsCopy(path) ? Table : path.Trim(); }
+
+    // «выгрузка нарядов от 14.01.2026 10:02 (152 340 записей)»
+    public string About() {
+        Dictionary<string, string> info = Istochnik.ReadInfo(Info);
+        string when, rows;
+        info.TryGetValue("ФайлДата", out when);
+        info.TryGetValue("Строк", out rows);
+        if (!NeedsCopy(Path0)) { try { when = File.GetLastWriteTime(Path0.Trim()).ToString("dd.MM.yyyy HH:mm"); rows = null; } catch { } }
+        return "выгрузка " + Name + (when != null && when.Length > 0 ? " от " + when : "") + (rows != null && rows.Length > 0 ? " (" + rows + " записей)" : "");
+    }
+}
+
 // Чтение .xlsx без Excel и сторонних программ: zip (свой разбор + DeflateStream из .NET 2.0) и XML листа потоком
 public class XlsxBook : IDisposable {
     class Entry { public string Name; public int Method; public long Offset, Packed, Size; }
@@ -369,13 +433,17 @@ public static class VygruzkaByt {
         "АСКУЭ", "ASKUE", "МЕСТО_ПУ", "MESTO_PU", "ГОД_ЗАМ_ПУ", "GOD_ZPU", "КВАР_ЗАМ_П", "KV_ZPU", "М_ТЕЛ", "M_TEL",
         "СОГЛ_СМС", "SOGL_SMS", "СЕЛЬСОВЕТ", "SELSOVET", "U", "U", "ЭЛ_ПУ", "EL_PU", "МП_ИНТ", "MP_INT", "ДАТА_НЗ", "DATA_NZ:D",
         "РАБОТА", "RABOTA", "ДАТА_ИЗВ", "DATA_IZV:D", "ВИД_ИЗВ", "VID_IZV", "ДАТА_ДОГ", "DATA_DOG:D", "Д_ПЕРЕОФ", "D_PEREOF:D",
-        "КАТ_ГР", "KAT_GR", "ПР_ПЛ", "PR_PL" };
+        "КАТ_ГР", "KAT_GR", "ПР_ПЛ", "PR_PL",
+        // наряды
+        "NAB", "NAB", "Н_З", "NZ", "ДАТА_ОФ", "DOF:D", "ФИО_ПР", "FIO_PR", "НОМЕР_СЧ", "NCH", "РАЗ", "RAS", "ГОД_П", "GODPR", "ПОК_ПР", "POK_PR",
+        "ВИД_АСКУЭ", "VID_ASKUE", "ДАТА_ВЫП", "DVIP:D", "ФИО_ВЫП", "FIO_VIP", "ПРИМЕЧАНИЕ", "PRIM" };
 
     public class Column {
         public int Source;           // номер столбца в выгрузке
         public string Header;        // как подписан в выгрузке
         public string Field;         // поле копии
         public bool Date;
+        public bool Pad = true;      // NAB - лицевой: дополнить нулями до 9 (у юр базы NAB - код абонента в договоре, не трогать)
         public int Length = 1;
     }
 
@@ -449,7 +517,7 @@ public static class VygruzkaByt {
         if (v == null) return "";
         if (c.Date) return Date(v, numeric);
         if (numeric) v = Number(v);
-        if (c.Field == "NAB") {
+        if (c.Field == "NAB" && c.Pad) {
             string digits = "";
             foreach (char ch in v) if (ch >= '0' && ch <= '9') digits += ch;
             if (digits.Length > 0 && digits.Length < 9) return digits.PadLeft(9, '0');
@@ -462,9 +530,11 @@ public static class VygruzkaByt {
         return (ss + "|" + np + "|" + ul).ToLowerInvariant().Replace('ё', 'е');
     }
 
-    // Пересоздать копию выгрузки быта. Пишется во временные файлы, готовое заменяет старое (прервалось - старое цело).
-    // Возвращает итог для окна.
-    public static string Build(string xlsx, VygProgress progress) {
+    public static string Build(string xlsx, VygProgress progress) { return Build(VygKind.Byt, xlsx, progress); }
+
+    // Пересоздать копию выгрузки (быт, наряды, юр лица). Пишется во временные файлы, готовое заменяет старое (прервалось - старое
+    // цело). Строки без ключевого столбца (у быта - НОМЕР, у нарядов - Н_З, у юр - KP) пропускаются. Возвращает итог для окна.
+    public static string Build(VygKind kind, string xlsx, VygProgress progress) {
         DateTime t0 = DateTime.Now;
         string folder = Istochnik.CacheFolder;
         Directory.CreateDirectory(folder);
@@ -476,20 +546,22 @@ public static class VygruzkaByt {
         Dictionary<string, int> streetCodes = new Dictionary<string, int>();
         List<string[]> streets = new List<string[]>();
         using (XlsxBook book = new XlsxBook(xlsx)) {
-            if (progress != null) progress("Читаю выгрузку быта: тексты...");
+            if (progress != null) progress("Читаю выгрузку " + kind.Name + ": тексты...");
             book.LoadShared();
             string sheet = book.FirstSheet();
             string[] header = book.Header(sheet, out headerRow);
             cols = MapColumns(header);
+            if (kind.Code == "jur") foreach (Column c in cols) c.Pad = false;
             Column nab = null;
             foreach (Column c in cols) {
-                if (c.Field == "NAB") nab = c;
+                if (nab == null && Array.IndexOf(kind.Keys, Norm(c.Header)) >= 0) nab = c;
                 if (c.Field == "SELSOVET") ss = c.Source;
                 if (c.Field == "NP") np = c.Source;
                 if (c.Field == "ULICA") ul = c.Source;
             }
             if (nab == null)
-                throw new InvalidDataException("В первой строке выгрузки нет столбца «НОМЕР» (лицевой). Заголовки: " + string.Join(", ", header));
+                throw new InvalidDataException("В первой строке выгрузки " + kind.Name + " нет столбца «" + kind.Keys[0] + "». Заголовки: " + string.Join(", ", header));
+            if (kind.Streets == null) { ss = np = ul = -1; }
             int width = header.Length;
             // проход 1: длины полей, коды улиц
             int seen = 0;
@@ -506,11 +578,11 @@ public static class VygruzkaByt {
                     streetCodes[k] = streets.Count + 1;
                     streets.Add(new string[] { (streets.Count + 1).ToString(), np >= 0 ? cells[np] ?? "" : "", ul >= 0 ? cells[ul] ?? "" : "", ss >= 0 ? cells[ss] ?? "" : "" });
                 }
-                if (++seen % 20000 == 0 && progress != null) progress("Читаю выгрузку быта: " + seen.ToString("#,0") + " записей...");
+                if (++seen % 20000 == 0 && progress != null) progress("Читаю выгрузку " + kind.Name + ": " + seen.ToString("#,0") + " записей...");
             });
             foreach (Column c in cols) if (c.Date) c.Length = 8;
             // проход 2: запись копии
-            string tmpTable = Istochnik.BytTable + ".tmp";
+            string tmpTable = kind.Table + ".tmp";
             int ulLen = Math.Max(1, streets.Count.ToString().Length);
             using (FileStream fs = new FileStream(tmpTable, FileMode.Create, FileAccess.Write, FileShare.None, 1 << 16)) {
                 List<string> names = new List<string>();
@@ -537,19 +609,21 @@ public static class VygruzkaByt {
                     }
                     fs.Write(rec, 0, rec.Length);
                     written++;
-                    if (written % 20000 == 0 && progress != null) progress("Создаю индексы выгрузки быта: " + written.ToString("#,0") + " из " + seen.ToString("#,0") + "...");
+                    if (written % 20000 == 0 && progress != null) progress("Создаю индексы выгрузки " + kind.Name + ": " + written.ToString("#,0") + " из " + seen.ToString("#,0") + "...");
                 });
                 fs.WriteByte(0x1A);
                 rows = written;
                 fs.Seek(0, SeekOrigin.Begin);
                 WriteHeader(fs, names, types, lens, rows, recLen);
             }
-            // справочник улиц
-            string tmpStreets = Istochnik.BytStreets + ".tmp";
-            StringBuilder sb = new StringBuilder();
-            sb.AppendLine("# код\tнаселённый пункт\tулица\tсельсовет");
-            foreach (string[] s in streets) sb.AppendLine(string.Join("\t", s));
-            File.WriteAllText(tmpStreets, sb.ToString(), new UTF8Encoding(true));
+            // справочник улиц (у быта)
+            string tmpStreets = kind.Streets == null ? null : kind.Streets + ".tmp";
+            if (tmpStreets != null) {
+                StringBuilder sb = new StringBuilder();
+                sb.AppendLine("# код\tнаселённый пункт\tулица\tсельсовет");
+                foreach (string[] s in streets) sb.AppendLine(string.Join("\t", s));
+                File.WriteAllText(tmpStreets, sb.ToString(), new UTF8Encoding(true));
+            }
             // сведения о копии (без данных абонентов)
             StringBuilder info = new StringBuilder();
             info.AppendLine("Версия=" + Version);
@@ -563,14 +637,14 @@ public static class VygruzkaByt {
             List<string> map = new List<string>();
             foreach (Column c in cols) map.Add(c.Field + ":" + c.Header);
             info.AppendLine("Столбцы=" + string.Join(";", map.ToArray()));
-            string tmpInfo = Istochnik.BytInfo + ".tmp";
+            string tmpInfo = kind.Info + ".tmp";
             File.WriteAllText(tmpInfo, info.ToString(), new UTF8Encoding(true));
-            Replace(tmpTable, Istochnik.BytTable);
-            Replace(tmpStreets, Istochnik.BytStreets);
-            Replace(tmpInfo, Istochnik.BytInfo);
+            Replace(tmpTable, kind.Table);
+            if (tmpStreets != null) Replace(tmpStreets, kind.Streets);
+            Replace(tmpInfo, kind.Info);
         }
-        return "Индексы выгрузки быта созданы: " + rows.ToString("#,0") + " записей, улиц " + streets.Count.ToString("#,0")
-            + (skipped > 0 ? ", строк без лицевого пропущено " + skipped.ToString("#,0") : "") + ", "
+        return "Индексы выгрузки " + kind.Name + " созданы: " + rows.ToString("#,0") + " записей" + (kind.Streets != null ? ", улиц " + streets.Count.ToString("#,0") : "")
+            + (skipped > 0 ? ", строк без «" + kind.Keys[0] + "» пропущено " + skipped.ToString("#,0") : "") + ", "
             + (DateTime.Now - t0).TotalSeconds.ToString("0") + " с.";
     }
 
@@ -623,10 +697,12 @@ public static class VygruzkaByt {
     }
 
     // подписи полей копии: поле -> заголовок выгрузки
-    public static Dictionary<string, string> Labels() {
+    public static Dictionary<string, string> Labels() { return Labels(VygKind.Byt); }
+
+    public static Dictionary<string, string> Labels(VygKind kind) {
         Dictionary<string, string> d = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         string cols;
-        Istochnik.ReadInfo(Istochnik.BytInfo).TryGetValue("Столбцы", out cols);
+        Istochnik.ReadInfo(kind.Info).TryGetValue("Столбцы", out cols);
         if (cols != null)
             foreach (string pair in cols.Split(';')) {
                 int c = pair.IndexOf(':');
@@ -4902,7 +4978,13 @@ public class BaseCard : Form {
     }
 
     internal void ShowNaryady() {
-        if (live != null && live.Mem != null) { MessageBox.Show(this, (Istochnik.Missing("нарядов", Istochnik.NaryadyPath) ?? "Наряды из выгрузки нарядов подключим, когда будет образец выгрузки."), Text); return; }
+        if (live != null && live.Mem != null) {
+            // режим Excel: наряды лицевого - из выгрузки нарядов
+            if (Field("NAB").Length == 0) { System.Media.SystemSounds.Beep.Play(); return; }
+            LastWindow = new NarExcelForm(Field("NAB"), Who());
+            LastWindow.Show(this);
+            return;
+        }
         if (live == null || Field("NAB").Length == 0) { System.Media.SystemSounds.Beep.Play(); return; }
         LastWindow = new NaryadLsForm(Path.GetDirectoryName(live.FilePath), Field("NAB"), Who());
         LastWindow.Show(this);
@@ -8040,12 +8122,15 @@ public class AbonentSearch : Form {
     }
 
     internal NaryadForm LastNaryad;
+    internal NarExcelForm LastNarExcel;
 
     // окно нарядов: по номеру - выполнен или нет (таблица нарядов - в папке базы)
     internal void OpenNaryady() {
         if (excelMode) {
-            MessageBox.Show(this, "Сейчас данные берутся из Excel-выгрузки (меню программ: «Настройки…»).\n\n" +
-                (Istochnik.Missing("нарядов", Istochnik.NaryadyPath) ?? "Наряды из выгрузки нарядов подключим, когда будет образец выгрузки."), Text);
+            // наряды - из выгрузки нарядов (меню программ «Настройки…»)
+            NarExcelForm nf = new NarExcelForm(null, null);
+            LastNarExcel = nf;
+            nf.Show(this);
             return;
         }
         if (folder == null || !Directory.Exists(folder)) {
@@ -11559,6 +11644,292 @@ public class HistoryForm : Form {
         Close();
     }
 }
+
+// ==== БЛОК НАРЯДОВ ИЗ ВЫГРУЗКИ (исходник - razrabotka/src/nar_excel.cs; здесь не править - вставляется скриптом inject.py) ====
+// Наряды из Excel-выгрузки (меню программ «Настройки…»; своя копия nar.dbf - «Обновить индексы»): по № наряда (ГодНомер) и по
+// лицевому. Поля копии: NZ № наряда, DOF дата оформления, RABOTA работа, NAB лицевой, FIO, NP, ULICA, DOM, KOR, KV, FIO_PR принял,
+// FIO_VIP выполнил (пусто - не выполнен), DVIP дата выполнения, TIPCH, NCH счётчик, PRIM примечание. Только чтение; одна загрузка.
+public class NarExcel {
+    public DbfTable T;
+    public string About = "";
+    readonly Dictionary<string, List<int>> byNum = new Dictionary<string, List<int>>();
+    readonly Dictionary<string, List<int>> byNab = new Dictionary<string, List<int>>();
+    static NarExcel cache;
+    static string cacheStamp = "";
+    static readonly object gate = new object();
+
+    public static NarExcel Open() {
+        VygKind k = VygKind.Nar;
+        string problem = k.Problem();
+        if (problem != null) throw new Exception(problem);
+        lock (gate) {
+            string stamp = "";
+            try { FileInfo fi = new FileInfo(k.Table); stamp = fi.Length + "|" + fi.LastWriteTimeUtc.Ticks; } catch { }
+            if (cache != null && stamp == cacheStamp) return cache;
+            NarExcel n = new NarExcel();
+            n.T = DbfTable.Load(k.Table, false);
+            n.About = k.About();
+            for (int r = 0; r < n.T.Count; r++) {
+                Add(n.byNum, Digits(n.F(r, "NZ")).TrimStart('0'), r);
+                Add(n.byNab, Digits(n.F(r, "NAB")).TrimStart('0'), r);
+            }
+            cache = n;
+            cacheStamp = stamp;
+            return n;
+        }
+    }
+
+    static void Add(Dictionary<string, List<int>> d, string key, int row) {
+        if (key.Length == 0) return;
+        List<int> l;
+        if (!d.TryGetValue(key, out l)) { l = new List<int>(); d[key] = l; }
+        l.Add(row);
+    }
+
+    public string F(int row, string field) {
+        int i = T.FieldIndex(field);
+        return i < 0 ? "" : DbfTable.Format(T.GetValue(row, i, null), true).Trim();
+    }
+
+    static string Digits(string s) {
+        StringBuilder sb = new StringBuilder();
+        foreach (char c in s ?? "") if (c >= '0' && c <= '9') sb.Append(c);
+        return sb.ToString();
+    }
+
+    // № наряда полностью, с годом: 202620936 / 2026-20936 / 2026 20936 -> «202620936»; без года (короткий) - null
+    public static string Number(string text) {
+        string d = Digits(text);
+        if (d.Length < 6 || d.Length > 11) return null;
+        int y;
+        if (!int.TryParse(d.Substring(0, 4), out y) || y < 2000 || y > DateTime.Today.Year + 1) return null;
+        return d;
+    }
+
+    public List<int> ByNumber(string number) {
+        List<int> l;
+        return byNum.TryGetValue(Digits(number).TrimStart('0'), out l) ? l : new List<int>();
+    }
+
+    // наряды лицевого, новые сверху
+    public List<int> ByNab(string nab) {
+        List<int> l;
+        List<int> r = byNab.TryGetValue(Digits(nab).TrimStart('0'), out l) ? new List<int>(l) : new List<int>();
+        int dof = T.FieldIndex("DOF");
+        r.Sort(delegate(int a, int b) {
+            int c = dof < 0 ? 0 : -DbfTable.CompareValues(T.GetValue(a, dof, null), T.GetValue(b, dof, null));
+            return c != 0 ? c : -string.CompareOrdinal(F(a, "NZ"), F(b, "NZ"));
+        });
+        return r;
+    }
+
+    public bool Done(int row) { return F(row, "FIO_VIP").Length > 0 || F(row, "DVIP").Length > 0; }
+
+    // «Макетино, Полевая ул., д.34 кв.12»
+    public string Address(int row) {
+        List<string> a = new List<string>();
+        if (F(row, "NP").Length > 0) a.Add(F(row, "NP"));
+        if (F(row, "ULICA").Length > 0) a.Add(F(row, "ULICA"));
+        string h = (F(row, "DOM").Length > 0 ? "д." + F(row, "DOM") : "") + (F(row, "KOR").Length > 0 ? " корп." + F(row, "KOR") : "") + (F(row, "KV").Length > 0 ? " кв." + F(row, "KV") : "");
+        if (h.Trim().Length > 0) a.Add(h.Trim());
+        return string.Join(", ", a.ToArray());
+    }
+
+    // строка для списков: «наряд 202620936 от 12.01.2026, замена счётчика - ВЫПОЛНЕН 15.01.2026 (Иванов И.И.)»
+    public string Text(int row) {
+        string s = "наряд " + F(row, "NZ") + (F(row, "DOF").Length > 0 ? " от " + F(row, "DOF") : "") + (F(row, "RABOTA").Length > 0 ? ", " + F(row, "RABOTA") : "");
+        return s + (Done(row) ? " - ВЫПОЛНЕН" + (F(row, "DVIP").Length > 0 ? " " + F(row, "DVIP") : "") + (F(row, "FIO_VIP").Length > 0 ? " (" + F(row, "FIO_VIP") + ")" : "") : " - НЕ ВЫПОЛНЕН");
+    }
+
+    // столбцы окон: подпись, поле копии ("" - своё: итог, адрес, счётчик)
+    public static readonly string[][] Columns = {
+        new string[] { "№ Н-З", "NZ" }, new string[] { "Итог", "" }, new string[] { "Дата оф.", "DOF" }, new string[] { "Работа", "RABOTA" },
+        new string[] { "Лицевой", "NAB" }, new string[] { "Ф.И.О.", "FIO" }, new string[] { "Адрес", "" }, new string[] { "Принял", "FIO_PR" },
+        new string[] { "Выполнил", "FIO_VIP" }, new string[] { "Дата вып.", "DVIP" }, new string[] { "Счётчик", "" }, new string[] { "Примечание", "PRIM" } };
+
+    public string[] Cells(int row) {
+        string[] c = new string[Columns.Length];
+        for (int i = 0; i < c.Length; i++) {
+            string f = Columns[i][1];
+            if (f.Length > 0) c[i] = F(row, f);
+            else if (Columns[i][0] == "Итог") c[i] = Done(row) ? "ВЫПОЛНЕН" : "НЕ ВЫПОЛНЕН";
+            else if (Columns[i][0] == "Адрес") c[i] = Address(row);
+            else c[i] = (F(row, "TIPCH") + " " + F(row, "NCH")).Trim();
+        }
+        return c;
+    }
+}
+// ==== КОНЕЦ БЛОКА НАРЯДОВ ИЗ ВЫГРУЗКИ ====
+
+// ==== БЛОК ОКНА НАРЯДОВ ИЗ ВЫГРУЗКИ (исходник - razrabotka/src/nar_excel_form.cs; вставляется скриптом inject.py) ====
+// «Поиск», режим Excel: окно «Наряды…» - номера нарядов (ГодНомер, можно списком): ВЫПОЛНЕН - зелёным, НЕ ВЫПОЛНЕН - красным,
+// не найден - серым; ниже - все наряды лицевого выбранной строки. Из карточки (Ctrl+Z) - сразу наряды лицевого.
+public class NarExcelForm : Form {
+    readonly TextBox input = new TextBox();
+    readonly DataGridView found = new DataGridView(), byLs = new DataGridView();
+    readonly Label info = new Label(), lsHead = new Label();
+    readonly List<int> foundRows = new List<int>();     // строка копии нарядов для строки итога (-1 - не найден)
+    NarExcel nar;
+    string error;
+
+    public NarExcelForm(string nab, string who) {
+        Text = "Наряды - из выгрузки нарядов (только чтение)";
+        Font = Look.Base;
+        Look.Wear(this);
+        StartPosition = FormStartPosition.CenterParent;
+        Rectangle wa = Screen.PrimaryScreen.WorkingArea;
+        Size = new Size(Math.Min(1300, wa.Width - 40), Math.Min(760, wa.Height - 40));
+        KeyPreview = true;
+        try { nar = NarExcel.Open(); } catch (Exception ex) { error = ex.Message; }
+
+        Panel top = new Panel();
+        top.Dock = DockStyle.Top;
+        top.Height = 112;
+        Label cap = new Label();
+        cap.Text = "№ наряда полностью, с годом: 202620936 или 2026-20936. Можно списком - по номеру в строке.";
+        cap.SetBounds(12, 8, 900, 20);
+        input.Multiline = true;
+        input.ScrollBars = ScrollBars.Vertical;
+        input.SetBounds(12, 30, 420, 66);
+        Button go = new Button();
+        go.Text = "Найти";
+        go.SetBounds(444, 30, 110, 32);
+        go.Click += delegate { Find(); };
+        Button xl = new Button();
+        xl.Text = "В Excel";
+        xl.SetBounds(444, 66, 110, 30);
+        xl.Click += delegate { Export(); };
+        info.SetBounds(568, 30, 700, 66);
+        info.Text = error ?? "Данные: " + nar.About + ". Выполнен - если заполнено «Выполнил» (или дата выполнения).";
+        info.ForeColor = error == null ? Look.Hint : Look.Bad;
+        top.Controls.AddRange(new Control[] { cap, input, go, xl, info });
+        input.KeyDown += delegate(object s, KeyEventArgs e) { if (e.KeyCode == Keys.Enter && e.Control) { e.SuppressKeyPress = true; Find(); } };
+
+        Grid(found);
+        found.Dock = DockStyle.Fill;
+        Panel bottom = new Panel();
+        bottom.Dock = DockStyle.Bottom;
+        bottom.Height = Math.Max(220, Size.Height / 2 - 80);
+        lsHead.Dock = DockStyle.Top;
+        lsHead.Height = 24;
+        lsHead.Padding = new Padding(8, 4, 8, 0);
+        lsHead.Font = Look.Bold;
+        lsHead.Text = "Наряды лицевого - выберите строку итога";
+        Grid(byLs);
+        byLs.Dock = DockStyle.Fill;
+        bottom.Controls.Add(byLs);
+        bottom.Controls.Add(lsHead);
+        Controls.Add(found);
+        Controls.Add(bottom);
+        Controls.Add(top);
+        found.SelectionChanged += delegate { ShowLs(); };
+        KeyDown += delegate(object s, KeyEventArgs e) { if (e.KeyCode == Keys.Escape) { e.SuppressKeyPress = true; Close(); } };
+        if (nab != null && nab.Length > 0) Shown += delegate { ShowNab(nab, who); };
+    }
+
+    static void Grid(DataGridView g) {
+        g.ReadOnly = true;
+        g.AllowUserToAddRows = false;
+        g.AllowUserToDeleteRows = false;
+        g.RowHeadersVisible = false;
+        g.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
+        g.MultiSelect = false;
+        g.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
+        foreach (string[] c in NarExcel.Columns) {
+            DataGridViewTextBoxColumn col = new DataGridViewTextBoxColumn();
+            col.HeaderText = c[0];
+            col.SortMode = DataGridViewColumnSortMode.NotSortable;
+            col.FillWeight = c[0] == "Адрес" || c[0] == "Ф.И.О." || c[0] == "Работа" || c[0] == "Примечание" ? 150 : 70;
+            g.Columns.Add(col);
+        }
+        Look.Grid(g);
+        CopyText.Grid(g);
+    }
+
+    void Color(DataGridView g, int r, int row) {
+        System.Drawing.Color back = row < 0 ? Look.RowOther : nar.Done(row) ? Look.RowGood : Look.RowBad;
+        g.Rows[r].DefaultCellStyle.BackColor = back;
+    }
+
+    public void SetInput(string text) { input.Text = text; }
+
+    // номера из поля - строки итога
+    public void Find() {
+        found.Rows.Clear();
+        foundRows.Clear();
+        if (nar == null) { info.Text = error; return; }
+        int ok = 0, no = 0, miss = 0;
+        foreach (string raw in input.Text.Split('\n')) {
+            string line = raw.Trim();
+            if (line.Length == 0) continue;
+            string num = NarExcel.Number(line);
+            if (num == null) {
+                int r0 = found.Rows.Add(new object[] { line, "впишите полностью: год и номер (2026xxxxx)" });
+                found.Rows[r0].DefaultCellStyle.BackColor = Look.RowOther;
+                foundRows.Add(-1);
+                miss++;
+                continue;
+            }
+            List<int> rows = nar.ByNumber(num);
+            if (rows.Count == 0) {
+                int r0 = found.Rows.Add(new object[] { num, "не найден" });
+                found.Rows[r0].DefaultCellStyle.BackColor = Look.RowOther;
+                foundRows.Add(-1);
+                miss++;
+                continue;
+            }
+            foreach (int row in rows) {
+                int r = found.Rows.Add(nar.Cells(row));
+                Color(found, r, row);
+                foundRows.Add(row);
+                if (nar.Done(row)) ok++; else no++;
+            }
+        }
+        info.Text = "Выполнено: " + ok + ", не выполнено: " + no + ", не найдено: " + miss + ". Данные: " + nar.About + ".";
+        info.ForeColor = Look.Hint;
+        if (found.Rows.Count > 0) found.CurrentCell = found.Rows[0].Cells[0];
+        ShowLs();
+    }
+
+    void ShowLs() {
+        if (nar == null || found.CurrentRow == null || found.CurrentRow.Index >= foundRows.Count) return;
+        int row = foundRows[found.CurrentRow.Index];
+        if (row < 0) { byLs.Rows.Clear(); lsHead.Text = "Наряды лицевого - выберите найденный наряд"; return; }
+        ShowNab(nar.F(row, "NAB"), (nar.F(row, "FIO") + " " + nar.Address(row)).Trim());
+    }
+
+    // все наряды лицевого (новые сверху)
+    public void ShowNab(string nab, string who) {
+        byLs.Rows.Clear();
+        if (nar == null) { lsHead.Text = error; return; }
+        List<int> rows = nar.ByNab(nab);
+        foreach (int row in rows) { int r = byLs.Rows.Add(nar.Cells(row)); Color(byLs, r, row); }
+        lsHead.Text = "Наряды лицевого " + nab + (who != null && who.Length > 0 ? " ▶ " + who : "") + ": " + (rows.Count == 0 ? "в выгрузке нарядов нет" : rows.Count.ToString());
+    }
+
+    public int FoundCount { get { return found.Rows.Count; } }
+    public int LsCount { get { return byLs.Rows.Count; } }
+    public string LsText { get { return lsHead.Text; } }
+    public string InfoText { get { return info.Text; } }
+
+    void Export() {
+        if (found.Rows.Count == 0) { MessageBox.Show(this, "Сначала найдите наряды.", Text); return; }
+        List<string[]> rows = new List<string[]>();
+        List<string> styles = new List<string>();
+        for (int i = 0; i < found.Rows.Count; i++) {
+            string[] c = new string[NarExcel.Columns.Length];
+            for (int k = 0; k < c.Length; k++) { object v = found.Rows[i].Cells[k].Value; c[k] = v == null ? "" : v.ToString(); }
+            rows.Add(c);
+            int row = i < foundRows.Count ? foundRows[i] : -1;
+            styles.Add(row < 0 ? "y" : nar.Done(row) ? "t" : "n");
+        }
+        string[] headers = new string[NarExcel.Columns.Length];
+        for (int k = 0; k < headers.Length; k++) headers[k] = NarExcel.Columns[k][0];
+        try { Spreadsheet.Open("Наряды", headers, rows, styles); }
+        catch (Exception ex) { MessageBox.Show(this, "В Excel не получилось: " + ex.Message, Text); }
+    }
+}
+// ==== КОНЕЦ БЛОКА ОКНА НАРЯДОВ ИЗ ВЫГРУЗКИ ====
 
 public static class CopyText {
     // таблица: выделяются ячейки, а не строка целиком; текущая строка - в рамке
