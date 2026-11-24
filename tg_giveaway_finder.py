@@ -82,6 +82,9 @@ DEFAULT_AGGREGATORS = [
     "@StarsGiveawayHub",     # владелец нашёл через Google 06.11: 55 постов за 31 день, 49 модулей (пересланных)
     "@drawsstars",           # веб-поиск 07.11: 25 модулей за 31 день («Розыгрыши звезд»)
     "@drawpremium",          # веб-поиск 07.11: 12 модулей за 31 день (его же Premium-розыгрыши)
+    # владелец нашёл 24.11 (в них каналы с розыгрышами, которых не было у нас)
+    "@spasitelnitsa_giveaways", "@GiveawayFlash", "@lockpv", "@telegapremium2", "@guy_nft",
+    "@spgiveawaychannel", "@FreebiesBelievers",
 ]
 
 # Значения по умолчанию для обычного и осторожного (--careful) режимов.
