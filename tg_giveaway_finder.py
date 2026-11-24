@@ -135,11 +135,13 @@ def parse_post_at(value: str | None) -> list[int]:
 
 
 def slot_due(now: datetime, hours: list[int], tz_hours: float, last_bot: datetime | None,
-             blocked_until: datetime | None, grace: timedelta) -> datetime:
+             blocked_until: datetime | None, grace: timedelta,
+             blocked_from: datetime | None = None) -> datetime:
     """Время поста по фиксированному расписанию. Если сейчас идёт окно слота (от его начала прошло
     не больше grace) и в этом слоте бот ещё не публиковал — возвращает начало слота (пора постить).
     Иначе — начало ближайшего следующего слота. Слоты, попавшие в паузу после поста владельца
-    (blocked_until), пропускаются."""
+    (от blocked_from до blocked_until), пропускаются. Слоты раньше поста владельца не трогаем:
+    его отложенный пост на ночь не должен отменять вечерний слот (24.11 так пропал слот 22:00)."""
     tz = timezone(timedelta(hours=tz_hours))
     loc = now.astimezone(tz)
     slots = sorted(datetime(d.year, d.month, d.day, h, tzinfo=tz).astimezone(timezone.utc)
@@ -147,7 +149,7 @@ def slot_due(now: datetime, hours: list[int], tz_hours: float, last_bot: datetim
                              loc.date() + timedelta(days=2))
                    for h in hours)
     for s in slots:
-        if blocked_until and s < blocked_until:
+        if blocked_until and s < blocked_until and (blocked_from is None or s >= blocked_from):
             continue
         if s > now:
             return s
@@ -1562,7 +1564,11 @@ async def cmd_post_scheduled(client: TelegramClient, args: argparse.Namespace) -
     if slots:  # владелец 21.11: посты строго по расписанию (7, 12, 17, 22), окно часов не нужно
         window = None
         grace = timedelta(hours=getattr(args, "slot_grace_hours", 2.0) or 2.0)
-        next_at = slot_due(now, slots, tz_hours, last_bot, manual + gap if manual and gap else None, grace)
+        next_at = slot_due(now, slots, tz_hours, last_bot, manual + gap if manual and gap else None, grace,
+                           blocked_from=manual if manual and gap else None)
+        if next_at > now and manual and gap and manual + gap > now:
+            log.info("Пауза после вашего поста от %s UTC — до %s UTC", manual.strftime("%d.%m %H:%M"),
+                     (manual + gap).strftime("%d.%m %H:%M"))
 
     allowed = parse_countries(getattr(args, "countries", None))
 

@@ -1165,10 +1165,10 @@ class BlocklistTests(unittest.TestCase):
 class PostSlotsTests(unittest.TestCase):
     """Владелец 21.11: посты строго в 7, 12, 17 и 22 по Минску."""
 
-    def due(self, now, last=None, block=None):
+    def due(self, now, last=None, block=None, block_from=None):
         m = lambda s: datetime.fromisoformat(s + "+03:00").astimezone(timezone.utc)
         r = gf.slot_due(m(now), [7, 12, 17, 22], 3, m(last) if last else None, m(block) if block else None,
-                        timedelta(hours=2))
+                        timedelta(hours=2), blocked_from=m(block_from) if block_from else None)
         return r <= m(now), r.astimezone(timezone(timedelta(hours=3))).strftime("%d %H:%M")
 
     def test_posts_at_slot_and_catches_up_late_runs(self):
@@ -1186,6 +1186,14 @@ class PostSlotsTests(unittest.TestCase):
         self.assertEqual(self.due("2026-11-21T23:40", "2026-11-21T22:01"), (False, "22 07:00"))
         self.assertEqual(self.due("2026-11-21T12:05", "2026-11-21T07:01", block="2026-11-21T15:00"),
                          (False, "21 17:00"))
+
+    def test_owner_scheduled_post_later_does_not_cancel_earlier_slot(self):
+        # 24.11: отложенный пост владельца на 01:30 давал паузу до 06:30 и съедал слот 22:00
+        self.assertEqual(self.due("2026-11-24T22:20", "2026-11-24T17:17", block="2026-11-25T06:30",
+                                  block_from="2026-11-25T01:30"), (True, "24 22:00"))
+        # а слот внутри паузы после поста владельца по-прежнему пропускается
+        self.assertEqual(self.due("2026-11-24T22:20", "2026-11-24T17:17", block="2026-11-25T02:00",
+                                  block_from="2026-11-24T21:00"), (False, "25 07:00"))
 
     def test_parse(self):
         self.assertEqual(gf.parse_post_at("22, 7,12,17"), [7, 12, 17, 22])
