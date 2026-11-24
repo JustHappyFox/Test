@@ -1,6 +1,7 @@
 # Правки шаблонов .docx на месте (24.11), остальное в файле не трогается; слово может быть разбито Word'ом на куски - тоже:
 #  1) «Минскэнерго» -> «МИНСКЭНЕРГО» (всегда большими);
 #  3) акт приемки БС, п. 4: «...используется для электроснабжения базовой станции» -> поле «ДЕЯТЕЛЬНОСТЬ»;
+#  6) подписи «ЭНЕРГОСНАБЖАЮЩАЯ ОРГАНИЗАЦИЯ ... МП» из нижнего колонтитула - в конец текста документа;
 #  5) «ПУГОД» г. -> «ПУГОДГ» (год поверки с «г.», без года - пусто);
 #  4) потери: формула в ячейке, плавающая поверх схемы, - в строку ячейки;
 #  2) подпись начальника: «Начальник ГРП» в начале абзаца -> поле «НАЧДОЛЖН» (должность на выбор: Начальник ГРП / ОПСУ),
@@ -58,11 +59,43 @@ def fix(xml):
         if m: replace(ts, m.start(1), m.end(1), '«НАЧДОЛЖН»'); n += 1
     return etree.tostring(root, xml_declaration=True, encoding='UTF-8', standalone=True), n
 
+import copy
+def footer_to_body(items):
+    # 6) подписи сторон с «МП» лежали в нижнем колонтитуле (доп. соглашение) - переносятся в конец текста, колонтитул отключается
+    names = [i.filename for i, d in items]
+    if 'word/document.xml' not in names or 'word/_rels/document.xml.rels' not in names: return items, 0
+    doc = etree.fromstring(dict((i.filename, d) for i, d in items)['word/document.xml'])
+    rels = etree.fromstring(dict((i.filename, d) for i, d in items)['word/_rels/document.xml.rels'])
+    body = doc.find(W + 'body'); sect = body.find(W + 'sectPr')
+    if sect is None: return items, 0
+    R = '{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id'
+    n = 0
+    for ref in list(sect.findall(W + 'footerReference')):
+        target = [r.get('Target') for r in rels if r.get('Id') == ref.get(R)]
+        if not target: continue
+        ftr = etree.fromstring(dict((i.filename, d) for i, d in items).get('word/' + target[0], b'<x/>'))
+        if 'МП' not in ''.join(t.text or '' for t in ftr.iter(W + 't')): continue
+        gap = etree.SubElement(body, W + 'p'); body.remove(gap); sect.addprevious(gap)
+        for el in ftr:
+            if el.tag == W + 'tbl':
+                c = copy.deepcopy(el)
+                for tr in c.iter(W + 'tr'):
+                    pr = tr.find(W + 'trPr')
+                    if pr is None: pr = etree.SubElement(tr, W + 'trPr'); tr.remove(pr); tr.insert(0, pr)
+                    etree.SubElement(pr, W + 'cantSplit')
+                sect.addprevious(c)
+        sect.remove(ref)
+        n += 1
+    if not n: return items, 0
+    data = etree.tostring(doc, xml_declaration=True, encoding='UTF-8', standalone=True)
+    return [(i, data if i.filename == 'word/document.xml' else d) for i, d in items], n
+
 for f in sys.argv[1:]:
     zin = zipfile.ZipFile(f)
     items = [(i, zin.read(i.filename)) for i in zin.infolist()]
     zin.close()
-    total, out = 0, []
+    items, total = footer_to_body(items)
+    out = []
     for i, data in items:
         if re.match(r'word/(document|header\d*|footer\d*)\.xml$', i.filename):
             data2, n = fix(data)
