@@ -74,3 +74,4 @@ def block(src, begin, end, prog, anchor):
 block('nar_excel.cs', '// ==== БЛОК НАРЯДОВ ИЗ ВЫГРУЗКИ', '// ==== КОНЕЦ БЛОКА НАРЯДОВ ИЗ ВЫГРУЗКИ ====', 'prosmotr-bazy/prosmotr.ps1', 'public static class CopyText {')
 block('nar_excel_form.cs', '// ==== БЛОК ОКНА НАРЯДОВ ИЗ ВЫГРУЗКИ', '// ==== КОНЕЦ БЛОКА ОКНА НАРЯДОВ ИЗ ВЫГРУЗКИ ====', 'prosmotr-bazy/prosmotr.ps1', 'public static class CopyText {')
 block('nar_excel.cs', '// ==== БЛОК НАРЯДОВ ИЗ ВЫГРУЗКИ', '// ==== КОНЕЦ БЛОКА НАРЯДОВ ИЗ ВЫГРУЗКИ ====', 'dogovor/dogovor.ps1', 'public class SealRow {')
+block('udalenie.cs', '// ==== БЛОК СПРАВКИ НА УДАЛЕНИЕ', '// ==== КОНЕЦ БЛОКА СПРАВКИ НА УДАЛЕНИЕ ====', 'dogovor/dogovor.ps1', 'public class SealRow {')
