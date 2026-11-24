@@ -219,7 +219,7 @@ public class XlsxBook : IDisposable {
         int eocd = -1;
         for (int i = tail - 22; i >= 0; i--)
             if (t[i] == 0x50 && t[i + 1] == 0x4B && t[i + 2] == 5 && t[i + 3] == 6) { eocd = i; break; }
-        if (eocd < 0) throw new InvalidDataException("Это не файл Excel .xlsx (не zip). Сохраните выгрузку в Excel как «Книга Excel (*.xlsx)».");
+        if (eocd < 0) throw new InvalidDataException("Файл Excel .xlsx повреждён (не zip). Сохраните выгрузку в Excel заново.");
         int count = U16(t, eocd + 10);
         long dirSize = U32(t, eocd + 12), dirOffset = U32(t, eocd + 16);
         byte[] d = new byte[dirSize];
@@ -420,6 +420,597 @@ public class XlsxBook : IDisposable {
 }
 
 // Выгрузка быта -> своя копия: byt.dbf (поля как в таблице абонентов базы) + byt_ulicy.txt (код улицы -> н.п., улица, сельсовет)
+// Книга выгрузки любого вида (смотрится по содержимому, не по расширению): .xlsx; .xls - Excel 97-2003, Excel 5.0/95 и
+// Excel 2-4 (так пишет FoxPro «COPY TO ... TYPE XLS»); «xls», который на деле HTML-таблица, XML-таблица Excel 2003 или текст
+// с табуляцией / точкой с запятой. Строки всех листов подряд, номер сквозной (пустые строки не считаются); первая строка -
+// заголовок; на следующих листах та же строка заголовка пропускается (xls - не больше 65536 строк на листе, выгрузку делят).
+public abstract class VygBook : IDisposable {
+    public delegate void Row(int number, string[] cells, bool[] numeric);
+    protected delegate void SheetRow(int sheet, string[] cells, bool[] numeric);
+    string[] header;
+
+    public static VygBook Open(string path) {
+        byte[] h = new byte[8];
+        int got;
+        using (FileStream fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete)) got = fs.Read(h, 0, 8);
+        if (got >= 2 && h[0] == 0x50 && h[1] == 0x4B) return new XlsxVygBook(path);
+        if (got == 8 && h[0] == 0xD0 && h[1] == 0xCF && h[2] == 0x11 && h[3] == 0xE0 && h[4] == 0xA1 && h[5] == 0xB1 && h[6] == 0x1A && h[7] == 0xE1)
+            return new XlsVygBook(path, true);
+        int t = got >= 4 ? h[0] | (h[1] << 8) : 0, l = got >= 4 ? h[2] | (h[3] << 8) : 0;
+        if ((t == 0x0009 || t == 0x0209 || t == 0x0409 || t == 0x0809) && l >= 4 && l <= 20) return new XlsVygBook(path, false);
+        string kind = TextVygBook.Sniff(path);
+        if (kind == "xml") return new XmlVygBook(path);
+        if (kind == "html") return new HtmlVygBook(path);
+        return new TextVygBook(path);
+    }
+
+    public virtual void Dispose() { }
+    public virtual void Prepare() { }
+    protected abstract void Sheets(int width, SheetRow onRow);
+
+    // первая непустая строка - заголовок (номер 1)
+    public string[] Header(out int headerRow) {
+        string[] found = null;
+        try {
+            Sheets(400, delegate(int sheet, string[] cells, bool[] num) {
+                int last = -1;
+                for (int i = 0; i < cells.Length; i++) if (cells[i] != null) last = i;
+                found = new string[last + 1];
+                Array.Copy(cells, found, last + 1);
+                throw new XlsxBook.StopReading();
+            });
+        } catch (XlsxBook.StopReading) { }
+        header = found ?? new string[0];
+        headerRow = 1;
+        return header;
+    }
+
+    public void ReadRows(int width, Row onRow) {
+        int n = 0, last = -1;
+        Sheets(width, delegate(int sheet, string[] cells, bool[] num) {
+            bool first = sheet != last;
+            last = sheet;
+            if (first && n > 0 && header != null && Same(header, cells)) return;    // заголовок следующего листа
+            onRow(++n, cells, num);
+        });
+    }
+
+    static bool Same(string[] h, string[] cells) {
+        int any = 0;
+        for (int i = 0; i < h.Length; i++) {
+            if (h[i] == null) continue;
+            if (i >= cells.Length || cells[i] == null || cells[i] != h[i]) return false;
+            any++;
+        }
+        return any > 0;
+    }
+
+    // строка листа собирается из ячеек; в cells - только непустое (обрезанное)
+    protected sealed class RowBuf {
+        readonly int width;
+        public string[] Cells;
+        public bool[] Num;
+        public bool Any;
+        public RowBuf(int width) { this.width = width; Reset(); }
+        public void Reset() { Cells = new string[width]; Num = new bool[width]; Any = false; }
+        public void Set(int col, string v, bool num) {
+            if (v == null || col < 0 || col >= width) return;
+            v = v.Trim();
+            if (v.Length == 0) return;
+            Cells[col] = v;
+            Num[col] = num;
+            Any = true;
+        }
+    }
+
+    protected static string Num(double d) { return d.ToString("R", System.Globalization.CultureInfo.InvariantCulture); }
+}
+
+public class XlsxVygBook : VygBook {
+    readonly XlsxBook book;
+    string sheet;
+    public XlsxVygBook(string path) { book = new XlsxBook(path); }
+    public override void Dispose() { book.Dispose(); }
+    public override void Prepare() { book.LoadShared(); sheet = book.FirstSheet(); }
+    protected override void Sheets(int width, SheetRow onRow) {
+        if (sheet == null) Prepare();
+        book.ReadRows(sheet, width, delegate(int n, string[] cells, bool[] num) { onRow(0, cells, num); });
+    }
+}
+
+// .xls: двоичный Excel (BIFF2-8). Поток книги - из составного файла OLE (Excel 5-2003) или весь файл (Excel 2-4)
+public class XlsVygBook : VygBook {
+    readonly byte[] wb;
+    int biff = 8;
+    Encoding enc = Encoding.GetEncoding(1251);
+    string[] sst = new string[0];
+    bool prepared;
+
+    public XlsVygBook(string path, bool ole) {
+        using (FileStream fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 1 << 16))
+            wb = ole ? OleStream(fs) : ReadAll(fs);
+    }
+
+    static int U16(byte[] b, int p) { return b[p] | (b[p + 1] << 8); }
+    static int I32(byte[] b, int p) { return b[p] | (b[p + 1] << 8) | (b[p + 2] << 16) | (b[p + 3] << 24); }
+
+    static byte[] ReadAll(FileStream fs) {
+        if (fs.Length > int.MaxValue) throw new InvalidDataException("Файл выгрузки слишком большой.");
+        byte[] b = new byte[fs.Length];
+        Read(fs, 0, b, 0, b.Length);
+        return b;
+    }
+
+    static void Read(FileStream fs, long at, byte[] b, int off, int n) {
+        fs.Seek(at, SeekOrigin.Begin);
+        while (n > 0) {
+            int r = fs.Read(b, off, n);
+            if (r <= 0) throw new InvalidDataException("Файл .xls обрезан (не дочитался).");
+            off += r;
+            n -= r;
+        }
+    }
+
+    // составной файл OLE: поток «Workbook» (Excel 97-2003) или «Book» (Excel 5.0/95)
+    static byte[] OleStream(FileStream fs) {
+        byte[] h = new byte[512];
+        Read(fs, 0, h, 0, 512);
+        int ss = 1 << U16(h, 0x1E), mss = 1 << U16(h, 0x20);
+        int nFat = I32(h, 0x2C), dirStart = I32(h, 0x30), cutoff = I32(h, 0x38), miniStart = I32(h, 0x3C), difat = I32(h, 0x44), nDifat = I32(h, 0x48);
+        List<int> fatSectors = new List<int>();
+        for (int i = 0; i < 109 && fatSectors.Count < nFat; i++) fatSectors.Add(I32(h, 0x4C + i * 4));
+        byte[] sec = new byte[ss];
+        for (int k = 0; k < nDifat && difat >= 0 && fatSectors.Count < nFat; k++) {
+            Read(fs, (long)(difat + 1) * ss, sec, 0, ss);
+            for (int i = 0; i < ss / 4 - 1 && fatSectors.Count < nFat; i++) fatSectors.Add(I32(sec, i * 4));
+            difat = I32(sec, ss - 4);
+        }
+        int[] fat = new int[fatSectors.Count * (ss / 4)];
+        for (int k = 0; k < fatSectors.Count; k++) {
+            Read(fs, (long)(fatSectors[k] + 1) * ss, sec, 0, ss);
+            for (int i = 0; i < ss / 4; i++) fat[k * (ss / 4) + i] = I32(sec, i * 4);
+        }
+        byte[] dir = Chain(fs, fat, dirStart, ss, -1);
+        int found = -1;
+        for (int p = 0; p + 128 <= dir.Length; p += 128) {
+            int nl = U16(dir, p + 64);
+            string name = nl >= 2 ? Encoding.Unicode.GetString(dir, p, Math.Min(64, nl) - 2) : "";
+            if (dir[p + 66] == 2 && (string.Compare(name, "Workbook", true) == 0 || string.Compare(name, "Book", true) == 0)) { found = p; if (string.Compare(name, "Workbook", true) == 0) break; }
+        }
+        if (found < 0) throw new InvalidDataException("Это не книга Excel: в файле .xls нет листов (поток Workbook).");
+        int start = I32(dir, found + 116), size = I32(dir, found + 120);
+        if (size >= cutoff) return Chain(fs, fat, start, ss, size);
+        // маленький поток - в «мини-потоке» корневого элемента
+        byte[] mini = Chain(fs, fat, I32(dir, 116), ss, I32(dir, 120));
+        byte[] mfRaw = Chain(fs, fat, miniStart, ss, -1);
+        byte[] r = new byte[size];
+        int s = start, got = 0, guard = 0;
+        while (got < size && s >= 0 && guard++ < 10000000) {
+            int n = Math.Min(mss, size - got);
+            Buffer.BlockCopy(mini, s * mss, r, got, n);
+            got += n;
+            s = s * 4 + 4 <= mfRaw.Length ? I32(mfRaw, s * 4) : -2;
+        }
+        return r;
+    }
+
+    static byte[] Chain(FileStream fs, int[] fat, int start, int ss, int size) {
+        List<int> chain = new List<int>();
+        for (int s = start; s >= 0 && s < fat.Length && chain.Count <= fat.Length; s = fat[s]) chain.Add(s);
+        long total = (long)chain.Count * ss;
+        int n = size >= 0 ? (int)Math.Min(size, total) : (int)total;
+        byte[] r = new byte[n];
+        for (int i = 0, got = 0; i < chain.Count && got < n; i++) {
+            int k = Math.Min(ss, n - got);
+            Read(fs, (long)(chain[i] + 1) * ss, r, got, k);
+            got += k;
+        }
+        return r;
+    }
+
+    // кодировка строк Excel 2-5 (Excel 97-2003 - Юникод): по записи CODEPAGE; нет её или «западная» - по буквам (866 или 1251)
+    public override void Prepare() {
+        if (prepared) return;
+        prepared = true;
+        int cp = -1;
+        long c866 = 0, c1251 = 0;
+        for (int p = 0; p + 4 <= wb.Length; ) {
+            int t = U16(wb, p), l = U16(wb, p + 2), d = p + 4;
+            if (d + l > wb.Length) break;
+            if (t == 0x0809 || t == 0x0409 || t == 0x0209 || t == 0x0009) {
+                if (t == 0x0809) biff = l >= 2 && U16(wb, d) == 0x0600 ? 8 : 5;
+                else biff = t == 0x0009 ? 2 : t == 0x0209 ? 3 : 4;
+            } else if (t == 0x0042 && l >= 2) cp = U16(wb, d);
+            else if (t == 0x00FC && biff == 8) sst = ReadSst(p);
+            else if (biff < 8) {
+                int s = -1, n = 0;
+                if (t == 0x0004 && l >= 8) { s = d + 8; n = wb[d + 7]; }
+                else if ((t == 0x0204 || t == 0x00D6) && l >= 8) { s = d + 8; n = U16(wb, d + 6); }
+                for (int i = 0; s >= 0 && i < n && s + i < d + l; i++) {
+                    byte b = wb[s + i];
+                    if (b >= 0x80 && b <= 0xAF) c866++;
+                    else if ((b >= 0xC0 && b <= 0xDF) || b >= 0xF0) c1251++;
+                }
+            }
+            p = d + l;
+        }
+        if (cp == 866 || cp == 1251) enc = Encoding.GetEncoding(cp);
+        else if (cp > 0 && cp != 367 && cp != 1252 && cp != 32768 && cp != 32769 && cp != 1200) { try { enc = Encoding.GetEncoding(cp); } catch { } }
+        else if (c866 > c1251) enc = Encoding.GetEncoding(866);
+    }
+
+    // таблица строк (SST) с продолжениями (CONTINUE): строка может переходить в следующую запись
+    string[] ReadSst(int p0) {
+        List<int> st = new List<int>(), en = new List<int>();
+        int l0 = U16(wb, p0 + 2);
+        st.Add(p0 + 4 + 8);
+        en.Add(p0 + 4 + l0);
+        int unique = I32(wb, p0 + 8);
+        for (int p = p0 + 4 + l0; p + 4 <= wb.Length && U16(wb, p) == 0x003C; ) {
+            int l = U16(wb, p + 2);
+            st.Add(p + 4);
+            en.Add(Math.Min(wb.Length, p + 4 + l));
+            p += 4 + l;
+        }
+        List<string> r = new List<string>(Math.Max(0, Math.Min(unique, 1 << 20)));
+        int seg = 0, pos = st[0];
+        StringBuilder sb = new StringBuilder();
+        try {
+            while (r.Count < unique) {
+                if (pos >= en[seg]) { if (++seg >= st.Count) break; pos = st[seg]; }
+                int cch = Byte2(ref seg, ref pos, st, en);
+                int flags = Byte1(ref seg, ref pos, st, en);
+                int runs = (flags & 8) != 0 ? Byte2(ref seg, ref pos, st, en) : 0;
+                int ext = 0;
+                if ((flags & 4) != 0) { ext = Byte2(ref seg, ref pos, st, en); ext |= Byte2(ref seg, ref pos, st, en) << 16; }
+                bool high = (flags & 1) != 0;
+                sb.Length = 0;
+                for (int i = 0; i < cch; i++) {
+                    if (pos >= en[seg]) {
+                        if (++seg >= st.Count) break;
+                        pos = st[seg];
+                        high = (wb[pos++] & 1) != 0;      // в продолжении - заново признак «два байта на букву»
+                    }
+                    if (high) { sb.Append((char)U16(wb, pos)); pos += 2; } else sb.Append((char)wb[pos++]);
+                }
+                r.Add(sb.ToString());
+                Skip(runs * 4 + ext, ref seg, ref pos, st, en);
+            }
+        } catch (IndexOutOfRangeException) { } catch (ArgumentOutOfRangeException) { }     // обрезанная таблица строк - что прочиталось
+        return r.ToArray();
+    }
+
+    int Byte1(ref int seg, ref int pos, List<int> st, List<int> en) {
+        if (pos >= en[seg]) { seg++; pos = st[seg]; }
+        return wb[pos++];
+    }
+
+    int Byte2(ref int seg, ref int pos, List<int> st, List<int> en) {
+        int a = Byte1(ref seg, ref pos, st, en);
+        return a | (Byte1(ref seg, ref pos, st, en) << 8);
+    }
+
+    void Skip(int n, ref int seg, ref int pos, List<int> st, List<int> en) {
+        while (n > 0 && seg < st.Count) {
+            int k = Math.Min(n, en[seg] - pos);
+            pos += k;
+            n -= k;
+            if (n > 0) { if (seg + 1 >= st.Count) { seg++; break; } seg++; pos = st[seg]; }
+        }
+    }
+
+    static double Rk(int rk) {
+        double d = (rk & 2) != 0 ? (double)(rk >> 2) : BitConverter.Int64BitsToDouble(((long)(rk & unchecked((int)0xFFFFFFFC))) << 32);
+        return (rk & 1) != 0 ? d / 100 : d;
+    }
+
+    // строка ячейки: Excel 97-2003 - длина 2 байта, признак, буквы (1 или 2 байта); Excel 2-5 - длина и байты в кодировке книги
+    string Text(int p, int end, bool shortLen) {
+        if (biff == 8) {
+            int cch = shortLen ? wb[p] : U16(wb, p);
+            p += shortLen ? 1 : 2;
+            bool high = (wb[p++] & 1) != 0;
+            int n = Math.Min(cch, (end - p) / (high ? 2 : 1));
+            return high ? Encoding.Unicode.GetString(wb, p, n * 2) : Encoding.GetEncoding(28591).GetString(wb, p, n);
+        }
+        int len = shortLen ? wb[p] : U16(wb, p);
+        p += shortLen ? 1 : 2;
+        return enc.GetString(wb, p, Math.Max(0, Math.Min(len, end - p)));
+    }
+
+    protected override void Sheets(int width, SheetRow onRow) {
+        Prepare();
+        RowBuf row = new RowBuf(width);
+        int sheet = -1, depth = 0, curRow = -1, fRow = -1, fCol = -1;
+        bool inSheet = false;
+        for (int p = 0; p + 4 <= wb.Length; ) {
+            int t = U16(wb, p), l = U16(wb, p + 2), d = p + 4, e = d + l;
+            if (e > wb.Length) break;
+            p = e;
+            if (t == 0x0809 || t == 0x0409 || t == 0x0209 || t == 0x0009) {
+                depth++;
+                int kind = l >= 4 ? U16(wb, d + 2) : 0x10;
+                if (depth == 1) { inSheet = kind == 0x0010 || (t != 0x0809 && kind != 0x0020 && kind != 0x0040); if (inSheet) sheet++; curRow = -1; }
+                continue;
+            }
+            if (t == 0x000A) {
+                if (depth == 1 && inSheet && row.Any) { onRow(sheet, row.Cells, row.Num); row.Reset(); }
+                if (depth > 0) depth--;
+                if (depth == 0) inSheet = false;
+                continue;
+            }
+            if (!inSheet || depth != 1 || l < 4) continue;
+            int r = U16(wb, d), c = U16(wb, d + 2);
+            string v = null;
+            bool num = false;
+            switch (t) {
+                case 0x00FD: if (l >= 10) { int i = I32(wb, d + 6); v = i >= 0 && i < sst.Length ? sst[i] : null; } break;   // LABELSST
+                case 0x0204: case 0x00D6: if (l >= 8) v = Text(d + 6, e, false); break;                                    // LABEL, RSTRING
+                case 0x0004: if (l >= 8) v = enc.GetString(wb, d + 8, Math.Min(wb[d + 7], e - d - 8)); break;                // LABEL (Excel 2)
+                case 0x0203: if (l >= 14) { v = Num(BitConverter.ToDouble(wb, d + 6)); num = true; } break;                 // NUMBER
+                case 0x0003: if (l >= 15) { v = Num(BitConverter.ToDouble(wb, d + 7)); num = true; } break;                 // NUMBER (Excel 2)
+                case 0x0002: if (l >= 9) { v = U16(wb, d + 7).ToString(); num = true; } break;                               // INTEGER (Excel 2)
+                case 0x027E: if (l >= 10) { v = Num(Rk(I32(wb, d + 6))); num = true; } break;                                // RK
+                case 0x0205: if (l >= 8 && wb[d + 7] == 0) v = wb[d + 6] != 0 ? "1" : "0"; break;                           // BOOLERR
+                case 0x00BD:                                                                                                    // MULRK
+                    for (int q = d + 4, k = c; q + 6 <= e - 2; q += 6, k++) {
+                        if (r != curRow) { if (row.Any) onRow(sheet, row.Cells, row.Num); row.Reset(); curRow = r; }
+                        row.Set(k, Num(Rk(I32(wb, q + 2))), true);
+                    }
+                    continue;
+                case 0x0006: case 0x0206: case 0x0406: {                                                                       // FORMULA - готовый результат
+                    int o = biff == 2 ? d + 7 : d + 6;
+                    if (o + 8 > e) break;
+                    if (wb[o + 6] == 0xFF && wb[o + 7] == 0xFF) {
+                        if (wb[o] == 0) { fRow = r; fCol = c; }        // текст - в следующей записи STRING
+                        else if (wb[o] == 1) v = wb[o + 2] != 0 ? "1" : "0";
+                    } else { v = Num(BitConverter.ToDouble(wb, o)); num = true; }
+                    break;
+                }
+                case 0x0207: case 0x0007:                                                                                       // STRING (текст формулы)
+                    if (fRow >= 0) { r = fRow; c = fCol; v = t == 0x0007 ? enc.GetString(wb, d + 1, Math.Min(wb[d], e - d - 1)) : Text(d, e, false); fRow = -1; }
+                    break;
+                default: continue;
+            }
+            if (v == null) continue;
+            if (r != curRow) { if (row.Any) onRow(sheet, row.Cells, row.Num); row.Reset(); curRow = r; }
+            row.Set(c, v, num);
+        }
+        if (row.Any) onRow(sheet, row.Cells, row.Num);
+    }
+}
+
+// текстовые «xls»: определение вида и кодировки
+public class TextVygBook : VygBook {
+    protected readonly string path;
+    public TextVygBook(string path) { this.path = path; }
+
+    static byte[] Head(string path, int n) {
+        using (FileStream fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete)) {
+            byte[] b = new byte[Math.Min(n, fs.Length)];
+            int got = 0;
+            while (got < b.Length) { int r = fs.Read(b, got, b.Length - got); if (r <= 0) break; got += r; }
+            return b;
+        }
+    }
+
+    // «xml» (таблица Excel 2003), «html» или «text»
+    public static string Sniff(string path) {
+        byte[] b = Head(path, 65536);
+        string s = (b.Length > 1 && b[1] == 0 ? Encoding.Unicode.GetString(b) : Encoding.GetEncoding(28591).GetString(b)).ToLowerInvariant();
+        if (s.Contains("urn:schemas-microsoft-com:office:spreadsheet") && s.Contains("<workbook")) return "xml";
+        if (s.Contains("<table") || s.Contains("<html") || s.Contains("<!doctype")) return "html";
+        return "text";
+    }
+
+    // кодировка: метка BOM, charset=..., иначе UTF-8, если весь начальный кусок - верный UTF-8, иначе 1251
+    protected Encoding Detect() {
+        byte[] b = Head(path, 1 << 20);
+        if (b.Length >= 2 && ((b[0] == 0xFF && b[1] == 0xFE) || (b[0] == 0xFE && b[1] == 0xFF))) return b[0] == 0xFF ? Encoding.Unicode : Encoding.BigEndianUnicode;
+        if (b.Length >= 3 && b[0] == 0xEF && b[1] == 0xBB && b[2] == 0xBF) return Encoding.UTF8;
+        string a = Encoding.GetEncoding(28591).GetString(b, 0, Math.Min(b.Length, 8192)).ToLowerInvariant();
+        int cs = a.IndexOf("charset=");
+        if (cs < 0) cs = a.IndexOf("encoding=");
+        if (cs >= 0) {
+            string rest = a.Substring(a.IndexOf('=', cs) + 1).TrimStart('"', '\'', ' ');
+            StringBuilder name = new StringBuilder();
+            foreach (char ch in rest) { if (char.IsLetterOrDigit(ch) || ch == '-' || ch == '_') name.Append(ch); else break; }
+            try { if (name.Length > 0) return Encoding.GetEncoding(name.ToString()); } catch { }
+        }
+        int cut = b.Length;
+        if (cut == 1 << 20) {               // кусок файла: последнюю (может быть, разрезанную) букву UTF-8 не проверять
+            while (cut > 0 && b.Length - cut < 3 && (b[cut - 1] & 0xC0) == 0x80) cut--;
+            if (cut > 0 && b[cut - 1] >= 0xC0) cut--;
+        }
+        try { new UTF8Encoding(false, true).GetString(b, 0, cut); return Encoding.UTF8; } catch { return Encoding.GetEncoding(1251); }
+    }
+
+    protected override void Sheets(int width, SheetRow onRow) {
+        using (StreamReader sr = new StreamReader(path, Detect(), true)) {
+            char sep = '\0';
+            string line;
+            while ((line = sr.ReadLine()) != null) {
+                if (sep == '\0') { if (line.Trim().Length == 0) continue; sep = line.IndexOf('\t') >= 0 ? '\t' : line.IndexOf(';') >= 0 ? ';' : ','; }
+                RowBuf row = new RowBuf(width);
+                List<string> cells = Split(line, sep);
+                for (int i = 0; i < cells.Count; i++) row.Set(i, cells[i], false);
+                if (row.Any) onRow(0, row.Cells, row.Num);
+            }
+        }
+    }
+
+    static List<string> Split(string line, char sep) {
+        List<string> r = new List<string>();
+        StringBuilder sb = new StringBuilder();
+        bool q = false;
+        for (int i = 0; i < line.Length; i++) {
+            char ch = line[i];
+            if (q) {
+                if (ch == '"') { if (i + 1 < line.Length && line[i + 1] == '"') { sb.Append('"'); i++; } else q = false; }
+                else sb.Append(ch);
+            } else if (ch == '"' && sb.Length == 0) q = true;
+            else if (ch == sep) { r.Add(sb.ToString()); sb.Length = 0; }
+            else sb.Append(ch);
+        }
+        r.Add(sb.ToString());
+        return r;
+    }
+}
+
+// HTML-таблица (часто сохраняют под именем .xls): <tr> - строка, <td>/<th> - ячейка (colspan - пустые следом), каждая <table> - лист
+public class HtmlVygBook : TextVygBook {
+    public HtmlVygBook(string path) : base(path) { }
+
+    protected override void Sheets(int width, SheetRow onRow) {
+        using (StreamReader sr = new StreamReader(path, Detect(), true)) {
+            RowBuf row = null;
+            StringBuilder cell = null, tag = new StringBuilder();
+            int col = 0, span = 1, sheet = -1;
+            bool skip = false;
+            int ch;
+            while ((ch = sr.Read()) >= 0) {
+                if (ch != '<') { if (cell != null && !skip) cell.Append((char)ch); continue; }
+                tag.Length = 0;
+                char quote = '\0';
+                while ((ch = sr.Read()) >= 0) {
+                    if (quote != '\0') { if (ch == quote) quote = '\0'; }
+                    else if (ch == '"' || ch == '\'') quote = (char)ch;
+                    else if (ch == '>') break;
+                    tag.Append((char)ch);
+                    if (tag.Length == 3 && tag.ToString() == "!--") {          // комментарий - до -->
+                        int a = 0, b = 0;
+                        while ((ch = sr.Read()) >= 0) { if (ch == '>' && a == '-' && b == '-') break; a = b; b = ch; }
+                        tag.Length = 0;
+                        break;
+                    }
+                }
+                if (tag.Length == 0) continue;
+                string t = tag.ToString();
+                bool end = t.StartsWith("/");
+                string name = t.TrimStart('/');
+                int sp = 0;
+                while (sp < name.Length && (char.IsLetterOrDigit(name[sp]))) sp++;
+                string low = name.Substring(0, sp).ToLowerInvariant();
+                if (low == "style" || low == "script") { skip = !end; continue; }
+                if (low == "table" && !end) { sheet++; continue; }
+                if (low == "br" && cell != null) { cell.Append(' '); continue; }
+                if (low == "tr") {
+                    if (cell != null) { Put(row, ref col, cell, span); cell = null; }
+                    if (row != null && row.Any) onRow(Math.Max(0, sheet), row.Cells, row.Num);
+                    row = end ? null : new RowBuf(width);
+                    col = 0;
+                    continue;
+                }
+                if (low == "td" || low == "th") {
+                    if (cell != null) { Put(row, ref col, cell, span); cell = null; }
+                    if (!end) {
+                        if (row == null) { row = new RowBuf(width); col = 0; }
+                        cell = new StringBuilder();
+                        span = 1;
+                        string lt = t.ToLowerInvariant();
+                        int cs = lt.IndexOf("colspan");
+                        if (cs >= 0) {
+                            string digits = "";
+                            for (int i = cs + 7; i < lt.Length && digits.Length < 3; i++) { if (char.IsDigit(lt[i])) digits += lt[i]; else if (digits.Length > 0) break; }
+                            if (digits.Length > 0) span = Math.Max(1, Math.Min(200, int.Parse(digits)));
+                        }
+                    }
+                    continue;
+                }
+                if (low == "table" && end) {
+                    if (cell != null) { Put(row, ref col, cell, span); cell = null; }
+                    if (row != null && row.Any) onRow(Math.Max(0, sheet), row.Cells, row.Num);
+                    row = null;
+                }
+            }
+            if (cell != null) Put(row, ref col, cell, span);
+            if (row != null && row.Any) onRow(Math.Max(0, sheet), row.Cells, row.Num);
+        }
+    }
+
+    static void Put(RowBuf row, ref int col, StringBuilder cell, int span) {
+        if (row != null) row.Set(col, Entities(cell.ToString()), false);
+        col += span;
+    }
+
+    // &amp; &lt; &gt; &quot; &nbsp; &#1234; &#x4D2; ; пробелы и переводы строк - один пробел
+    static string Entities(string s) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < s.Length; i++) {
+            char c = s[i];
+            if (c == '&') {
+                int semi = s.IndexOf(';', i);
+                if (semi > i && semi - i <= 10) {
+                    string e = s.Substring(i + 1, semi - i - 1).ToLowerInvariant();
+                    string r = null;
+                    if (e == "amp") r = "&"; else if (e == "lt") r = "<"; else if (e == "gt") r = ">"; else if (e == "quot") r = "\"";
+                    else if (e == "nbsp") r = " "; else if (e == "apos") r = "'";
+                    else if (e.StartsWith("#")) {
+                        int code;
+                        bool ok = e.StartsWith("#x") ? int.TryParse(e.Substring(2), System.Globalization.NumberStyles.HexNumber, null, out code) : int.TryParse(e.Substring(1), out code);
+                        if (ok && code > 0 && code < 0xFFFF) r = ((char)code).ToString();
+                    }
+                    if (r != null) { sb.Append(r); i = semi; continue; }
+                }
+            }
+            sb.Append(char.IsWhiteSpace(c) ? ' ' : c);
+        }
+        string t = sb.ToString();
+        while (t.Contains("  ")) t = t.Replace("  ", " ");
+        return t;
+    }
+}
+
+// XML-таблица Excel 2003 (Workbook/Worksheet/Table/Row/Cell/Data; ss:Index - номер столбца или строки с 1)
+public class XmlVygBook : TextVygBook {
+    public XmlVygBook(string path) : base(path) { }
+
+    protected override void Sheets(int width, SheetRow onRow) {
+        XmlReaderSettings st = new XmlReaderSettings();
+        st.IgnoreWhitespace = true;
+        using (XmlReader r = XmlReader.Create(path, st)) {
+            RowBuf row = null;
+            int sheet = -1, col = 0;
+            string type = "";
+            bool moved = false;
+            while (moved || r.Read()) {
+                moved = false;
+                if (r.NodeType == XmlNodeType.Element) {
+                    string n = r.LocalName;
+                    if (n == "Worksheet") sheet++;
+                    else if (n == "Row") {
+                        if (row != null && row.Any) onRow(Math.Max(0, sheet), row.Cells, row.Num);
+                        row = new RowBuf(width);
+                        col = 0;
+                        if (r.IsEmptyElement) row = null;
+                    } else if (n == "Cell" && row != null) {
+                        string idx = r.GetAttribute("Index", "urn:schemas-microsoft-com:office:spreadsheet");
+                        int k;
+                        if (idx != null && int.TryParse(idx, out k) && k > 0) col = k - 1;
+                        string across = r.GetAttribute("MergeAcross", "urn:schemas-microsoft-com:office:spreadsheet");
+                        int m = 0;
+                        if (across != null) int.TryParse(across, out m);
+                        if (r.IsEmptyElement) col += 1 + m;
+                        else cellSpan = 1 + m;
+                    } else if (n == "Data" && row != null && !r.IsEmptyElement) {
+                        type = r.GetAttribute("Type", "urn:schemas-microsoft-com:office:spreadsheet") ?? "";
+                        string v = r.ReadElementContentAsString();
+                        moved = true;
+                        if (type == "DateTime") { int dot = v.IndexOf('.'); if (dot > 0) v = v.Substring(0, dot); }
+                        row.Set(col, v, type == "Number");
+                    }
+                } else if (r.NodeType == XmlNodeType.EndElement) {
+                    if (r.LocalName == "Cell") { col += cellSpan; cellSpan = 1; }
+                    else if (r.LocalName == "Row") { if (row != null && row.Any) onRow(Math.Max(0, sheet), row.Cells, row.Num); row = null; }
+                }
+            }
+            if (row != null && row.Any) onRow(Math.Max(0, sheet), row.Cells, row.Num);
+        }
+    }
+
+    int cellSpan = 1;
+}
+
 public static class VygruzkaByt {
     public const string Version = "1";
 
@@ -545,11 +1136,10 @@ public static class VygruzkaByt {
         int ss = -1, np = -1, ul = -1;
         Dictionary<string, int> streetCodes = new Dictionary<string, int>();
         List<string[]> streets = new List<string[]>();
-        using (XlsxBook book = new XlsxBook(xlsx)) {
+        using (VygBook book = VygBook.Open(xlsx)) {
             if (progress != null) progress("Читаю выгрузку " + kind.Name + ": тексты...");
-            book.LoadShared();
-            string sheet = book.FirstSheet();
-            string[] header = book.Header(sheet, out headerRow);
+            book.Prepare();
+            string[] header = book.Header(out headerRow);
             cols = MapColumns(header);
             if (kind.Code == "jur") foreach (Column c in cols) c.Pad = false;
             Column nab = null;
@@ -565,7 +1155,7 @@ public static class VygruzkaByt {
             int width = header.Length;
             // проход 1: длины полей, коды улиц
             int seen = 0;
-            book.ReadRows(sheet, width, delegate(int n, string[] cells, bool[] num) {
+            book.ReadRows(width, delegate(int n, string[] cells, bool[] num) {
                 if (n <= headerRow) return;
                 if (cells[nab.Source] == null) { skipped++; return; }
                 foreach (Column c in cols) {
@@ -595,7 +1185,7 @@ public static class VygruzkaByt {
                 WriteHeader(fs, names, types, lens, 0, recLen);
                 byte[] rec = new byte[recLen];
                 int written = 0;
-                book.ReadRows(sheet, width, delegate(int n, string[] cells, bool[] num) {
+                book.ReadRows(width, delegate(int n, string[] cells, bool[] num) {
                     if (n <= headerRow || cells[nab.Source] == null) return;
                     for (int i = 0; i < rec.Length; i++) rec[i] = 0x20;
                     int p = 1;
@@ -1222,7 +1812,7 @@ public class DataSettingsForm : Form {
         int y = c ? 94 : 112;
         for (int i = 0; i < 3; i++) {
             Label cap = new Label();
-            cap.Text = "Выгрузка " + Kinds[i] + (i == 1 ? " (таблица .dbf или .xlsx)" : " (.xlsx)");
+            cap.Text = "Выгрузка " + Kinds[i] + (i == 1 ? " (таблица .dbf, .xls или .xlsx)" : " (.xls или .xlsx)");
             cap.ForeColor = Pal.Hint;
             cap.Font = Pal.Small;
             cap.SetBounds(24, y, 400, 18);
@@ -1280,7 +1870,7 @@ public class DataSettingsForm : Form {
     void Pick(int i) {
         using (OpenFileDialog d = new OpenFileDialog()) {
             d.Title = "Выгрузка " + Kinds[i];
-            d.Filter = i == 1 ? "Таблица DBF или книга Excel (*.dbf;*.xlsx)|*.dbf;*.xlsx|Все файлы (*.*)|*.*" : "Книга Excel (*.xlsx)|*.xlsx|Все файлы (*.*)|*.*";
+            d.Filter = i == 1 ? "Таблица DBF или книга Excel (*.dbf;*.xls;*.xlsx)|*.dbf;*.xls;*.xlsx|Все файлы (*.*)|*.*" : "Книга Excel (*.xls;*.xlsx)|*.xls;*.xlsx|Все файлы (*.*)|*.*";
             try { if (File.Exists(paths[i].Text.Trim())) d.InitialDirectory = Path.GetDirectoryName(paths[i].Text.Trim()); } catch { }
             if (d.ShowDialog(this) == DialogResult.OK) paths[i].Text = d.FileName;
         }

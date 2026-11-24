@@ -53,6 +53,8 @@ XDG_DATA_HOME в scratchpad test/profile (Mono: APPDATA/LOCALAPPDATA = они).
 Нетбук 1024x600 (24.11): St.Compact / St.NavWidth / St.Fit / St.FitNav / St.FitTop / St.FitRow в «Договоре»; проверка - SCREEN=1024x560
 runtest.sh dogovor razrabotka/tests/t_netbook.cs (run.sh/runtest.sh: SCREEN=ШxВ - свой Xvfb :78). Новые окна делать с Dock/Anchor
 и проверять на 1024x560.
+Выгрузки читаются через VygBook.Open (вид - по содержимому: xlsx, xls BIFF2-8, HTML, XML 2003, текст); проверка - tests/gen_xls_old.py
++ t_xls_formats.cs (vygtest.sh), копии сравнивать с копией из .xlsx.
 На работе была реакция службы безопасности на zapusk.vbs (скрытый PowerShell) - пользователь работает с другого компьютера.
 
 ## Кто что писал (со слов пользователя 20.11)
