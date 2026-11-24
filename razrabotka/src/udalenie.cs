@@ -16,7 +16,7 @@ public class UdalenieForm : Form {
     public Form Back;
     bool loading, dirty;
     string savedName;
-    static readonly string[] Needed = { "kp", "nab", "dog_name", "ls", "adres", "pu", "inzh", "nach" };
+    static readonly string[] Needed = { "kp", "nab", "dog_name", "ls", "adres", "pu", "inzh", "nach", "opsu" };
 
     public bool Unsaved { get { return dirty; } }
     public static string Folder(string here) { return Path.Combine(here, "Справки на удаление"); }
@@ -127,7 +127,7 @@ public class UdalenieForm : Form {
         pu.Resized += delegate { LayoutCards(); };
         c.Grid.Row(F(null, pu, 0));
 
-        c = new Card("Подписи и даты", "инженер, начальник, дата; два экземпляра на листе - как справка", 4);
+        c = new Card("Подписи и даты", "инженер, начальник ГРП, начальник ОПСУ, дата; два экземпляра на листе - как справка", 4);
         cards.Add(c);
         DateBox date = new DateBox();
         Reg("data", date);
@@ -138,7 +138,8 @@ public class UdalenieForm : Form {
         two.BackColor = Color.Transparent;
         Reg("dve", two);
         c.Grid.Row(F("Инженер", C("inzh", null), 20), F("Дата", date, 14), F("Начальник ГРП", C("nach", null), 20));
-        c.Grid.Row(F(null, two, 0));
+        // 24.11: подписывает и начальник ОПСУ (строка под начальником ГРП)
+        c.Grid.Row(F("Начальник ОПСУ", C("opsu", null), 20), F(null, two, 0));
     }
 
     void FillLists() {
@@ -152,6 +153,7 @@ public class UdalenieForm : Form {
             List<string> n = new List<string>();
             foreach (string[] s in lists.Signers()) n.Add(s[0]);
             Items("nach", n);
+            Items("opsu", n);
             pu.SetItems(0, Types());
         } finally { loading = was; }
     }
@@ -317,6 +319,7 @@ public class UdalenieForm : Form {
             List<string> names = new List<string>();
             foreach (string[] sg in lists.Signers()) names.Add(sg[0]);
             SetV("nach", memory.Get("УдалениеНачальник", memory.Get("СправкаНачальник", First(names))));
+            SetV("opsu", memory.Get("УдалениеНачальникОПСУ", ""));
             savedName = null;
         } finally { loading = false; }
         dirty = false;
@@ -432,6 +435,7 @@ public class UdalenieForm : Form {
         v["ПУ"] = PuText();
         v["ИНЖЕНЕР"] = V("inzh");
         v["НАЧАЛЬНИК"] = V("nach");
+        v["ОПСУ"] = V("opsu");
         v["ДАТА"] = V("data");
         v["ГОД"] = ((DateBox)inp["data"]).Value.Year.ToString();
         return v;
@@ -452,7 +456,8 @@ public class UdalenieForm : Form {
             case "adres": return "адрес";
             case "pu": return "прибор учёта";
             case "inzh": return "инженер";
-            case "nach": return "начальник";
+            case "nach": return "начальник ГРП";
+            case "opsu": return "начальник ОПСУ";
             default: return k;
         }
     }
@@ -547,6 +552,7 @@ public class UdalenieForm : Form {
         memory.Values["УдалениеДвеКопии"] = V("dve");
         memory.Values["УдалениеИнженер"] = V("inzh");
         memory.Values["УдалениеНачальник"] = V("nach");
+        memory.Values["УдалениеНачальникОПСУ"] = V("opsu");
         memory.Save();
         savedName = name;
         dirty = false;

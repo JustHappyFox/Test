@@ -23,6 +23,7 @@ public static class T {
                 UdalenieForm u = (UdalenieForm)F(m, "udal");
                 Dump("Из перевода", u);
                 u.SetV("dog_name", "ООО «Тестстрой»");
+                u.SetV("opsu", "Петров П.П.");          // 24.11: начальник ОПСУ
                 Console.WriteLine("Сохранена: " + u.Save(false, false));
                 u.GoBack();
             } else if (step == 6) p.CreateSpravka();
