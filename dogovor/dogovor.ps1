@@ -24498,7 +24498,7 @@ public class JurBase {
 
     // адрес в тексте карточки: 2 - этот дом, 1 - та же улица (без улицы - тот же н.п.), другой дом, 0 - нет
     public static int Match(string text, string village, string street, string dom) {
-        string t = Regex.Replace(text.ToLowerInvariant(), @"кв[а-я]*\.?\s*\d+", " ");     // номер квартиры - не номер дома
+        string t = Regex.Replace(text.ToLowerInvariant(), @"кв[а-я]*\.?\s*№?\s*\d+", " ");     // номер квартиры - не номер дома
         bool place = street.Length >= 3 ? t.Contains(street) : village.Length >= 3 && t.Contains(village);
         if (!place) return 0;
         return dom.Length > 0 && HasNumber(t, dom) ? 2 : 1;
@@ -24523,15 +24523,22 @@ public class JurBase {
         return Regex.IsMatch(text.ToLowerInvariant(), @"(?<![\dа-яa-z])" + Regex.Escape(n) + @"(?![\dа-я])");
     }
 
-    // номер квартиры в наименовании ТУ: «кв.15», «кв 15», «квартира 15», «15 квартира», «110 квартир», «15»; нет - пусто
+    // номер квартиры в наименовании ТУ: «кв.15», «кв.№15», «кв№15», «кв 15», «квартира 15», «15 квартира», «110 квартир», «15»,
+    // «15 - быт» (у квартиры бывает две ТУ: «кв.№15 - быт» и «кв.№15 - электроотопление»); нет - пусто
     public static string FlatNo(string name) {
         string n = name.Trim().ToLowerInvariant();
-        Match m = Regex.Match(n, @"кв[а-я]*\.?\s*(\d+[а-я]?)\b");
+        Match m = Regex.Match(n, @"кв[а-я]*\.?\s*№?\s*(\d+[а-я]?)\b");
         if (m.Success) return m.Groups[1].Value;
         m = Regex.Match(n, @"^(\d+[а-я]?)\s*\.?\s*кв");
         if (m.Success) return m.Groups[1].Value;
-        m = Regex.Match(n, @"^(\d+[а-я]?)$");
+        m = Regex.Match(n, @"^(\d+[а-я]?)\s*(?:[-–—]|$)");
         return m.Success ? m.Groups[1].Value : "";
+    }
+
+    // ТУ отопления («кв.№15 - электроотопление», «элекроотопление») - в договоре вторым счётчиком
+    public static bool IsHeating(string name) {
+        string n = name.ToLowerInvariant();
+        return n.Contains("отопл") || n.Contains("гвс") || n.Contains("бойлер");
     }
 
     // число в начале (для порядка квартир: 9 раньше 10)
@@ -24546,7 +24553,9 @@ public class JurBase {
         string k = kv.Trim().ToLowerInvariant();
         if (k.Length == 0) return false;
         string n = name.ToLowerInvariant();
-        Match m = Regex.Match(n, @"кв[а-я]*\.?\s*(\d+[а-я]?)");
+        Match m = Regex.Match(n, @"кв[а-я]*\.?\s*№?\s*(\d+[а-я]?)");
+        if (m.Success) return m.Groups[1].Value == k;
+        m = Regex.Match(n, @"^(\d+[а-я]?)\s*(?:[-–—]|\.?\s*кв|$)");
         if (m.Success) return m.Groups[1].Value == k;
         return HasNumber(n, k) && Regex.Matches(n, @"\d+").Count == 1;
     }
@@ -25065,7 +25074,9 @@ public class JurPick : Form {
         shown.Clear();
         JurAbon a = SelectedAbon();
         if (a == null) { ShowChoice(); return; }
-        foreach (JurPoint p in ptList) if (p.Kp == a.Kp && p.Nab == a.Nab && p.Flat) shown.Add(p);
+        // квартира: сначала быт, потом отопление (у квартиры бывает две ТУ - в договор два счётчика)
+        foreach (JurPoint p in ptList) if (p.Kp == a.Kp && p.Nab == a.Nab && p.Flat && !JurBase.IsHeating(p.Name)) shown.Add(p);
+        foreach (JurPoint p in ptList) if (p.Kp == a.Kp && p.Nab == a.Nab && p.Flat && JurBase.IsHeating(p.Name)) shown.Add(p);
         flatPoints = shown.Count;
         foreach (JurPoint p in ptList) if (p.Kp == a.Kp && p.Nab == a.Nab && !p.Flat) shown.Add(p);
         ptCap.Text = "Точки учёта " + a.Kp + "/" + a.Nab + " (" + shown.Count + ") - зелёным квартира; выбранная строка - счётчик договора, " +
@@ -25076,6 +25087,8 @@ public class JurPick : Form {
             points.Items.Add(it);
         }
         if (flatPoints > 0) points.Items[0].Selected = true;
+        // быт и отопление этой квартиры - оба счётчика сразу (снять второй - щелчок без Ctrl по первому)
+        if (flatPoints > 1 && shown[1].Serial != shown[0].Serial) points.Items[1].Selected = true;
         ShowChoice();
     }
 
