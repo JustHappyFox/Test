@@ -88,3 +88,16 @@ else:
     d.rep('public class SealRow {', kb + '\n\npublic class SealRow {')
 d.save()
 print('dogovor/dogovor.ps1 кабели ок')
+
+# расчёт потерь по ТКП 460-2017 (только «Договор»): razrabotka/src/poteri.cs, перед классом SealRow
+B10, E10 = '// ==== БЛОК РАСЧЁТА ПОТЕРЬ', '// ==== КОНЕЦ БЛОКА РАСЧЁТА ПОТЕРЬ ===='
+pt = open(os.path.join(ROOT, 'razrabotka', 'src', 'poteri.cs'), encoding='utf-8-sig').read().replace('\r\n', '\n').strip('\n')
+assert "\n'@" not in pt
+d = Doc(os.path.join(ROOT, 'dogovor/dogovor.ps1'))
+if B10 in d.t:
+    a = d.t.index(B10); b = d.t.index(E10) + len(E10)
+    d.t = d.t[:a] + pt + d.t[b:]
+else:
+    d.rep('public class SealRow {', pt + '\n\npublic class SealRow {')
+d.save()
+print('dogovor/dogovor.ps1 потери ок')

@@ -27239,7 +27239,7 @@ public class BsForm : Form {
     readonly Dictionary<string, Control> inp = new Dictionary<string, Control>();
     readonly List<Card> cards = new List<Card>();
     readonly Panel content = new Panel();
-    readonly Label head = new Label(), headSub = new Label(), status = new Label(), shemaNote = new Label(), kabelNote = new Label();
+    readonly Label head = new Label(), headSub = new Label(), status = new Label(), shemaNote = new Label(), kabelNote = new Label(), potNote = new Label();
     readonly ToolTip tip = new ToolTip();
     public StartMenu Home;
     public Form Back;
@@ -27248,7 +27248,7 @@ public class BsForm : Form {
     RowList pu, moshn, linii;
     Seals seals;
     readonly Dictionary<string, string> autos = new Dictionary<string, string>();
-    static readonly string[] Composed = { "adres", "adres_kr", "obekt_full", "obekt_adres", "potr", "plomby", "minus", "paket", "inzh_fio" };
+    static readonly string[] Composed = { "adres", "adres_kr", "obekt_full", "obekt_adres", "potr", "plomby", "minus", "paket", "inzh_fio", "liniya" };
     static readonly string[] AddrKeys = { "obl", "rayon", "selsovet", "np_tip", "np", "ulica_tip", "ulica", "dom" };
     // документы пакета: ключ галочки, шаблон, имя файла в папке пакета
     public static readonly string[][] Docs = {
@@ -27391,7 +27391,7 @@ public class BsForm : Form {
         v = v ?? "";
         if (key == "pu") { pu.Value = v; if (!loading) RefreshState(); return; }
         if (key == "moshn") { moshn.Value = v; if (!loading) RefreshState(); return; }
-        if (key == "linii") { linii.Value = v; KabelNote(); if (!loading) RefreshState(); return; }
+        if (key == "linii") { linii.Value = v; KabelNote(); PotNote(); if (!loading) { Compose("liniya"); RefreshState(); } return; }
         if (key == "plomba_drugoe") { seals.Value = v; return; }
         Control c;
         if (!inp.TryGetValue(key, out c)) return;
@@ -27439,17 +27439,24 @@ public class BsForm : Form {
         cards.Add(c);
         c.Grid.Row(F("Питание от (подстанция)", C("pitanie", "КТПБ-4726"), 18), F("Акт разграничения от", D("data_razgr"), 14),
             F("Место включения (наряд)", C("mesto", "РП-301"), 0));
-        c.Grid.Row(F("Отходящая линия (акт): «КЛ-0,4 кВ: РП-... - ЩУНИ ... марка L=..м.»", T("liniya", null), 0));
+        c.Grid.Row(F("Линия в акте, п. 3 (собирается сама из линий раздела «Потери»: вид, марка, длина, на чьём балансе)", T("liniya", null), 0));
         Field("pitanie", "Питание от", c.Name); Field("data_razgr", "Акт разграничения", c.Name); Field("liniya", "Отходящая линия", c.Name); Field("mesto", "Место включения", c.Name);
 
         c = new Card("Приборы учёта", "строка на каждый прибор учёта, «+» - ещё один; в справку, акт и доп. соглашение", 4);
         cards.Add(c);
-        pu = new RowList(new string[] { "Точка учёта", "Тип счётчика", "№ счётчика", "В", "А", "Показания", "Пов. кв.", "Пов. год", "ТТ тока", "ТТ напр.", "К расч" },
-            new int[] { 8, 0, 11, 9, 7, 9, 5, 5, 10, 6, 4 },        // ТТ тока шире: «ТОП-0,66 150/5» (учёт с трансформаторами)
-            new bool[] { true, true, false, true, true, false, true, false, false, false, false },
-            new string[] { "ЩУЭ", null, null, "3х230/400", "5(100)", "000000,00", null, null, "-", "-", "1" });
+        // показания - всегда цифрами: новый счётчик - нули по разрядности (Разр.: «6+2» - 6 целых и 2 после запятой -> 000000,00);
+        // К расч - сам по ТТ и ТН («150/5» -> 30); разрядность запоминается по типу счётчика
+        pu = new RowList(new string[] { "Точка учёта", "Тип счётчика", "№ счётчика", "В", "А", "Показания", "Пов. кв.", "Пов. год", "ТТ тока", "ТТ напр.", "К расч", "Разр." },
+            new int[] { 8, 0, 11, 9, 7, 9, 5, 5, 10, 6, 4, 5 },        // ТТ тока шире: «ТОП-0,66 150/5» (учёт с трансформаторами)
+            new bool[] { true, true, false, true, true, false, true, false, false, false, false, true },
+            new string[] { "ЩУЭ", null, null, "3х230/400", "5(100)", "000000,00", null, null, "-", "-", "1", "6+2" });
         pu.Name = "pu";
         Rows(pu);
+        pu.Edited += delegate(int row, int col) {
+            if (col == 1) RazrFor(row);
+            if (col == 1 || col == 5 || col == 11) ZerosFor(row);
+            if (col == 8 || col == 9) KFor(row);
+        };
         c.Grid.Row(F(null, pu, 0));
         c.Grid.Row(F(null, X("minus_on", "Строка в акте: «Данные прибора учёта № ... минусуются от данных прибора учёта № ...»"), 0));
         c.Grid.Row(F("минусуется ПУ №", T("minus_x", null), 14), F("от данных ПУ №", T("minus_y", null), 14), F("Строка в акте (собирается сама)", T("minus", null), 0));
@@ -27482,19 +27489,38 @@ public class BsForm : Form {
         c.Grid.Row(F("Пункт 1 соглашения", C("punkt1", null), 0));
         c.Grid.Row(F("Тарифная группа", C("tarif", null), 0), F("ТРЭТ", T("tret", null), 8), F("Примечание", T("prim", null), 16));
 
-        c = new Card("Потери", "Приложение 8: линии - марка из списка (ТКП 460-2017, табл. Б.5-Б.13): r0, x0, q30 и Rл подставятся сами; схема питания", 4);
+        c = new Card("Потери", "Приложение 8 по ТКП 460-2017: что стоит между границей балансовой принадлежности и учётом - формулы и числа подставятся сами", 4);
         cards.Add(c);
+        Seg potU = new Seg("0,4 кВ", "6 кВ", "10 кВ");
+        Reg("pot_u", potU);
+        Seg potUchet = new Seg("прямой", "через ТТ", "через ТТ и ТН");
+        Reg("pot_uchet", potUchet);
+        Seg potAron = new Seg("полнофазная", "Арона");
+        Reg("pot_aron", potAron);
+        c.Grid.Row(F("Учёт на напряжении", potU, 22), F("Схема учёта", potUchet, 34), F("Счётчик к ТТ (табл. 6.2)", potAron, 24));
+        Seg bal = new Seg("абонента", "РУП «МИНСКЭНЕРГО»");
+        Reg("balans", bal);
+        c.Grid.Row(F("Участок от границы до учёта на балансе (абонента - потери прибавляются, РУП - вычитаются)", bal, 40));
+        c.Grid.Row(F("Силовой трансформатор между границей и учётом (табл. Б.1-Б.3)", C("tr_tip", "нет"), 22), F("Uнт, кВ", T("tr_u", null), 6),
+            F("Rт, Ом", T("tr_r", null), 7), F("Xт, Ом", T("tr_x", null), 7), F("ΔPхх, кВт", T("tr_dp", null), 8), F("ΔQхх, квар", T("tr_dq", null), 8));
         linii = new RowList(new string[] { "Uн, кВ", "Марка, сечение", "L, км", "r0, Ом/км", "Rл, Ом", "x0, Ом/км", "q30, квар/км" },
             new int[] { 6, 0, 8, 8, 9, 8, 9 },
             new bool[] { true, true, false, false, false, false, false },
             new string[] { "0,4", null, null, null, null, null, null });
         linii.Name = "linii";
         Rows(linii);
-        linii.Edited += delegate(int row, int col) { if (col == 0 || col == 1) R0For(row); if (col <= 3) RFor(row); KabelNote(); };
+        linii.Edited += delegate(int row, int col) { if (col == 0 || col == 1) R0For(row); if (col <= 3) RFor(row); KabelNote(); Compose("liniya"); PotNote(); };
         c.Grid.Row(F(null, linii, 0));
         kabelNote.Font = St.Small;
         kabelNote.ForeColor = St.Hint;
         c.Grid.Row(F(null, kabelNote, 0));
+        c.Grid.Row(F("Режим работы (d - табл. 6.5)", C("rezhim", null), 26), F("d", T("pot_d", null), 6),
+            F("Потребители (tgφ - табл. 6.4)", C("tg_vid", null), 0), F("tgφ", T("pot_tg", null), 6));
+        c.Grid.Row(F(null, X("pot_wp", "Реактивная - по показаниям счётчика"), 32), F(null, X("pot_chain", "Потери элемента - к энергии следующего (п. 4.12)"), 46),
+            F(null, X("pot_react", "Считать реактивную составляющую"), 0));
+        potNote.Font = St.Small;
+        potNote.ForeColor = St.Caption;
+        c.Grid.Row(F("Проверка за месяц: Wа, кВт·ч", T("pot_test", "35000"), 14), F(null, potNote, 0));
         Button pick = Ui.Button("Выбрать схему…", false);
         pick.Name = "shemaPick";
         pick.Click += delegate { PickShema(); };
@@ -27568,6 +27594,16 @@ public class BsForm : Form {
             moshn.SetItems(4, lists.Get("БС: выходные"));
             linii.SetItems(0, new List<string>(new string[] { "0,4", "0,22", "6", "10", "35", "110" }));
             linii.SetItems(1, Cables());
+            List<string> tr = new List<string>();
+            tr.Add("нет");
+            tr.AddRange(Trafo.Types());
+            Items("tr_tip", tr);
+            List<string> rz = new List<string>();
+            foreach (string[] x in Rezhimy) rz.Add(x[0]);
+            Items("rezhim", rz);
+            List<string> tv = new List<string>();
+            foreach (string[] x in TgVidy) tv.Add(x[0]);
+            Items("tg_vid", tv);
             seals.SetPlaces(lists.Get("Места пломб"));
         } finally { loading = was; }
     }
@@ -27642,6 +27678,187 @@ public class BsForm : Form {
         else linii.SetCell(row, 4, "");
     }
 
+    // ---------- потери: схема учёта ----------
+
+    static readonly string[][] Rezhimy = { new string[] { "в одну смену", "2,70" }, new string[] { "в две смены", "1,70" }, new string[] { "в три смены", "1,35" },
+        new string[] { "в три смены без выходных", "1,02" }, new string[] { "непрерывная работа", "1,01" } };
+    static readonly string[][] TgVidy = { new string[] { "остальные потребители", "0,33" }, new string[] { "асинхронные двигатели, без КРМ", "0,88" },
+        new string[] { "асинхронные двигатели, неавтоматизированная КРМ", "0,62" }, new string[] { "асинхронные двигатели, автоматизированная КРМ", "0,20" } };
+
+    static string DOf(string rezhim) { foreach (string[] x in Rezhimy) if (x[0] == rezhim) return x[1]; return ""; }
+
+    void TrFor() {
+        TrafoInfo t = Trafo.Find(V("tr_tip"));
+        if (t == null) { if (V("tr_tip") == "нет" || V("tr_tip").Length == 0) foreach (string k in new string[] { "tr_u", "tr_r", "tr_x", "tr_dp", "tr_dq" }) SetV(k, ""); return; }
+        SetV("tr_u", PotScheme.N(t.Unt)); SetV("tr_r", PotScheme.N(t.R)); SetV("tr_x", PotScheme.N(t.X)); SetV("tr_dp", PotScheme.N(t.DP)); SetV("tr_dq", PotScheme.N(t.DQ));
+    }
+
+    // схема учёта -> приборы учёта: прямое включение - ТТ «-», К = 1; через ТТ - К по коэффициентам ТТ (и ТН)
+    void UchetFor() {
+        string u = V("pot_uchet");
+        for (int i = 0; i < pu.Count; i++) {
+            if (u == "прямой") { pu.SetCell(i, 8, "-"); pu.SetCell(i, 9, "-"); pu.SetCell(i, 10, "1"); }
+            else { if (u == "через ТТ") pu.SetCell(i, 9, "-"); KFor(i); }
+        }
+    }
+
+    // «ТОП-0,66 150/5 ...» -> 30; «НАМИ-10 10000/100» -> 100
+    static double Ratio(string s) {
+        System.Text.RegularExpressions.Match m = System.Text.RegularExpressions.Regex.Match(s ?? "", @"(\d+)\s*/\s*(\d+)");
+        double a, b;
+        if (!m.Success || !double.TryParse(m.Groups[1].Value, out a) || !double.TryParse(m.Groups[2].Value, out b) || b == 0) return 1;
+        return a / b;
+    }
+
+    void KFor(int row) {
+        double k = Ratio(pu.Cell(row, 8)) * Ratio(pu.Cell(row, 9));
+        pu.SetCell(row, 10, PotScheme.N(k));
+    }
+
+    // разрядность: запомненная по типу счётчика, иначе из справочника [БС: разрядность счётчика] («МЭС-3 = 6+2»), иначе 6+2
+    void RazrFor(int row) {
+        string type = pu.Cell(row, 1);
+        if (type.Length == 0) return;
+        string r = memory.Get("БСРазрядность:" + type, "");
+        if (r.Length == 0)
+            foreach (string s in lists.Get("БС: разрядность счётчика")) {
+                int e = s.IndexOf('=');
+                if (e > 0 && type.StartsWith(s.Substring(0, e).Trim(), StringComparison.OrdinalIgnoreCase)) r = s.Substring(e + 1).Trim();
+            }
+        if (r.Length > 0) pu.SetCell(row, 11, r);
+    }
+
+    // «6+2» -> «000000,00»; «6» -> «000000»
+    static string Zeros(string razr) {
+        string[] p = (razr ?? "").Replace(" ", "").Split('+', ',');
+        int a, b = 0;
+        if (p.Length == 0 || !int.TryParse(p[0], out a) || a <= 0 || a > 12) { a = 6; b = 2; }
+        else if (p.Length > 1) int.TryParse(p[1], out b);
+        return new string('0', a) + (b > 0 ? "," + new string('0', Math.Min(b, 4)) : "");
+    }
+
+    static bool Digits(string s) {
+        if (s.Trim().Length == 0) return false;
+        foreach (char c in s.Trim()) if (!char.IsDigit(c) && c != ',' && c != '.') return false;
+        return true;
+    }
+
+    // показания не цифрами («без напряжения», пусто) или нули другой разрядности - нули по разрядности
+    void ZerosFor(int row) {
+        if (pu.Cell(row, 11).Length == 0) pu.SetCell(row, 11, "6+2");
+        string v = pu.Cell(row, 5);
+        if (!Digits(v) || v.Replace("0", "").Replace(",", "").Replace(".", "").Length == 0) pu.SetCell(row, 5, Zeros(pu.Cell(row, 11)));
+    }
+
+    public PotScheme Scheme() {
+        PotScheme s = new PotScheme();
+        string u = V("pot_u");
+        s.Uuch = u.StartsWith("10") ? 10 : u.StartsWith("6") ? 6 : 0.38;
+        string uc = V("pot_uchet");
+        s.Uchet = uc.Contains("ТН") ? 2 : uc.Contains("ТТ") ? 1 : 0;
+        if (s.Uuch < 1 && s.Uchet == 2) s.Uchet = 1;
+        s.Aron = V("pot_aron") == "Арона";
+        s.Abonent = !V("balans").StartsWith("РУП");
+        double d;
+        if (Num(V("pot_d"), out d) && d > 0) s.D = d;
+        s.Rezhim = V("rezhim").Length > 0 ? V("rezhim") : "непрерывная работа";
+        if (Num(V("pot_tg"), out d)) s.Tg = d;
+        s.TgWhat = V("tg_vid").Length > 0 ? V("tg_vid") : "остальные потребители";
+        s.WpMeter = V("pot_wp") == "1";
+        s.Chain = V("pot_chain") == "1";
+        s.Reactive = V("pot_react") == "1";
+        double r, x, dp, dq, unt;
+        if (V("tr_tip").Length > 0 && V("tr_tip") != "нет" && Num(V("tr_r"), out r) && Num(V("tr_x"), out x) && Num(V("tr_dp"), out dp) && Num(V("tr_dq"), out dq) && Num(V("tr_u"), out unt)) {
+            s.Tr = new TrafoInfo();
+            s.Tr.Type = V("tr_tip"); s.Tr.R = r; s.Tr.X = x; s.Tr.DP = dp; s.Tr.DQ = dq; s.Tr.Unt = unt;
+        }
+        int n = 0;
+        for (int i = 0; i < linii.Count; i++) {
+            if (linii.Cell(i, 1).Length == 0) continue;
+            PotLine l = new PotLine();
+            l.Name = "L" + (++n);
+            l.Mark = linii.Cell(i, 1);
+            l.U = Kabel.Volt(linii.Cell(i, 0));
+            KabelInfo k = Kabel.Find(l.Mark, linii.Cell(i, 0));
+            if (k != null) l.Kind = k.Kind;
+            double v;
+            if (Num(linii.Cell(i, 2), out v)) l.L = v;
+            if (Num(linii.Cell(i, 3), out v)) l.R0 = v;
+            l.R = Num(linii.Cell(i, 4), out v) ? v : l.R0 * l.L;
+            if (Num(linii.Cell(i, 5), out v)) { l.X0 = v; l.X = v * l.L; }
+            if (Num(linii.Cell(i, 6), out v)) l.Q30 = v;
+            l.TgD = k != null && k.Section > 95 ? 0.025 : 0.03;
+            s.Lines.Add(l);
+        }
+        return s;
+    }
+
+    // под разделом: схема одной строкой и проверочный расчёт за месяц (744 ч)
+    void PotNote() {
+        if (linii == null) return;
+        PotScheme s = Scheme();
+        string t = "Схема: " + s.Summary() + ". В документ - " + s.Steps().Count + " шаг(ов) расчёта с формулами.";
+        double wa;
+        if (Num(V("pot_test"), out wa) && wa > 0) {
+            List<string> log = new List<string>();
+            double sum = s.Calc(wa, wa * s.Tg, 744, log);
+            t += "\nПроверка (744 ч, Wа = " + PotScheme.N(wa) + " кВт·ч): " + string.Join(", ", log.ToArray()) + " -> потери ≈ " + Math.Round(sum).ToString(CultureInfo.InvariantCulture) +
+                " кВт·ч, учёт с поправкой " + Math.Round(s.Abonent ? wa + sum : wa - sum).ToString(CultureInfo.InvariantCulture) + " кВт·ч.";
+        }
+        potNote.Text = t;
+        if (IsHandleCreated) LayoutCards();
+    }
+
+    // текст «Потерь» после схемы: элементы, сведения для расчёта, порядок расчёта с формулами
+    public string PoteriXml() {
+        PotScheme s = Scheme();
+        StringBuilder x = new StringBuilder();
+        x.Append(Omml.P("2. Элементы схемы:", true, false));
+        x.Append(Omml.P("Расчетный учет электроэнергии - на напряжении " + PotScheme.Uv(s.Uuch) + " кВ, " + (s.Uchet == 0 ? "счетчик прямого включения" :
+            s.Uchet == 1 ? "через трансформаторы тока (" + (s.Aron ? "неполнофазная схема подключения счетчика" : "полнофазная схема подключения счетчика") + ")" :
+            "через трансформаторы тока и напряжения") + ".", false, true));
+        if (s.Lines.Count > 0) {
+            x.Append(Omml.P("Линии электропередачи между точкой учета и границей балансовой принадлежности:", false, true));
+            bool hv = false;
+            foreach (PotLine l in s.Lines) if (!l.Low) hv = true;
+            List<string[]> rows = new List<string[]>();
+            foreach (PotLine l in s.Lines) {
+                if (hv) rows.Add(new string[] { l.Name, PotScheme.Uv(l.U), l.Kind, l.Mark, PotScheme.N(l.L), PotScheme.N(l.R0), PotScheme.N(l.R), l.X0 >= 0 ? PotScheme.N(l.X0) : "-", l.X >= 0 ? PotScheme.N(l.X) : "-", l.Q30 >= 0 ? PotScheme.N(l.Q30) : "-" });
+                else rows.Add(new string[] { l.Name, PotScheme.Uv(l.U), l.Kind, l.Mark, PotScheme.N(l.L), PotScheme.N(l.R0), PotScheme.N(l.R) });
+            }
+            if (hv) x.Append(Omml.Table(new string[] { "№", "Uн, кВ", "Вид", "Марка, сечение", "L, км", "r0, Ом/км", "Rл, Ом", "x0, Ом/км", "Xл, Ом", "q30, квар/км" }, rows,
+                new int[] { 500, 700, 600, 2300, 750, 900, 950, 850, 850, 900 }));
+            else x.Append(Omml.Table(new string[] { "№", "Uн, кВ", "Вид", "Марка, сечение", "L, км", "r0, Ом/км", "Rл = r0·L, Ом" }, rows,
+                new int[] { 600, 900, 800, 3100, 1100, 1300, 1500 }));
+            x.Append(Omml.P("Удельные сопротивления - ТКП 460-2017 (33240), приложение Б, или паспортные данные.", false, true));
+        }
+        if (s.Tr != null) {
+            x.Append(Omml.P("Силовой трансформатор:", false, true));
+            List<string[]> tr = new List<string[]>();
+            tr.Add(new string[] { s.Tr.Type, PotScheme.N(s.Tr.Unt), PotScheme.N(s.Tr.R), PotScheme.N(s.Tr.X), PotScheme.N(s.Tr.DP), PotScheme.N(s.Tr.DQ) });
+            x.Append(Omml.Table(new string[] { "Тип", "Uнт, кВ", "Rт, Ом", "Xт, Ом", "ΔPхх, кВт", "ΔQхх, квар" }, tr, new int[] { 2300, 1300, 1400, 1400, 1450, 1450 }));
+        }
+        x.Append(Omml.P("3. Сведения для расчета:", true, false));
+        x.Append(Omml.P("Режим работы объектов: " + s.Rezhim + ", дисперсионный коэффициент d = " + PotScheme.N(s.D) + " (таблица 6.5).", false, true));
+        x.Append(Omml.P("Время работы в расчетном месяце T (ч) принимается по таблице:", false, true));
+        List<string[]> mt = new List<string[]>();
+        mt.Add(new string[] { "744", "672 / 696*", "744", "720", "744", "720", "744", "744", "720", "744", "720", "744" });
+        x.Append(Omml.Table(new string[] { "январь", "февраль", "март", "апрель", "май", "июнь", "июль", "август", "сентябрь", "октябрь", "ноябрь", "декабрь" }, mt,
+            new int[] { 720, 860, 640, 720, 560, 640, 640, 760, 940, 860, 780, 860 }, 18));
+        x.Append(Omml.P("* в високосный год.", false, false));
+        x.Append(Omml.P("Потребление активной энергии за расчетный месяц определяется по показаниям расчетных приборов учета электрической энергии: Wа, кВт·ч.", false, true));
+        x.Append(Omml.P(s.WpMeter ? "Потребление реактивной энергии за расчетный месяц - по показаниям расчетных приборов учета: Wр, квар·ч."
+            : "Потребление реактивной энергии за расчетный месяц при отсутствии показаний: Wр = Wа·tgφ, где tgφ = " + PotScheme.N(s.Tg) + " (таблица 6.4).", false, true));
+        x.Append(Omml.P("4. Порядок расчета:", true, false));
+        int n = 0;
+        foreach (PotStep p in s.Steps()) {
+            n++;
+            x.Append(Omml.P("4." + n + " " + p.Text, false, true));
+            foreach (string m in p.Math) x.Append(Omml.MathP(m));
+        }
+        return x.ToString();
+    }
+
     // под таблицей линий: откуда взяты величины и какой формулой считать
     void KabelNote() {
         List<string> lines = new List<string>();
@@ -27682,6 +27899,12 @@ public class BsForm : Form {
         else if (key == "inzh") Compose("inzh_fio");
         else if (key == "dog_nom") Compose("paket");
         else if (key == "shema") ShemaNote();
+        else if (key == "rezhim") { string d = DOf(V("rezhim")); if (d.Length > 0) SetV("pot_d", d); }
+        else if (key == "tg_vid") { foreach (string[] x in TgVidy) if (x[0] == V("tg_vid")) SetV("pot_tg", x[1]); }
+        else if (key == "tr_tip") TrFor();
+        else if (key == "pot_uchet") UchetFor();
+        if (key == "balans") Compose("liniya");
+        if (key.StartsWith("pot_") || key.StartsWith("tr_") || key == "balans" || key == "rezhim" || key == "tg_vid") PotNote();
     }
 
     void SetAuto(string key, string v) {
@@ -27736,6 +27959,20 @@ public class BsForm : Form {
             case "minus":
                 return V("minus_x").Length == 0 && V("minus_y").Length == 0 ? "" : "Данные прибора учёта № " + V("minus_x") + " минусуются от данных прибора учёта № " + V("minus_y") + ".";
             case "plomby": return SealsText();
+            case "liniya": {
+                // акт приемки, п. 3: сама линия, длина и на чьём балансе (без «от ... до»)
+                List<string> p = new List<string>();
+                for (int i = 0; i < linii.Count; i++) {
+                    string mark = linii.Cell(i, 1);
+                    if (mark.Length == 0) continue;
+                    KabelInfo k = Kabel.Find(mark, linii.Cell(i, 0));
+                    double u = Kabel.Volt(linii.Cell(i, 0)), l;
+                    string len = Num(linii.Cell(i, 2), out l) ? " L=" + Math.Round(l * 1000).ToString(CultureInfo.InvariantCulture) + " м" : "";
+                    p.Add((k != null ? k.Kind : "КЛ") + "-" + (u < 1 ? (u < 0.3 ? "0,22" : "0,4") : linii.Cell(i, 0)) + " кВ " + mark + len);
+                }
+                if (p.Count == 0) return "";
+                return string.Join(", ", p.ToArray()) + " - на балансе " + (V("balans").StartsWith("РУП") ? "РУП «МИНСКЭНЕРГО»" : "абонента") + ".";
+            }
             case "inzh_fio": return EngineerFull(V("inzh"));
             case "paket": {
                 string n = (V("dog_nom").Length > 0 ? "Дог " + V("dog_nom") + " " : "") + V("np") + " " + ShortObject();
@@ -27960,6 +28197,16 @@ public class BsForm : Form {
             SetV("prim", "-");
             SetV("vid", "включение");
             SetV("prichina", First(lists.Get("Наряд: причина")));
+            SetV("pot_u", "0,4 кВ");
+            SetV("pot_uchet", "прямой");
+            SetV("pot_aron", "полнофазная");
+            SetV("balans", "абонента");
+            SetV("tr_tip", "нет");
+            SetV("rezhim", memory.Get("БСРежим", "непрерывная работа"));
+            SetV("pot_d", DOf(V("rezhim")));
+            SetV("tg_vid", "остальные потребители");
+            SetV("pot_tg", "0,33");
+            SetV("pot_chain", "1");
             string eng = memory.Get("БСИнженер", "");
             SetV("inzh", Engineers().Contains(eng) ? eng : First(Engineers()));
             SetV("nach", memory.Get("БСНачальник", First(Names())));
@@ -28100,7 +28347,7 @@ public class BsForm : Form {
             r["ПУНОМЕР"] = pu.Cell(i, 2);
             r["ПУВ"] = pu.Cell(i, 3);
             r["ПУА"] = pu.Cell(i, 4);
-            r["ПУПОКАЗ"] = pu.Cell(i, 5);
+            r["ПУПОКАЗ"] = Digits(pu.Cell(i, 5)) ? pu.Cell(i, 5) : Zeros(pu.Cell(i, 11));
             r["ПУКВ"] = kv.Length > 0 && char.IsDigit(kv[kv.Length - 1]) ? kv + " кв." : kv;
             r["ПУГОД"] = pu.Cell(i, 7);
             r["ПУГОДГ"] = pu.Cell(i, 7).Length > 0 ? pu.Cell(i, 7) + " г." : "";
@@ -28185,8 +28432,10 @@ public class BsForm : Form {
                 cur = next;
                 for (int i = 0; i < rows.Count; i++) foreach (KeyValuePair<string, string> kv in rows[i]) v[kv.Key + "_" + (i + 1)] = kv.Value;
             }
+            v["ПОТЕРИРАСЧЕТ"] = "@@ПОТЕРИ@@";
             DocxTemplate.Fill(cur, output, v);
             if (doc[1] == "bs_poteri.docx" && V("shema").Length > 0) PutShema(output, V("shema"));
+            if (doc[1] == "bs_poteri.docx") Omml.Insert(output, "@@ПОТЕРИ@@", PoteriXml());
         } finally {
             foreach (string t in temps) try { File.Delete(t); } catch { }
         }
@@ -28327,6 +28576,8 @@ public class BsForm : Form {
         memory.Values["БСМаркировка"] = V("plomba_marka");
         memory.Values["БСИнженер"] = V("inzh");
         memory.Values["БСНачальник"] = V("nach");
+        memory.Values["БСРежим"] = V("rezhim");
+        for (int i = 0; i < pu.Count; i++) if (pu.Cell(i, 1).Length > 0 && pu.Cell(i, 11).Length > 0) memory.Values["БСРазрядность:" + pu.Cell(i, 1)] = pu.Cell(i, 11);
         memory.Values["БСДолжностьНачальника"] = V("nach_dolzh");
         StringBuilder docs = new StringBuilder();
         foreach (string[] d in Docs) docs.Append(V(d[0]) == "1" ? '1' : '0');
@@ -29796,6 +30047,392 @@ public static class Kabel {
     }
 }
 // ==== КОНЕЦ БЛОКА СПРАВОЧНИКА КАБЕЛЕЙ ====
+
+// ==== БЛОК РАСЧЁТА ПОТЕРЬ (исходник - razrabotka/src/poteri.cs; вставляется скриптом inject.py) ====
+// «Потери (Приложение 8)» пакета документов: схема от границы балансовой принадлежности (ГБП) до учёта -> порядок расчёта по
+// ТКП 460-2017 (33240) с формулами Word (OMML) и подставленными числами. Справочник силовых трансформаторов - табл. Б.1-Б.3.
+// Элементы - от учёта к границе (п. 4.12): ТТ/ТН учёта, линии на напряжении учёта, силовой трансформатор, линии за ним.
+public class TrafoInfo {
+    public string Type = "";
+    public double Unt, R, X, DP, DQ;        // кВ, Ом, Ом, кВт, квар
+}
+
+public static class Trafo {
+    static readonly System.Globalization.CultureInfo Inv = System.Globalization.CultureInfo.InvariantCulture;
+    // тип Rт Xт ΔPхх ΔQхх (Б.1 - 6 кВ, Б.2 - 10 кВ, Б.3 - 35 кВ)
+    static readonly string B1 = "ОМ-1,25/6-У1 1382 1584 0.02 0.238;ОМ-2,5/6-У1 501 514 0.04 0.375;ОМП-4/6-У1 269 116 0.045 0.2;ОМП-10/6-У1 64 73 0.07 0.55;" +
+        "ТМ-10/6 133 218 0.105 1;ТМ-20/6 60 109 0.18 1.8;ТМ-25/6 40 73 0.115 0.8;ТМ-30/6 37.6 72.6 0.25 2.4;ТМ-40/6 23 46 0.165 1.2;ТМ-50/6 21 43.6 0.35 3.5;" +
+        "ТМ-63/6 13.7 29 0.243 1.7;ТМ-100/6 8.4 18.4 0.338 2.6;ТМ-160/6 4.5 11.5 0.5 3.8;ТМ-180/6 4.9 12.1 0.7 7.2;ТМ-250/6 2.4 7.9 1.04 8.8;" +
+        "ТМ-320/6 2.4 6.8 1.6 12.8;ТМ-400/6 1.4 4.5 1.0 8.4;ТМ-530/6 0.8 3.4 1.55 12.6;ТМ-1000/6 0.47 2.2 2.3 14;ТМ-1600/6 0.27 1.4 3.05 20.8;" +
+        "ТМ-2500/6 0.15 0.87 4.25 25;ТМ-4000/6 0.08 0.64 5.975 36;ТМ-6300/6 0.05 0.4 8.325 50.4;ТМ-10000/6 0.04 0.3 29.0 300";
+    static readonly string B2 = "ОМ-1,25/10-У1 3840 4400 0.02 0.238;ОМ-2,5/10-У1 1361 1504 0.04 0.375;ОМП-4/10-У1 775 328 0.045 0.2;ОМП-10/10-У1 180 203 0.07 0.55;" +
+        "ТМ-10/10 369 605 0.14 1;ТМ-20/10 165 302 0.22 2;ТМ-25/10 110 202 0.12 0.8;ТМ-30/10 103 202 0.3 2.7;ТМ-40/10 64.7 126 0.165 1.2;" +
+        "ТМ-50/10 58.5 121 0.44 4.0;ТМ-63/10 38.1 80.4 0.243 1.8;ТМ-100/10 23.4 50.5 0.338 2.6;ТМ-160/10 12.4 31.6 0.5 3.8;ТМ-180/10 13.8 33.6 0.7 7.2;" +
+        "ТМ-250/10 6.9 20.2 0.72 5.8;ТМ-320/10 6.6 19.0 1.125 12.8;ТМ-400/10 3.9 12.6 1.0 8.4;ТМ-530/10 3.2 10.8 2.9 33.6;ТМ-630/10 2.2 9.6 1.55 12.6;" +
+        "ТМ-1000/10 1.3 6.0 2.275 14;ТМ-1600/10 1.03 3.8 8.0 72.0;ТМ-1800/10 0.8 3.4 8.0 81;ТМ-3200/10 0.4 1.9 11.0 128;ТМ-5600/10 0.2 1.1 18 224;" +
+        "ТМ-6300/10 0.13 1.14 8.3 50.4;ТМ-7500/10 0.14 1.1 24 262";
+    static readonly string B3 = "ТМ-100/35 266 875 0.47 2.6;ТМ-160/35 140 549 0.66 3.84;ТМ-180/35 170 481 1.5 14.4;ТМ-250/35 80 350 0.96 5.75;ТМ-320/35 82 273 2.3 24;" +
+        "ТМ-400/35 46.6 219 1.35 8.4;ТМ-630/35 26 140 2 12.6;ТМ-1000/35 16 87.5 2.75 15;ТМ-1600/35 9.1 54.9 3.65 22.4;ТМ-4000/35 2.8 25.2 6.7 4;" +
+        "ТМ-6300/35 1.6 16.1 9.4 57;ТМ-7500/35 1.81 13.6 24 262;ТД-10000/35 1.25 10.1 29 300;ТД-16000/35 0.48 6.75 21 120;ТД-20000/35 0.41 5.75 39 600;" +
+        "ТДН-25000/35 0.27 4.3 29 175;ТД-40000/35 0.15 2.87 39 260;ТД-80000/35 0.07 1.53 65 480";
+
+    public static List<string> Types() {
+        List<string> r = new List<string>();
+        foreach (string t in new string[] { B2, B1, B3 }) foreach (string row in t.Split(';')) r.Add(row.Split(' ')[0]);
+        return r;
+    }
+
+    // «ТМ-250/10», «тм 250/10», «ТМГ-250/10» (ТМГ - как ТМ той же мощности, сверить с паспортом) -> данные таблицы Б
+    public static TrafoInfo Find(string type) {
+        string t = (type ?? "").Trim().ToUpperInvariant().Replace(" ", "-").Replace("ТМГ", "ТМ").Replace("ТМЗ", "ТМ");
+        if (t.Length == 0) return null;
+        string[][] tabs = { new string[] { B1, "6" }, new string[] { B2, "10" }, new string[] { B3, "35" } };
+        foreach (string[] tab in tabs)
+            foreach (string row in tab[0].Split(';')) {
+                string[] p = row.Split(' ');
+                if (p[0].ToUpperInvariant() != t) continue;
+                TrafoInfo i = new TrafoInfo();
+                i.Type = p[0];
+                i.Unt = double.Parse(tab[1], Inv);
+                i.R = double.Parse(p[1], Inv); i.X = double.Parse(p[2], Inv); i.DP = double.Parse(p[3], Inv); i.DQ = double.Parse(p[4], Inv);
+                return i;
+            }
+        return null;
+    }
+}
+
+public class PotLine {
+    public string Name = "", Mark = "", Kind = "КЛ";
+    public double U, L, R0, R, X0 = -1, X = -1, Q30 = -1, TgD;
+    public bool Low { get { return U < 1; } }
+    public bool OnePhase { get { return U < 0.3; } }
+}
+
+// один шаг расчёта: пояснение и формулы (запись - как TeX: \frac{a}{b}, x_{a}, x^{2}, \text{слово})
+public class PotStep {
+    public string Text = "";
+    public List<string> Math = new List<string>();
+    public PotStep(string text) { Text = text; }
+}
+
+public class PotScheme {
+    static readonly System.Globalization.CultureInfo Inv = System.Globalization.CultureInfo.InvariantCulture;
+    public double Uuch = 0.38;                   // напряжение учёта, кВ
+    public int Uchet;                            // 0 - прямого включения, 1 - через ТТ, 2 - через ТТ и ТН
+    public bool Aron;                            // ТТ по схеме Арона (неполнофазная)
+    public TrafoInfo Tr;                         // силовой трансформатор между ГБП и учётом (null - нет)
+    public List<PotLine> Lines = new List<PotLine>();
+    public bool Abonent = true;                  // участок на балансе абонента: потери прибавляются к учёту, иначе вычитаются
+    public double D = 1.01, Tg = 0.33;
+    public string Rezhim = "непрерывная работа", TgWhat = "остальные потребители";
+    public bool WpMeter;                         // реактивная - по показаниям счётчика
+    public bool Chain = true;                    // потери предыдущих элементов - к энергии следующего (п. 4.12)
+    public bool Reactive;                        // считать реактивную составляющую ТРЭТ
+
+    public static string N(double d) {
+        if (Math.Abs(d) >= 100) return Math.Round(d, 1).ToString("0.#", Inv).Replace('.', ',');
+        return Math.Round(d, 5).ToString("0.#####", Inv).Replace('.', ',');
+    }
+    public static string Uv(double u) { return u < 0.3 ? "0,22" : u < 1 ? "0,38" : N(u); }
+
+    // таблица 6.2 (ТТ) и 6.3 (ТН), кВт·ч в месяц
+    public double TT() {
+        if (Uchet == 0) return 0;
+        double[] u = { 0.38, 6, 10, 35, 110 }, full = { 4.2, 5.0, 8.3, 33.3, 91.7 }, aron = { 2.8, 3.3, 5.6, 22.2, 61.1 };
+        for (int i = 0; i < u.Length; i++) if (Math.Abs(Uuch - u[i]) < 0.5 || (Uuch < 1 && i == 0)) return Aron ? aron[i] : full[i];
+        return 0;
+    }
+    public double TN() {
+        if (Uchet != 2) return 0;
+        double[] u = { 6, 10, 35, 110 }, w = { 128, 158, 300, 917 };
+        for (int i = 0; i < u.Length; i++) if (Math.Abs(Uuch - u[i]) < 0.5) return w[i];
+        return 0;
+    }
+
+    // линии на напряжении учёта (до трансформатора, считая от учёта) и за трансформатором
+    public List<PotLine> Near() { List<PotLine> r = new List<PotLine>(); foreach (PotLine l in Lines) if (Tr == null || Same(l.U, Uuch)) r.Add(l); return r; }
+    public List<PotLine> Far() { List<PotLine> r = new List<PotLine>(); if (Tr != null) foreach (PotLine l in Lines) if (!Same(l.U, Uuch)) r.Add(l); return r; }
+    static bool Same(double a, double b) { return (a < 1 && b < 1) || Math.Abs(a - b) < 0.5; }
+
+    string Sg { get { return Abonent ? "+" : "-"; } }
+
+    // ---- порядок расчёта: шаги с формулами (числа подставлены, Wa и Wp - за расчётный месяц) ----
+    public List<PotStep> Steps() {
+        List<PotStep> s = new List<PotStep>();
+        PotStep p;
+        if (!WpMeter) {
+            p = new PotStep("Потребление реактивной энергии за расчетный месяц при отсутствии показаний расчетных приборов учета (формула (7), tgφ - таблица 6.4, " + TgWhat + "), квар·ч:");
+            p.Math.Add("W_{р}=W_{а}·tgφ=W_{а}·" + N(Tg));
+            s.Add(p);
+        }
+        List<string> sumA = new List<string>(), sumP = new List<string>();
+        string prevA = "", prevP = "";             // накопленные потери предыдущих элементов (символами)
+        if (TT() > 0) {
+            p = new PotStep("Потери в трехфазной группе измерительных трансформаторов тока " + Uv(Uuch) + " кВ (" + (Aron ? "неполнофазная схема подключения счетчика (схема Арона)" : "полнофазная схема подключения счетчика") + ", таблица 6.2), кВт·ч:");
+            p.Math.Add("ΔW_{а ТТ}=" + N(TT()));
+            s.Add(p);
+            sumA.Add("ΔW_{а ТТ}");
+            if (Chain) prevA += Sg + "ΔW_{а ТТ}";
+        }
+        if (TN() > 0) {
+            p = new PotStep("Потери в измерительных трансформаторах напряжения " + N(Uuch) + " кВ (таблица 6.3), кВт·ч:");
+            p.Math.Add("ΔW_{а ТН}=" + N(TN()));
+            s.Add(p);
+            sumA.Add("ΔW_{а ТН}");
+            if (Chain) prevA += Sg + "ΔW_{а ТН}";
+        }
+        foreach (PotLine l in Near()) LineSteps(s, l, sumA, sumP, ref prevA, ref prevP);
+        if (Tr != null) {
+            p = new PotStep("Постоянные потери (потери холостого хода) в силовом трансформаторе " + Tr.Type + " (формулы (1), (2)), кВт·ч и квар·ч:");
+            p.Math.Add("Δ\\bar{W}_{а Т}=T·ΔP_{хх}=T·" + N(Tr.DP));
+            if (Reactive) p.Math.Add("Δ\\bar{W}_{р Т}=T·ΔQ_{хх}=T·" + N(Tr.DQ));
+            s.Add(p);
+            p = new PotStep("Переменные (нагрузочные) потери в силовом трансформаторе " + Tr.Type + " (формулы (8), (9)), кВт·ч и квар·ч:");
+            Through(p, prevA, prevP);
+            string f = "\\frac{" + Wsum("а", prevA) + "^{2}+" + Wsum("р", prevP) + "^{2}}";
+            Two(p, "Δ\\tilde{W}_{а Т}", f + "{T·U_{нт}^{2}}·R_{т}·d·10^{-3}", f + "{T·" + N(Tr.Unt) + "^{2}}·" + N(Tr.R) + "·" + N(D) + "·10^{-3}");
+            if (Reactive) Two(p, "Δ\\tilde{W}_{р Т}", f + "{T·U_{нт}^{2}}·X_{т}·d·10^{-3}", f + "{T·" + N(Tr.Unt) + "^{2}}·" + N(Tr.X) + "·" + N(D) + "·10^{-3}");
+            s.Add(p);
+            sumA.Add("Δ\\bar{W}_{а Т}"); sumA.Add("Δ\\tilde{W}_{а Т}");
+            if (Reactive) { sumP.Add("Δ\\bar{W}_{р Т}"); sumP.Add("Δ\\tilde{W}_{р Т}"); }
+            if (Chain) { prevA += Sg + "Δ\\bar{W}_{а Т}" + Sg + "Δ\\tilde{W}_{а Т}"; if (Reactive) prevP += Sg + "Δ\\bar{W}_{р Т}" + Sg + "Δ\\tilde{W}_{р Т}"; }
+        }
+        foreach (PotLine l in Far()) LineSteps(s, l, sumA, sumP, ref prevA, ref prevP);
+        p = new PotStep("Суммарная величина технологического расхода электрической энергии (п. 6.5), кВт·ч" + (Reactive && sumP.Count > 0 ? " и квар·ч" : "") + ":");
+        p.Math.Add("ΔW_{а Σ}=" + (sumA.Count == 0 ? "0" : string.Join("+", sumA.ToArray())));
+        if (Reactive && sumP.Count > 0) p.Math.Add("ΔW_{р Σ}=" + string.Join("+", sumP.ToArray()));
+        s.Add(p);
+        p = new PotStep("Корректирующая поправка и данные учета с учетом коррекции (раздел 7; участок между точкой учета и ГБП - на балансе " + (Abonent ? "абонента: поправка прибавляется" : "РУП «МИНСКЭНЕРГО»: поправка вычитается") + "), кВт·ч:");
+        p.Math.Add("δW_{а}=ΔW_{а Σ};   W'_{а}=W_{а}" + Sg + "δW_{а}");
+        if (Reactive && sumP.Count > 0) p.Math.Add("δW_{р}=ΔW_{р Σ};   W'_{р}=W_{р}" + Sg + "δW_{р}");
+        s.Add(p);
+        return s;
+    }
+
+    static string Wsum(string c, string prev) { return prev.Length == 0 ? "W_{" + c + "}" : "W_{" + c + " вх}"; }
+
+    // энергия на входе элемента с учётом потерь предыдущих (п. 4.12) - отдельной строкой перед формулой элемента
+    static void Through(PotStep p, string prevA, string prevP) {
+        if (prevA.Length > 0) p.Math.Add("W_{а вх}=W_{а}" + prevA);
+        if (prevP.Length > 0) p.Math.Add("W_{р вх}=W_{р}" + prevP);
+    }
+
+    // «A=формула=числа» -> две строки: «A=формула» и «A=числа»
+    static void Two(PotStep p, string lhs, string sym, string num) { p.Math.Add(lhs + "=" + sym); p.Math.Add(lhs + "=" + num); }
+
+    void LineSteps(List<PotStep> s, PotLine l, List<string> sumA, List<string> sumP, ref string prevA, ref string prevP) {
+        string n = l.Name;
+        PotStep p;
+        if (!l.Low && l.Kind == "КЛ" && l.Q30 > 0) {
+            p = new PotStep("Постоянные потери в кабельной линии " + n + " " + Uv(l.U) + " кВ (формулы (3)-(5), q30 = " + N(l.Q30) + " квар/км, tgδ = " + N(l.TgD) + " - таблица 6.1), кВт·ч" + (Reactive ? " и квар·ч" : "") + ":");
+            p.Math.Add("Q_{з " + n + "}=q_{30}·L=" + N(l.Q30) + "·" + N(l.L) + "=" + N(l.Q30 * l.L) + " \\text{квар}");
+            p.Math.Add("Δ\\bar{W}_{а " + n + "}=Q_{з}·tgδ·T=" + N(l.Q30 * l.L) + "·" + N(l.TgD) + "·T=" + N(l.Q30 * l.L * l.TgD) + "·T");
+            if (Reactive) p.Math.Add("Δ\\bar{W}_{р " + n + "}=-Q_{з}·T=-" + N(l.Q30 * l.L) + "·T");
+            s.Add(p);
+            sumA.Add("Δ\\bar{W}_{а " + n + "}");
+            if (Reactive) sumP.Add("Δ\\bar{W}_{р " + n + "}");
+        }
+        if (l.OnePhase) {
+            p = new PotStep("Величина технологического расхода электрической энергии в однофазной линии " + n + " 0,22 кВ (формулы (12), (13): Rл = Rф + R0, cosφ = 0,995; реактивные потери равны нулю), кВт·ч:");
+            Through(p, prevA, "");
+            Two(p, "ΔW_{а " + n + "}", "\\frac{" + Wsum("а", prevA) + "^{2}}{cos^{2}φ·U_{н}^{2}·T}·R_{" + n + "}·d·10^{-3}", "\\frac{" + Wsum("а", prevA) + "^{2}}{0,995^{2}·0,22^{2}·T}·" + N(l.R) + "·" + N(D) + "·10^{-3}");
+        } else {
+            p = new PotStep("Величина технологического расхода электрической энергии на участке " + (l.Kind == "ВЛ" ? "воздушной" : "кабельной") + " линии " + n + " " + Uv(l.U) + " кВ (формула (10)" + (l.Low ? "; реактивные потери в линиях до 1 кВ равны нулю" : "") + "), кВт·ч:");
+            Through(p, prevA, prevP);
+            string f = "\\frac{" + Wsum("а", prevA) + "^{2}+" + Wsum("р", prevP) + "^{2}}";
+            Two(p, "ΔW_{а " + n + "}", f + "{T·U_{н}^{2}}·R_{" + n + "}·d·10^{-3}", f + "{T·" + Uv(l.U) + "^{2}}·" + N(l.R) + "·" + N(D) + "·10^{-3}");
+            if (!l.Low && Reactive && l.X > 0)
+                Two(p, "ΔW_{р " + n + "}", f + "{T·U_{н}^{2}}·X_{" + n + "}·d·10^{-3}", f + "{T·" + Uv(l.U) + "^{2}}·" + N(l.X) + "·" + N(D) + "·10^{-3}");
+        }
+        s.Add(p);
+        sumA.Add("ΔW_{а " + n + "}");
+        if (!l.Low && Reactive && l.X > 0) sumP.Add("ΔW_{р " + n + "}");
+        if (Chain) { prevA += Sg + "ΔW_{а " + n + "}"; if (!l.Low && Reactive && l.X > 0) prevP += Sg + "ΔW_{р " + n + "}"; }
+    }
+
+    // ---- проверочный расчёт за месяц (числа): итог активной составляющей, кВт·ч ----
+    public double Calc(double wa, double wp, double t, List<string> log) {
+        if (!WpMeter) wp = wa * Tg;
+        double sg = Abonent ? 1 : -1, ca = 0, cp = 0, sum = 0;
+        double tt = TT(), tn = TN();
+        if (tt > 0) { sum += tt; if (Chain) ca += sg * tt; if (log != null) log.Add("ТТ " + N(tt)); }
+        if (tn > 0) { sum += tn; if (Chain) ca += sg * tn; if (log != null) log.Add("ТН " + N(tn)); }
+        foreach (PotLine l in Near()) sum += CalcLine(l, wa, wp, t, ref ca, ref cp, sg, log);
+        if (Tr != null) {
+            double c = t * Tr.DP, v = (Sq(wa + ca) + Sq(wp + cp)) / (t * Tr.Unt * Tr.Unt) * Tr.R * D * 1e-3;
+            sum += c + v;
+            if (log != null) log.Add(Tr.Type + " " + N(c) + " + " + N(v));
+            if (Chain) { ca += sg * (c + v); if (Reactive) cp += sg * (t * Tr.DQ + (Sq(wa + ca) + Sq(wp + cp)) / (t * Tr.Unt * Tr.Unt) * Tr.X * D * 1e-3); }
+        }
+        foreach (PotLine l in Far()) sum += CalcLine(l, wa, wp, t, ref ca, ref cp, sg, log);
+        return sum;
+    }
+
+    static double Sq(double x) { return x * x; }
+
+    double CalcLine(PotLine l, double wa, double wp, double t, ref double ca, ref double cp, double sg, List<string> log) {
+        double c = !l.Low && l.Kind == "КЛ" && l.Q30 > 0 ? l.Q30 * l.L * l.TgD * t : 0;
+        double v = l.OnePhase ? Sq(wa + ca) / (0.995 * 0.995 * 0.22 * 0.22 * t) * l.R * D * 1e-3
+            : (Sq(wa + ca) + Sq(wp + cp)) / (t * Sq(l.Low ? 0.38 : l.U)) * l.R * D * 1e-3;
+        if (log != null) log.Add(l.Name + " " + N(c + v));
+        if (Chain) { ca += sg * v; if (!l.Low && Reactive && l.X > 0) cp += sg * (Sq(wa + ca) + Sq(wp + cp)) / (t * Sq(l.U)) * l.X * D * 1e-3; }
+        return c + v;
+    }
+
+    // ---- описание схемы одной строкой (для формы) ----
+    public string Summary() {
+        List<string> e = new List<string>();
+        e.Add("учёт " + Uv(Uuch) + " кВ " + (Uchet == 0 ? "прямого включения" : Uchet == 1 ? "через ТТ" : "через ТТ и ТН"));
+        if (TT() > 0) e.Add("ТТ " + N(TT()) + " кВт·ч/мес");
+        if (TN() > 0) e.Add("ТН " + N(TN()) + " кВт·ч/мес");
+        foreach (PotLine l in Near()) e.Add(l.Name + " " + l.Kind + " " + Uv(l.U) + " кВ, R = " + N(l.R) + " Ом");
+        if (Tr != null) e.Add("трансформатор " + Tr.Type);
+        foreach (PotLine l in Far()) e.Add(l.Name + " " + l.Kind + " " + Uv(l.U) + " кВ, R = " + N(l.R) + " Ом");
+        e.Add("d = " + N(D));
+        e.Add(Abonent ? "потери прибавляются (баланс абонента)" : "потери вычитаются (баланс РУП)");
+        return string.Join("; ", e.ToArray());
+    }
+}
+
+// формулы в Word (OMML) из записи вида TeX и абзацы/таблицы WordprocessingML для вставки в документ
+public static class Omml {
+    const string M = "http://schemas.openxmlformats.org/officeDocument/2006/math";
+
+    static string Esc(string s) { return s.Replace("&", "&amp;").Replace("<", "&lt;").Replace(">", "&gt;"); }
+    static string Run(string t, bool plain) {
+        // числа с запятой («0,33») - обычным текстом: иначе Word ставит после запятой пробел, как в перечислении
+        bool num = false;
+        for (int i = 1; i + 1 < t.Length; i++) if (t[i] == ',' && char.IsDigit(t[i - 1]) && char.IsDigit(t[i + 1])) num = true;
+        return "<m:r>" + (num ? "<m:rPr><m:nor/></m:rPr>" : plain ? "<m:rPr><m:sty m:val=\"p\"/></m:rPr>" : "") + "<w:rPr><w:rFonts w:ascii=\"Cambria Math\" w:hAnsi=\"Cambria Math\"/><w:sz w:val=\"24\"/></w:rPr><m:t xml:space=\"preserve\">" + Esc(t) + "</m:t></m:r>";
+    }
+
+    // запись -> OMML: \frac{a}{b}, x_{..}, x^{..}, \bar{W}, \tilde{W}, \text{..}; остальное - текст
+    public static string Math(string tex) {
+        int i = 0;
+        return "<m:oMath>" + Seq(tex, ref i) + "</m:oMath>";
+    }
+
+    static string Seq(string s, ref int i) {
+        StringBuilder sb = new StringBuilder(), plain = new StringBuilder();
+        while (i < s.Length && s[i] != '}') {
+            string atom = null;
+            if (s[i] == '\\') {
+                int j = i + 1;
+                while (j < s.Length && char.IsLetter(s[j])) j++;
+                string cmd = s.Substring(i + 1, j - i - 1);
+                i = j;
+                if (cmd == "frac") { string a = Arg(s, ref i), b = Arg(s, ref i); atom = "<m:f><m:num>" + a + "</m:num><m:den>" + b + "</m:den></m:f>"; }
+                else if (cmd == "bar" || cmd == "tilde") {
+                    string a = Arg(s, ref i);
+                    atom = "<m:acc><m:accPr><m:chr m:val=\"" + (cmd == "bar" ? "̅" : "̃") + "\"/></m:accPr><m:e>" + a + "</m:e></m:acc>";
+                } else if (cmd == "text") { int k = s.IndexOf('}', i); string t = s.Substring(i + 1, k - i - 1); i = k + 1; atom = Run(t, true); }
+                else atom = Run(cmd, false);
+            } else if (s[i] == '{') { i++; atom = Seq(s, ref i); i++; }
+            else if (s[i] == '_' || s[i] == '^') { atom = null; }
+            else {
+                // простой текст: копим до значка индекса или команды
+                char ch = s[i];
+                bool next = i + 1 < s.Length && (s[i + 1] == '_' || s[i + 1] == '^');
+                if (!next) { plain.Append(ch); i++; continue; }
+                atom = Run(ch.ToString(), !char.IsLetter(ch) || ch > 'z');
+                i++;
+            }
+            if (plain.Length > 0) { sb.Append(Run(plain.ToString(), Cyr(plain.ToString()))); plain.Length = 0; }
+            if (atom == null) { atom = ""; }
+            string sub = null, sup = null;
+            while (i < s.Length && (s[i] == '_' || s[i] == '^')) {
+                bool isSub = s[i] == '_';
+                i++;
+                string a = Arg(s, ref i);
+                if (isSub) sub = a; else sup = a;
+            }
+            if (sub != null && sup != null) sb.Append("<m:sSubSup><m:e>" + atom + "</m:e><m:sub>" + sub + "</m:sub><m:sup>" + sup + "</m:sup></m:sSubSup>");
+            else if (sub != null) sb.Append("<m:sSub><m:e>" + atom + "</m:e><m:sub>" + sub + "</m:sub></m:sSub>");
+            else if (sup != null) sb.Append("<m:sSup><m:e>" + atom + "</m:e><m:sup>" + sup + "</m:sup></m:sSup>");
+            else sb.Append(atom);
+        }
+        if (plain.Length > 0) sb.Append(Run(plain.ToString(), Cyr(plain.ToString())));
+        return sb.ToString();
+    }
+
+    // русские буквы (индексы «а», «р», «ТТ», «хх») - прямым шрифтом
+    static bool Cyr(string t) { foreach (char c in t) if (c >= '\u0400' && c <= '\u04FF') return true; return false; }
+
+    static string Arg(string s, ref int i) {
+        if (i < s.Length && s[i] == '{') {
+            i++;
+            string r = Seq(s, ref i);
+            i++;
+            // индекс из русских букв - прямым шрифтом
+            return r;
+        }
+        if (i < s.Length) { string r = Run(s[i].ToString(), false); i++; return r; }
+        return "";
+    }
+
+    // ---- WordprocessingML ----
+    public static string P(string text, bool bold, bool indent) {
+        return "<w:p><w:pPr><w:spacing w:before=\"60\" w:after=\"0\" w:line=\"240\" w:lineRule=\"auto\"/>" + (indent ? "<w:ind w:firstLine=\"567\"/>" : "") +
+            "<w:jc w:val=\"both\"/></w:pPr><w:r><w:rPr>" + (bold ? "<w:b/>" : "") + "<w:sz w:val=\"24\"/></w:rPr><w:t xml:space=\"preserve\">" + Esc(text) + "</w:t></w:r></w:p>";
+    }
+
+    public static string MathP(string tex) {
+        return "<w:p><w:pPr><w:spacing w:before=\"60\" w:after=\"60\"/><w:jc w:val=\"center\"/></w:pPr><m:oMathPara><m:oMathParaPr><m:jc m:val=\"center\"/></m:oMathParaPr>" + Math(tex) + "</m:oMathPara></w:p>";
+    }
+
+    // таблица по ширине текста (twips), первая строка - заголовок
+    public static string Table(string[] head, List<string[]> rows, int[] widths) { return Table(head, rows, widths, 20); }
+
+    public static string Table(string[] head, List<string[]> rows, int[] widths, int size) {
+        StringBuilder sb = new StringBuilder();
+        int total = 0;
+        foreach (int w in widths) total += w;
+        sb.Append("<w:tbl><w:tblPr><w:tblW w:w=\"" + total + "\" w:type=\"dxa\"/><w:jc w:val=\"center\"/><w:tblBorders>");
+        foreach (string b in new string[] { "top", "left", "bottom", "right", "insideH", "insideV" }) sb.Append("<w:" + b + " w:val=\"single\" w:sz=\"4\" w:space=\"0\" w:color=\"auto\"/>");
+        sb.Append("</w:tblBorders><w:tblLayout w:type=\"fixed\"/><w:tblCellMar><w:left w:w=\"57\" w:type=\"dxa\"/><w:right w:w=\"57\" w:type=\"dxa\"/></w:tblCellMar></w:tblPr><w:tblGrid>");
+        foreach (int w in widths) sb.Append("<w:gridCol w:w=\"" + w + "\"/>");
+        sb.Append("</w:tblGrid>");
+        List<string[]> all = new List<string[]>();
+        all.Add(head);
+        all.AddRange(rows);
+        for (int r = 0; r < all.Count; r++) {
+            sb.Append("<w:tr><w:trPr><w:cantSplit/></w:trPr>");
+            for (int c = 0; c < widths.Length; c++) {
+                string t = c < all[r].Length ? all[r][c] : "";
+                sb.Append("<w:tc><w:tcPr><w:tcW w:w=\"" + widths[c] + "\" w:type=\"dxa\"/><w:vAlign w:val=\"center\"/></w:tcPr><w:p><w:pPr><w:spacing w:before=\"0\" w:after=\"0\" w:line=\"240\" w:lineRule=\"auto\"/><w:jc w:val=\"center\"/></w:pPr><w:r><w:rPr>" +
+                    (r == 0 ? "<w:b/>" : "") + "<w:sz w:val=\"" + size + "\"/></w:rPr><w:t xml:space=\"preserve\">" + Esc(t) + "</w:t></w:r></w:p></w:tc>");
+            }
+            sb.Append("</w:tr>");
+        }
+        sb.Append("</w:tbl>");
+        return sb.ToString();
+    }
+
+    // абзац с меткой mark заменяется фрагментом xml (абзацы, таблицы); ns - пространства имён w и m
+    public static void Insert(string docx, string mark, string xml) {
+        List<ZipEntry> entries = Zip.Read(docx);
+        foreach (ZipEntry e in entries) {
+            if (e.Name != "word/document.xml") continue;
+            string doc = Encoding.UTF8.GetString(e.GetData());
+            int at = doc.IndexOf(mark);
+            if (at < 0) return;
+            int ps = doc.LastIndexOf("<w:p ", at), ps2 = doc.LastIndexOf("<w:p>", at);
+            ps = Math2(ps, ps2);
+            int pe = doc.IndexOf("</w:p>", at) + 6;
+            string root = doc.Substring(0, doc.IndexOf('>', doc.IndexOf("<w:document")) + 1);
+            if (root.IndexOf("xmlns:m=") < 0) doc = doc.Replace(root, root.Replace("<w:document ", "<w:document xmlns:m=\"" + M + "\" "));
+            at = doc.IndexOf(mark);
+            ps = Math2(doc.LastIndexOf("<w:p ", at), doc.LastIndexOf("<w:p>", at));
+            pe = doc.IndexOf("</w:p>", at) + 6;
+            doc = doc.Substring(0, ps) + xml + doc.Substring(pe);
+            e.SetData(new UTF8Encoding(false).GetBytes(doc));
+        }
+        Zip.Write(docx, entries);
+    }
+
+    static int Math2(int a, int b) { return a > b ? a : b; }
+}
+// ==== КОНЕЦ БЛОКА РАСЧЁТА ПОТЕРЬ ====
 
 public class SealRow {
     // дата, адрес, № договора / лицевой, № учёта, причина, снятая пломба, примечание (до 09.11 вместо адреса был «№ задания»:
