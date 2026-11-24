@@ -7,8 +7,10 @@ n=$1; cs=$2; dir=$3; png=$4; shift 4
 t=$(basename "$cs" .cs)
 mcs -nologo -out:$B/$t.exe -r:$B/${n}_mono.dll -r:System.Windows.Forms.dll -r:System.Drawing.dll "$cs" || exit 1
 export XDG_CONFIG_HOME=$SP/test/profile/config XDG_DATA_HOME=$SP/test/profile/local LANG=C.UTF-8; mkdir -p $XDG_CONFIG_HOME $XDG_DATA_HOME
-export DISPLAY=:77; pgrep -f "Xvfb :77" >/dev/null || (Xvfb :77 -screen 0 1366x768x24 >/dev/null 2>&1 &); sleep 1
-(cd $B && MONO_IOMAP=all timeout 120 mono $t.exe "$dir" > $B/$t.log 2>&1 &)
+# экран: SCREEN=1024x560 (нетбук 1024x600 минус панель задач) - на своём дисплее :78
+scr=${SCREEN:-1366x768}; disp=77; [ "$scr" != 1366x768 ] && disp=78
+export DISPLAY=:$disp; pgrep -f "Xvfb :$disp" >/dev/null || (Xvfb :$disp -screen 0 ${scr}x24 >/dev/null 2>&1 &); sleep 1
+(cd $B && MONO_IOMAP=all timeout 120 mono $t.exe "$dir" "$png" > $B/$t.log 2>&1 &)
 prev=0; i=0
 for s in "$@"; do sleep $(echo "$s - $prev" | bc); prev=$s; i=$((i+1)); import -window root "${png}_$i.png" 2>/dev/null; echo "скриншот ${png}_$i.png"; done
 sleep 3; pkill -f "mono $t.exe"; grep -v 'Gtk not found' $B/$t.log

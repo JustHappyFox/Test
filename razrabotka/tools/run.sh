@@ -9,7 +9,9 @@ public static class L { [System.STAThread] public static void Main() { $c.Run("$
 CS
 mcs -nologo -out:$B/run_$n.exe -r:$B/${n}_mono.dll -r:System.Windows.Forms.dll $B/run_$n.cs || exit 1
 cp $B/${n}_mono.dll $B/ 2>/dev/null
-export DISPLAY=:77; (Xvfb :77 -screen 0 1366x768x24 >/dev/null 2>&1 &) ; sleep 1
+# экран: SCREEN=1024x560 (нетбук 1024x600 минус панель задач) - на своём дисплее :78
+scr=${SCREEN:-1366x768}; disp=77; [ "$scr" != 1366x768 ] && disp=78
+export DISPLAY=:$disp; pgrep -f "Xvfb :$disp" >/dev/null || (Xvfb :$disp -screen 0 ${scr}x24 >/dev/null 2>&1 &) ; sleep 1
 (cd $B && MONO_IOMAP=all timeout $((sec+20)) mono run_$n.exe > $B/run_$n.log 2>&1 &)
 sleep $sec; import -window root "$png" 2>/dev/null || xwd -root -silent | convert xwd:- "$png"
 pkill -f "mono run_$n.exe"; echo "скриншот: $png"; tail -5 $B/run_$n.log

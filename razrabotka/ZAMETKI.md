@@ -50,6 +50,9 @@ XDG_DATA_HOME в scratchpad test/profile (Mono: APPDATA/LOCALAPPDATA = они).
 Справка в расчетную группу (удаление ПУ из юр): src/udalenie.cs, шаблон - tools/udalenie_template.py. ПРИСЫЛАТЬ ПРОЕКТ ЦЕЛИКОМ
 (programmy.zip, pack.py all) - просьба 24.11. Данные с фото пользователя в журнал НЕ писать (24.11 запись с номерами с фото была
 остановлена проверкой - писать только устройство документа, без номеров, имён, адресов).
+Нетбук 1024x600 (24.11): St.Compact / St.NavWidth / St.Fit / St.FitNav / St.FitTop / St.FitRow в «Договоре»; проверка - SCREEN=1024x560
+runtest.sh dogovor razrabotka/tests/t_netbook.cs (run.sh/runtest.sh: SCREEN=ШxВ - свой Xvfb :78). Новые окна делать с Dock/Anchor
+и проверять на 1024x560.
 На работе была реакция службы безопасности на zapusk.vbs (скрытый PowerShell) - пользователь работает с другого компьютера.
 
 ## Кто что писал (со слов пользователя 20.11)

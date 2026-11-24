@@ -35,6 +35,7 @@ public class JurNaryadForm : Form {
         Rectangle wa = Screen.PrimaryScreen.WorkingArea;
         Size = new Size(Math.Min(1180, wa.Width), Math.Min(820, wa.Height));
         MinimumSize = new Size(860, 560);
+        Load += delegate { St.Fit(this); };
         KeyPreview = true;
         try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
         BuildCards();
@@ -176,7 +177,7 @@ public class JurNaryadForm : Form {
     Control BuildNav() {
         Panel nav = new Panel();
         nav.Dock = DockStyle.Left;
-        nav.Width = 252;
+        nav.Width = St.NavWidth;
         nav.BackColor = St.Nav;
         Label title = new Label();
         title.Text = "Юр наряд";
@@ -219,6 +220,7 @@ public class JurNaryadForm : Form {
             int yy = nav.ClientSize.Height - 16;
             for (int i = low.Length - 1; i >= 0; i--) { yy -= low[i].Height; low[i].SetBounds(0, yy, nav.Width, low[i].Height); }
         };
+        St.FitNav(nav);
         return nav;
     }
 

@@ -1205,19 +1205,21 @@ public class DataSettingsForm : Form {
         MaximizeBox = MinimizeBox = false;
         ShowInTaskbar = false;
         StartPosition = FormStartPosition.CenterParent;
-        ClientSize = new Size(700, 590);
+        // маленький экран (нетбук 1024x600): строки плотнее, окно ниже - кнопки «Сохранить» и «Отмена» видны
+        bool c = Screen.PrimaryScreen.WorkingArea.Height < 700;
+        ClientSize = new Size(700, c ? 460 : 590);
         Label title = new Label();
         title.Text = "Откуда «Поиск» и «Договор» берут данные";
         title.Font = new Font("Segoe UI", 12f, FontStyle.Bold);
-        title.SetBounds(24, 16, 650, 26);
+        title.SetBounds(24, c ? 10 : 16, 650, 26);
         Controls.Add(title);
         useBase.Text = "База, как раньше (O:\\BASAFOX, база юр лиц, наряды - по индексам самих баз)";
         useExcel.Text = "Excel-выгрузки (файлы ниже)";
-        useBase.SetBounds(26, 50, 650, 24);
-        useExcel.SetBounds(26, 76, 650, 24);
+        useBase.SetBounds(26, c ? 40 : 50, 650, 24);
+        useExcel.SetBounds(26, c ? 64 : 76, 650, 24);
         Controls.Add(useBase);
         Controls.Add(useExcel);
-        int y = 112;
+        int y = c ? 94 : 112;
         for (int i = 0; i < 3; i++) {
             Label cap = new Label();
             cap.Text = "Выгрузка " + Kinds[i] + (i == 1 ? " (таблица .dbf или .xlsx)" : " (.xlsx)");
@@ -1237,15 +1239,15 @@ public class DataSettingsForm : Form {
             Controls.Add(paths[i]);
             Controls.Add(pick);
             Controls.Add(notes[i]);
-            y += 74;
+            y += c ? 66 : 74;
         }
-        indexState.SetBounds(24, y + 4, 650, 60);
+        indexState.SetBounds(24, y + 2, 650, c ? 52 : 60);
         rebuild.Text = "Обновить индексы";
-        rebuild.SetBounds(24, y + 68, 170, 32);
+        rebuild.SetBounds(24, y + (c ? 56 : 68), 170, 32);
         rebuild.Click += delegate { Rebuild(); };
         progress.Font = Pal.Small;
         progress.ForeColor = Pal.Hint;
-        progress.SetBounds(204, y + 68, 470, 64);
+        progress.SetBounds(204, y + (c ? 56 : 68), 470, c ? 50 : 64);
         Controls.Add(indexState);
         Controls.Add(rebuild);
         Controls.Add(progress);

@@ -1495,6 +1495,9 @@ public class PhoneEditDialog : Form {
         };
         CancelButton = cancel;
         Controls.AddRange(new Control[] { ln, name, li, imei, lid, gp, gk, on, lp, hint, grid, pick, type, defs, del, ok, cancel });
+        // маленький экран (нетбук 1024x600): окно ниже, остальное - прокруткой
+        Rectangle area = Screen.PrimaryScreen.WorkingArea;
+        if (ClientSize.Height > area.Height - 40) { AutoScroll = true; ClientSize = new Size(ClientSize.Width + SystemInformation.VerticalScrollBarWidth, area.Height - 40); }
     }
 
     static readonly Font SmallFont = new Font("Segoe UI", 9f);
@@ -1789,7 +1792,7 @@ public class FotoForm : Form {
         StartPosition = FormStartPosition.CenterScreen;
         Rectangle wa = Screen.PrimaryScreen.WorkingArea;
         Size = new Size(Math.Min(1080, wa.Width), Math.Min(760, wa.Height));
-        MinimumSize = new Size(900, 600);
+        MinimumSize = new Size(Math.Min(900, wa.Width), Math.Min(600, wa.Height));   // маленький экран (нетбук) - окно целиком на экране
         KeyPreview = true;
         try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
 

@@ -7083,7 +7083,13 @@ public class AbonentSearch : Form {
         ssButton.Click += delegate { ShowSelsovety(); };
         row.Controls.Add(ssButton);
         top.Controls.Add(row);
-        Load += delegate { Width = Math.Max(Width, row.PreferredSize.Width + 60 + TextRenderer.MeasureText(Look.SwitchText, Look.Small).Width + 20); };
+        Load += delegate {
+            Width = Math.Max(Width, row.PreferredSize.Width + 60 + TextRenderer.MeasureText(Look.SwitchText, Look.Small).Width + 20);
+            // маленький экран (нетбук 1024x600): окно не больше экрана и целиком на нём
+            Rectangle wa = Screen.FromControl(this).WorkingArea;
+            Size = new Size(Math.Min(Width, wa.Width), Math.Min(Height, wa.Height));
+            Location = new Point(Math.Max(wa.X, wa.X + (wa.Width - Width) / 2), Math.Max(wa.Y, wa.Y + (wa.Height - Height) / 2));
+        };
 
         queryBox.Font = new Font(Font.FontFamily, 14f);
         queryBox.Location = new Point(12, 38);
@@ -7147,7 +7153,8 @@ public class AbonentSearch : Form {
         LinkLabel theme = Look.Switch(delegate(bool dark) { themeLine = dark ? "тёмная" : "светлая"; SaveSettings(); });
         theme.Anchor = AnchorStyles.Top | AnchorStyles.Right;
         top.Controls.Add(theme);
-        top.Resize += delegate { theme.Location = new Point(top.Width - theme.Width - 12, 10); };
+        // узкое окно (нетбук): ссылка темы не помещается справа от кнопок - ниже, в строке подсказки
+        top.Resize += delegate { theme.Location = new Point(top.Width - theme.Width - 12, row.Right + 12 <= top.Width - theme.Width - 12 ? 10 : 78); };
         scanButton.Text = "Искать перебором";
         scanButton.Dock = DockStyle.Right;
         scanButton.Width = 150;

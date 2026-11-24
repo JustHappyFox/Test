@@ -2356,6 +2356,103 @@ public static class St {
     public static readonly Font Title = new Font("Segoe UI", 12.5f, FontStyle.Bold);
     public static readonly Font Big = new Font("Segoe UI", 16f, FontStyle.Bold);
     public static readonly Font NavFont = new Font("Segoe UI", 10.5f);
+
+    // маленький экран (нетбук 1024x600): колонка слева уже, строки в ней ниже, окна - не больше экрана
+    public static readonly bool Compact = SmallScreen();
+    public static readonly int NavWidth = Compact ? 190 : 252;
+    public static readonly Font NavSmall = new Font("Segoe UI", 9.5f);
+
+    static bool SmallScreen() {
+        try { Rectangle wa = Screen.PrimaryScreen.WorkingArea; return wa.Width < 1200 || wa.Height < 700; } catch { return false; }
+    }
+
+    // окно не больше рабочей области экрана: размер и наименьший размер урезаются, окно - в пределах экрана (вызывать в Load,
+    // когда всё уже добавлено: прижатое к низу и краям переедет вместе с краем)
+    public static void Fit(Form f) {
+        Rectangle wa = Screen.FromControl(f).WorkingArea;
+        f.MinimumSize = new Size(Math.Min(f.MinimumSize.Width, wa.Width), Math.Min(f.MinimumSize.Height, wa.Height));
+        if (f.Width > wa.Width || f.Height > wa.Height) f.Size = new Size(Math.Min(f.Width, wa.Width), Math.Min(f.Height, wa.Height));
+        if (f.WindowState == FormWindowState.Normal)
+            f.Location = new Point(Math.Max(wa.X, Math.Min(f.Left, wa.Right - f.Width)), Math.Max(wa.Y, Math.Min(f.Top, wa.Bottom - f.Height)));
+    }
+
+    // шапка окна (ссылка «Назад», заголовок, подпись) на маленьком экране - ниже
+    public static void FitTop(Panel top, Control back, Control title, Control sub) {
+        if (!Compact) return;
+        top.Height = 68;
+        back.Top = 4;
+        title.Font = new Font("Segoe UI", 13f, FontStyle.Bold);
+        title.Top = 23;
+        sub.Top = 48;
+    }
+
+    // ряд кнопок, который не помещается в ширину (маленький экран) - кнопки уже, поровну; слева направо от x, промежуток 8
+    public static void FitRow(Control parent, int x, params Control[] row) {
+        parent.Resize += delegate {
+            int total = 0;
+            foreach (Control c in row) total += c.Width;
+            int room = parent.ClientSize.Width - x - 24 - 8 * (row.Length - 1);
+            if (total <= room) return;
+            int cx = x;
+            foreach (Control c in row) {
+                int w = Math.Max(60, c.Width * room / total);
+                c.SetBounds(cx, c.Top, w, c.Height);
+                cx += w + 8;
+            }
+        };
+    }
+
+    // колонка слева на маленьком экране: заголовок мельче, пункты сразу под ним; пункты внизу не налезают на верхние
+    // (верхние - уже поставленные: у них есть ширина; нижние ставятся при изменении размера колонки)
+    public static void FitNav(Panel nav) {
+        if (!Compact) return;
+        List<NavItem> top = new List<NavItem>(), low = new List<NavItem>();
+        List<Label> head = new List<Label>();
+        int first = int.MaxValue;
+        foreach (Control c in nav.Controls) {
+            NavItem n = c as NavItem;
+            if (n == null) continue;
+            if (n.Width > 0) { top.Add(n); first = Math.Min(first, n.Top); } else low.Add(n);
+        }
+        foreach (Control c in nav.Controls) if (c is Label && c.Top >= 10 && c.Top < first) head.Add((Label)c);
+        head.Sort(delegate(Label a, Label b) { return a.Top.CompareTo(b.Top); });
+        int y = 8;
+        for (int i = 0; i < head.Count; i++) {
+            Label l = head[i];
+            if (i == 0) {
+                l.Font = new Font("Segoe UI", 11.5f, FontStyle.Bold);
+                l.SetBounds(12, y, nav.Width - 16, l.Text.IndexOf('\n') >= 0 ? 42 : 24);
+            } else {
+                l.Font = Small;
+                l.SetBounds(13, y, nav.Width - 16, 18);
+            }
+            y = l.Bottom + 2;
+        }
+        int shift = first == int.MaxValue ? 0 : first - (y + 6);
+        if (shift > 0) foreach (NavItem n in top) n.Top -= shift;
+        top.Sort(delegate(NavItem a, NavItem b) { return a.Top.CompareTo(b.Top); });
+        int[] gap = new int[top.Count];
+        for (int i = 1; i < top.Count; i++) gap[i] = Math.Max(0, Math.Min(10, top[i].Top - top[i - 1].Bottom));
+        // мало места по высоте: верхние пункты ниже (до 22 точек), чтобы не уходить под нижние
+        nav.Resize += delegate {
+            if (top.Count == 0) return;
+            int floor = nav.ClientSize.Height;
+            // (Visible здесь не годится: пока окно не показано, он false у всех)
+            foreach (NavItem n in low) if (n.Width > 0) floor = Math.Min(floor, n.Top);
+            foreach (Control c in nav.Controls) if (c is Label && !head.Contains((Label)c) && c.Text.Length > 0 && c.Top > top[0].Top) floor = Math.Min(floor, c.Top - 4);
+            int start = top[0].Top, need = 0, gaps = 0;
+            foreach (NavItem n in top) need += n.Small ? 26 : 30;
+            foreach (int g in gap) gaps += g;
+            int h = need + gaps <= floor - start ? 0 : Math.Max(22, (floor - start - gaps) / top.Count);
+            int yy = start;
+            for (int i = 0; i < top.Count; i++) {
+                NavItem n = top[i];
+                int full = n.Small ? 26 : 30;
+                n.SetBounds(0, yy + gap[i], nav.Width, h > 0 ? Math.Min(h, full) : full);
+                yy = n.Bottom;
+            }
+        };
+    }
 }
 
 public class Tint {
@@ -3034,8 +3131,8 @@ public class NavItem : Control {
     public NavItem(string text, bool small) {
         Text = text;
         Small = small;
-        Font = small ? St.Small : St.NavFont;
-        Height = small ? 32 : 40;
+        Font = small ? St.Small : St.Compact ? St.NavSmall : St.NavFont;
+        Height = St.Compact ? (small ? 26 : 30) : (small ? 32 : 40);
         Cursor = Cursors.Hand;
         DoubleBuffered = true;
         SetStyle(ControlStyles.ResizeRedraw | ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint, true);
@@ -3051,13 +3148,14 @@ public class NavItem : Control {
         using (SolidBrush b = new SolidBrush(back)) g.FillRectangle(b, ClientRectangle);
         if (Active) using (SolidBrush b = new SolidBrush(St.NavMark)) g.FillRectangle(b, 0, 0, 4, Height);
         Color fore = Active || hover ? Color.White : St.NavText;
-        int tx = 22;
+        // на маленьком экране (узкая колонка) - отступы меньше
+        int tx = St.Compact ? 12 : 22, mx = St.Compact ? 8 : 14;
         if (Mark != Color.Empty) {
-            using (SolidBrush b = new SolidBrush(Mark)) g.FillRectangle(b, 14, (Height - 12) / 2, 12, 12);
-            using (Pen p = new Pen(Color.FromArgb(150, 255, 255, 255))) g.DrawRectangle(p, 14, (Height - 12) / 2, 11, 11);
-            tx = 34;
+            using (SolidBrush b = new SolidBrush(Mark)) g.FillRectangle(b, mx, (Height - 12) / 2, 12, 12);
+            using (Pen p = new Pen(Color.FromArgb(150, 255, 255, 255))) g.DrawRectangle(p, mx, (Height - 12) / 2, 11, 11);
+            tx = mx + 18;
         }
-        Rectangle tr = new Rectangle(tx, 0, Width - tx - 38, Height);
+        Rectangle tr = new Rectangle(tx, 0, Width - tx - (Count >= 0 || !St.Compact ? 38 : 6), Height);
         TextRenderer.DrawText(g, Text, Font, tr, fore, TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.EndEllipsis);
         if (Count > 0) {
             string s = Count.ToString();
@@ -8469,6 +8567,7 @@ public class PhotoViewer : Form {
         KeyPreview = true;
         StartPosition = FormStartPosition.Manual;
         MinimumSize = new Size(420, 320);
+        Load += delegate { St.Fit(this); };
 
         bar.Dock = DockStyle.Top;
         bar.Height = 50;
@@ -15022,6 +15121,7 @@ public class BaseSetupForm : Form {
         MaximizeBox = MinimizeBox = false;
         ShowInTaskbar = false;
         ClientSize = new Size(800, 640);
+        Load += delegate { St.Fit(this); };
         Label l0 = Ui.Caption("Папка программы «Поиск абонента» (где prosmotr.ps1, poisk.txt, indeks_fio.dat). Из её настроек берётся, где основная база " +
             "(диск O: или сетевой путь), из самой папки - индексы Ф.И.О. и нарядов, которые строит «Поиск». «Договор» их только читает.");
         l0.SetBounds(16, 10, 768, 40);
@@ -15043,6 +15143,7 @@ public class BaseSetupForm : Form {
         Label l3 = Ui.Caption("Что нашлось:");
         l3.SetBounds(16, 152, 300, 20);
         result.SetBounds(16, 174, 768, 400);
+        result.Anchor = AnchorStyles.Left | AnchorStyles.Top | AnchorStyles.Right | AnchorStyles.Bottom;   // маленький экран - ниже
         result.ReadOnly = true;
         result.Font = St.Small;
         result.Text = "Укажите папку «Поиска» (или «Найти саму») и нажмите «Проверить». Диск O: подключается, только пока запущена программа базы - " +
@@ -15052,6 +15153,7 @@ public class BaseSetupForm : Form {
         save.Click += delegate { Save(); };
         Button cancel = Ui.Button("Отмена", false);
         cancel.SetBounds(678, 588, 106, 38);
+        save.Anchor = cancel.Anchor = AnchorStyles.Right | AnchorStyles.Bottom;
         cancel.DialogResult = DialogResult.Cancel;
         CancelButton = cancel;
         Controls.AddRange(new Control[] { l0, path, pick, auto, l2, ls, check, l3, result, save, cancel });
@@ -15171,6 +15273,7 @@ public class BaseFindForm : Form {
         ShowInTaskbar = false;
         ClientSize = new Size(1200, 560);
         MinimumSize = new Size(700, 400);
+        Load += delegate { St.Fit(this); };
         Label l1 = Ui.Caption("Искать по:");
         l1.SetBounds(16, 14, 90, 22);
         RadioButton[] rb = { byLs, byFio, byNar };
@@ -15390,6 +15493,7 @@ public class DogovorForm : Form {
         Rectangle wa = Screen.PrimaryScreen.WorkingArea;
         Size = new Size(Math.Min(1280, wa.Width), Math.Min(900, wa.Height));
         MinimumSize = new Size(900, 560);
+        Load += delegate { St.Fit(this); };
         KeyPreview = true;
         try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
 
@@ -15908,7 +16012,7 @@ public class DogovorForm : Form {
     Control BuildNav() {
         Panel nav = new Panel();
         nav.Dock = DockStyle.Left;
-        nav.Width = 252;
+        nav.Width = St.NavWidth;
         nav.BackColor = St.Nav;
         Label title = new Label();
         title.Text = "Оформление\nдоговора";
@@ -15968,6 +16072,7 @@ public class DogovorForm : Form {
             narItem.SetBounds(0, reqs.Top - narItem.Height, nav.Width, narItem.Height);
             baseLabel.SetBounds(22, narItem.Top - 58, nav.Width - 34, 52);
         };
+        St.FitNav(nav);
         return nav;
     }
 
@@ -18027,6 +18132,7 @@ public class RequiredDialog : Form {
         StartPosition = FormStartPosition.CenterParent;
         Size = new Size(820, Math.Min(760, Screen.PrimaryScreen.WorkingArea.Height - 40));
         MinimumSize = new Size(600, 420);
+        Load += delegate { St.Fit(this); };
         ShowInTaskbar = false;
         MinimizeBox = false;
         Label top = new Label();
@@ -18394,6 +18500,19 @@ public class StartMenu : Form {
             MessageBox.Show(this, "Тема сменится при следующем запуске программы.", Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
         };
         Controls.Add(theme);
+        // маленький экран (нетбук 1024x600): шапка и плитки ниже - меню целиком помещается
+        if (St.Compact) {
+            top.Height = 58;
+            title.Font = new Font("Segoe UI", 14f, FontStyle.Bold);
+            title.Location = new Point(34, 5);
+            sub.Location = new Point(36, 34);
+            foreach (Control c in Controls) {
+                if (c is Tile) c.SetBounds(c.Left, 66 + (c.Top - 108) / 82 * 64, c.Width, 58);
+                else if (c != top && c.Top >= 600) c.Top = c.Top < 630 ? 452 : 480;
+            }
+            ClientSize = new Size(640, 502);
+        }
+        Load += delegate { St.Fit(this); };
 
         KeyDown += delegate(object s, KeyEventArgs e) {
             if (e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; OpenDogovor(); }
@@ -18660,6 +18779,7 @@ public class Tile : Control {
     public string Title, Sub, Note = "";
     readonly Color mark;
     static readonly Font TitleFont = new Font("Segoe UI", 15f, FontStyle.Bold);
+    static readonly Font SmallTitle = new Font("Segoe UI", 13f, FontStyle.Bold);
     bool hover;
 
     public Tile(string title, string sub, Color mark) {
@@ -18678,11 +18798,17 @@ public class Tile : Control {
         using (SolidBrush b = new SolidBrush(hover ? St.Hover : St.Surface)) g.FillRectangle(b, ClientRectangle);
         using (SolidBrush b = new SolidBrush(mark)) g.FillRectangle(b, 0, 0, 8, Height);
         using (Pen p = new Pen(hover || Focused ? St.Accent : St.Border, hover || Focused ? 2f : 1f)) g.DrawRectangle(p, 1, 1, Width - 2, Height - 2);
-        // невысокая плитка (меню из шести) - строки плотнее
-        bool low = Height < 80;
-        TextRenderer.DrawText(g, Title, TitleFont, new Point(28, low ? 6 : 10), St.Text);
-        TextRenderer.DrawText(g, Sub, St.Base, new Rectangle(30, low ? 36 : 43, Width - 70, 22), St.Hint, TextFormatFlags.EndEllipsis);
-        if (Note.Length > 0) TextRenderer.DrawText(g, Note, St.Small, new Point(30, low ? 54 : 63), St.Warn);
+        // невысокая плитка (меню из шести) - строки плотнее; совсем низкая (маленький экран) - вместо подписи пометка, если есть
+        bool low = Height < 80, tiny = Height < 66;
+        if (tiny) {
+            TextRenderer.DrawText(g, Title, SmallTitle, new Point(26, 4), St.Text);
+            if (Note.Length > 0) TextRenderer.DrawText(g, Note, St.Base, new Rectangle(28, 32, Width - 66, 22), St.Warn, TextFormatFlags.EndEllipsis);
+            else TextRenderer.DrawText(g, Sub, St.Base, new Rectangle(28, 32, Width - 66, 22), St.Hint, TextFormatFlags.EndEllipsis);
+        } else {
+            TextRenderer.DrawText(g, Title, TitleFont, new Point(28, low ? 6 : 10), St.Text);
+            TextRenderer.DrawText(g, Sub, St.Base, new Rectangle(30, low ? 36 : 43, Width - 70, 22), St.Hint, TextFormatFlags.EndEllipsis);
+            if (Note.Length > 0) TextRenderer.DrawText(g, Note, St.Small, new Point(30, low ? 54 : 63), St.Warn);
+        }
         // стрелка справа
         using (Pen p = new Pen(St.Accent, 2.5f)) {
             int cx = Width - 30, cy = Height / 2;
@@ -18771,6 +18897,7 @@ public class SpravkaForm : Form {
         Rectangle wa = Screen.PrimaryScreen.WorkingArea;
         Size = new Size(Math.Min(1180, wa.Width), Math.Min(860, wa.Height));
         MinimumSize = new Size(860, 560);
+        Load += delegate { St.Fit(this); };
         KeyPreview = true;
         try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
 
@@ -19325,7 +19452,7 @@ public class SpravkaForm : Form {
     Control BuildNav() {
         Panel nav = new Panel();
         nav.Dock = DockStyle.Left;
-        nav.Width = 252;
+        nav.Width = St.NavWidth;
         nav.BackColor = St.Nav;
         Label title = new Label();
         title.Text = "Справка";
@@ -19390,6 +19517,7 @@ public class SpravkaForm : Form {
             openItem.SetBounds(0, logItem.Top - openItem.Height, nav.Width, openItem.Height);
             narItem.SetBounds(0, openItem.Top - narItem.Height, nav.Width, narItem.Height);
         };
+        St.FitNav(nav);
         return nav;
     }
 
@@ -20347,6 +20475,7 @@ public class NaryadForm : Form {
         Rectangle wa = Screen.PrimaryScreen.WorkingArea;
         Size = new Size(Math.Min(1180, wa.Width), Math.Min(860, wa.Height));
         MinimumSize = new Size(860, 560);
+        Load += delegate { St.Fit(this); };
         KeyPreview = true;
         try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
 
@@ -20768,7 +20897,7 @@ public class NaryadForm : Form {
     Control BuildNav() {
         Panel nav = new Panel();
         nav.Dock = DockStyle.Left;
-        nav.Width = 252;
+        nav.Width = St.NavWidth;
         nav.BackColor = St.Nav;
         Label title = new Label();
         title.Text = "Наряд";
@@ -20818,6 +20947,7 @@ public class NaryadForm : Form {
             folder.SetBounds(0, dirs.Top - folder.Height, nav.Width, folder.Height);
             openItem.SetBounds(0, folder.Top - openItem.Height, nav.Width, openItem.Height);
         };
+        St.FitNav(nav);
         return nav;
     }
 
@@ -21814,6 +21944,7 @@ public class SpravkaLogForm : Form {
         Rectangle wa = Screen.PrimaryScreen.WorkingArea;
         Size = new Size(Math.Min(1180, wa.Width), Math.Min(760, wa.Height));
         MinimumSize = new Size(1080, 520);
+        Load += delegate { St.Fit(this); };
         KeyPreview = true;
         try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
 
@@ -21844,6 +21975,7 @@ public class SpravkaLogForm : Form {
         top.Controls.Add(back);
         top.Controls.Add(title);
         top.Controls.Add(sub);
+        St.FitTop(top, back, title, sub);
 
         Panel bar = new Panel();
         bar.Dock = DockStyle.Top;
@@ -21870,7 +22002,16 @@ public class SpravkaLogForm : Form {
         folderBtn.Click += delegate { OpenFolder(); };
         tip.SetToolTip(folderBtn, "Открыть папку «Справки» в Проводнике");
         bar.Controls.Add(folderBtn);
-        bar.Resize += delegate { folderBtn.Location = new Point(bar.ClientSize.Width - 24 - folderBtn.Width, 11); };
+        bar.Resize += delegate {
+            folderBtn.Location = new Point(bar.ClientSize.Width - 24 - folderBtn.Width, 11);
+            // маленький экран: поиск уже, число записей - между поиском и кнопкой папки
+            if (St.Compact) {
+                find.Width = 220;
+                count.AutoSize = false;
+                count.AutoEllipsis = true;
+                count.SetBounds(find.Right + 12, 16, Math.Max(60, folderBtn.Left - find.Right - 20), 22);
+            }
+        };
 
         list.Dock = DockStyle.Fill;
         list.View = View.Details;
@@ -21934,6 +22075,7 @@ public class SpravkaLogForm : Form {
         bottom.Controls.Add(delBtn);
         bottom.Controls.Add(status);
         bottom.Resize += delegate { status.Width = bottom.ClientSize.Width - 48; };
+        St.FitRow(bottom, 24, take, add, openDoc, openAns, markBtn, delBtn);
 
         Controls.Add(mid);
         Controls.Add(bar);
@@ -22284,6 +22426,7 @@ public class DogovorLogForm : Form {
         Rectangle wa = Screen.PrimaryScreen.WorkingArea;
         Size = new Size(Math.Min(1180, wa.Width), Math.Min(760, wa.Height));
         MinimumSize = new Size(1000, 520);
+        Load += delegate { St.Fit(this); };
         KeyPreview = true;
         try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
 
@@ -22314,6 +22457,7 @@ public class DogovorLogForm : Form {
         top.Controls.Add(back);
         top.Controls.Add(title);
         top.Controls.Add(sub);
+        St.FitTop(top, back, title, sub);
 
         Panel bar = new Panel();
         bar.Dock = DockStyle.Top;
@@ -22339,7 +22483,16 @@ public class DogovorLogForm : Form {
         bar.Controls.Add(find);
         bar.Controls.Add(count);
         bar.Controls.Add(folderBtn);
-        bar.Resize += delegate { folderBtn.Location = new Point(bar.ClientSize.Width - 24 - folderBtn.Width, 11); };
+        bar.Resize += delegate {
+            folderBtn.Location = new Point(bar.ClientSize.Width - 24 - folderBtn.Width, 11);
+            // маленький экран: поиск уже, число записей - между поиском и кнопкой папки
+            if (St.Compact) {
+                find.Width = 220;
+                count.AutoSize = false;
+                count.AutoEllipsis = true;
+                count.SetBounds(find.Right + 12, 16, Math.Max(60, folderBtn.Left - find.Right - 20), 22);
+            }
+        };
 
         list.Dock = DockStyle.Fill;
         list.View = View.Details;
@@ -22912,6 +23065,7 @@ public class JurForm : Form {
         StartPosition = FormStartPosition.CenterScreen;
         ClientSize = new Size(900, 690);
         MinimumSize = new Size(760, 600);
+        Load += delegate { St.Fit(this); };
         try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
 
         Panel top = new Panel();
@@ -24801,6 +24955,7 @@ public class JurPick : Form {
         Rectangle wa = Screen.PrimaryScreen.WorkingArea;
         Size = new Size(Math.Min(1200, wa.Width), Math.Min(860, wa.Height));
         MinimumSize = new Size(980, 700);
+        Load += delegate { St.Fit(this); };
         KeyPreview = true;
         try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
 
@@ -24840,7 +24995,8 @@ public class JurPick : Form {
         top.Controls.Add(title);
         top.Controls.Add(sub);
         top.Controls.Add(setup);
-        top.Resize += delegate { setup.Location = new Point(top.ClientSize.Width - 24 - setup.PreferredWidth, 12); };
+        top.Resize += delegate { setup.Location = new Point(top.ClientSize.Width - 24 - setup.PreferredWidth, St.Compact ? 4 : 12); };
+        St.FitTop(top, back, title, sub);
 
         Panel body = new Panel();
         body.Dock = DockStyle.Fill;
@@ -24908,8 +25064,10 @@ public class JurPick : Form {
         body.Controls.AddRange(new Control[] { npTipCap, npTip, npCap, npBox, ulTipCap, ulTip, ulCap, ulBox, domCap, domBox, korCap, korBox, kvCap, kvBox,
             kpCap, kpBox, find, status, abCap, abons, ptCap, points, nearCap, near, lsCap, prefixBox, lsBox, lsNote, what, create, createSpr, createUd });
         body.Resize += delegate {
-            int w = body.ClientSize.Width - 48, x = 24, y = 12;
-            int[] widths = { 64, 200, 76, 200, 64, 64, 74, 120 };
+            // маленький экран (нетбук): поля уже, строки ниже
+            bool c = St.Compact;
+            int w = body.ClientSize.Width - 48, x = 24, y = c ? 6 : 12;
+            int[] widths = c ? new int[] { 64, 160, 76, 160, 64, 64, 74, 100 } : new int[] { 64, 200, 76, 200, 64, 64, 74, 120 };
             Label[] caps = { npTipCap, npCap, ulTipCap, ulCap, domCap, korCap, kvCap, kpCap };
             Control[] boxes = { npTip, npBox, ulTip, ulBox, domBox, korBox, kvBox, kpBox };
             int cx = x;
@@ -24919,27 +25077,30 @@ public class JurPick : Form {
                 cx += widths[i] + 8;
             }
             find.SetBounds(cx + 4, y + 17, Math.Max(100, Math.Min(160, body.ClientSize.Width - 24 - cx - 4)), 32);
-            y += 54;
-            status.SetBounds(x, y, w, 58);
-            y += 62;
-            int bottom = 212, free = body.ClientSize.Height - y - bottom;
+            y += c ? 50 : 54;
+            status.SetBounds(x, y, w, c ? 38 : 58);
+            y += c ? 40 : 62;
+            int bottom = c ? 150 : 212, free = body.ClientSize.Height - y - bottom;
             abCap.SetBounds(x, y, w, 18);
-            abons.SetBounds(x, y + 20, w, Math.Max(70, free * 2 / 5 - 22));
-            y = abons.Bottom + 8;
+            abons.SetBounds(x, y + 20, w, Math.Max(c ? 56 : 70, free * 2 / 5 - 22));
+            y = abons.Bottom + (c ? 4 : 8);
             ptCap.SetBounds(x, y, w, 18);
-            points.SetBounds(x, y + 20, w, Math.Max(90, body.ClientSize.Height - bottom - y - 20));
-            y = points.Bottom + 10;
+            points.SetBounds(x, y + 20, w, Math.Max(c ? 66 : 90, body.ClientSize.Height - bottom - y - 20));
+            y = points.Bottom + (c ? 6 : 10);
             nearCap.SetBounds(x, y, 300, 18);
             near.SetBounds(x, y + 20, 300, body.ClientSize.Height - y - 34);
             int rx = x + 316, rw = body.ClientSize.Width - 24 - rx;
             lsCap.SetBounds(rx, y, rw, 18);
             prefixBox.SetBounds(rx, y + 20, 64, 26);
             lsBox.SetBounds(rx + 72, y + 20, 130, 26);
-            lsNote.SetBounds(rx + 214, y + 18, rw - 214, 50);
-            what.SetBounds(rx, y + 72, rw, 62);
-            create.SetBounds(body.ClientSize.Width - 24 - 330, body.ClientSize.Height - 54, 330, 42);
-            createSpr.SetBounds(create.Left - 12 - 170, create.Top, 170, 42);
-            createUd.SetBounds(createSpr.Left - 12 - 190, create.Top, 190, 42);
+            lsNote.SetBounds(rx + 214, y + 18, rw - 214, c ? 34 : 50);
+            what.SetBounds(rx, y + (c ? 52 : 72), rw, c ? 44 : 62);
+            // кнопки (договор, справка, удаление): на маленьком экране - уже, текст короче
+            int bh = c ? 38 : 42, cw = c ? 210 : 330, sw = c ? 160 : 170, uw = c ? 180 : 190;
+            if (c) create.Text = "Создать договор";
+            create.SetBounds(body.ClientSize.Width - 24 - cw, body.ClientSize.Height - bh - 10, cw, bh);
+            createSpr.SetBounds(create.Left - 12 - sw, create.Top, sw, bh);
+            createUd.SetBounds(createSpr.Left - 12 - uw, create.Top, uw, bh);
         };
         Controls.Add(body);
         Controls.Add(top);
@@ -26330,6 +26491,7 @@ public class BsForm : Form {
         Rectangle wa = Screen.PrimaryScreen.WorkingArea;
         Size = new Size(Math.Min(1240, wa.Width), Math.Min(880, wa.Height));
         MinimumSize = new Size(900, 560);
+        Load += delegate { St.Fit(this); };
         KeyPreview = true;
         try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
         BuildCards();
@@ -26824,7 +26986,7 @@ public class BsForm : Form {
     Control BuildNav() {
         Panel nav = new Panel();
         nav.Dock = DockStyle.Left;
-        nav.Width = 252;
+        nav.Width = St.NavWidth;
         nav.BackColor = St.Nav;
         Label title = new Label();
         title.Text = "БС";
@@ -26871,6 +27033,7 @@ public class BsForm : Form {
             int yy = nav.ClientSize.Height - 16;
             for (int i = low.Length - 1; i >= 0; i--) { yy -= low[i].Height; low[i].SetBounds(0, yy, nav.Width, low[i].Height); }
         };
+        St.FitNav(nav);
         return nav;
     }
 
@@ -27418,6 +27581,7 @@ public class JurNaryadForm : Form {
         Rectangle wa = Screen.PrimaryScreen.WorkingArea;
         Size = new Size(Math.Min(1180, wa.Width), Math.Min(820, wa.Height));
         MinimumSize = new Size(860, 560);
+        Load += delegate { St.Fit(this); };
         KeyPreview = true;
         try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
         BuildCards();
@@ -27559,7 +27723,7 @@ public class JurNaryadForm : Form {
     Control BuildNav() {
         Panel nav = new Panel();
         nav.Dock = DockStyle.Left;
-        nav.Width = 252;
+        nav.Width = St.NavWidth;
         nav.BackColor = St.Nav;
         Label title = new Label();
         title.Text = "Юр наряд";
@@ -27602,6 +27766,7 @@ public class JurNaryadForm : Form {
             int yy = nav.ClientSize.Height - 16;
             for (int i = low.Length - 1; i >= 0; i--) { yy -= low[i].Height; low[i].SetBounds(0, yy, nav.Width, low[i].Height); }
         };
+        St.FitNav(nav);
         return nav;
     }
 
@@ -28073,6 +28238,7 @@ public class UdalenieForm : Form {
         Rectangle wa = Screen.PrimaryScreen.WorkingArea;
         Size = new Size(Math.Min(1180, wa.Width), Math.Min(820, wa.Height));
         MinimumSize = new Size(860, 560);
+        Load += delegate { St.Fit(this); };
         KeyPreview = true;
         try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
         BuildCards();
@@ -28217,7 +28383,7 @@ public class UdalenieForm : Form {
     Control BuildNav() {
         Panel nav = new Panel();
         nav.Dock = DockStyle.Left;
-        nav.Width = 252;
+        nav.Width = St.NavWidth;
         nav.BackColor = St.Nav;
         Label title = new Label();
         title.Text = "Справка в РГ";
@@ -28260,6 +28426,7 @@ public class UdalenieForm : Form {
             int yy = nav.ClientSize.Height - 16;
             for (int i = low.Length - 1; i >= 0; i--) { yy -= low[i].Height; low[i].SetBounds(0, yy, nav.Width, low[i].Height); }
         };
+        St.FitNav(nav);
         return nav;
     }
 
@@ -29062,6 +29229,7 @@ public class PlombyForm : Form {
         Rectangle wa = Screen.PrimaryScreen.WorkingArea;
         Size = new Size(Math.Min(1340, wa.Width), Math.Min(860, wa.Height));
         MinimumSize = new Size(980, 560);
+        Load += delegate { St.Fit(this); };
         KeyPreview = true;
         try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
 
@@ -29087,7 +29255,7 @@ public class PlombyForm : Form {
 
         Panel left = new Panel();
         left.Dock = DockStyle.Left;
-        left.Width = 330;
+        left.Width = St.Compact ? 240 : 330;    // маленький экран - список партий уже
         left.BackColor = St.Surface;
         left.Padding = new Padding(14);
         Label lcap = Ui.Caption("Партии пломб (выданные)");
@@ -29145,7 +29313,8 @@ public class PlombyForm : Form {
             title.SetBounds(16, 12, w, 28);
             summary.SetBounds(16, 42, Math.Max(100, w - 440), 40);
             issuedBtn.SetBounds(w - 420, 44, 190, 34);
-            hint.SetBounds(16, 84, w - 650, 40);
+            hint.SetBounds(16, 84, Math.Max(0, w - 650), 40);
+            hint.Visible = w - 650 >= 150;          // узкое окно - подсказку не показывать (не помещается)
             onlyGaps.SetBounds(w - 620, 76, 190, 24);
             showPaper.SetBounds(w - 620, 100, 200, 24);
             sinceBtn.SetBounds(w - 420, 82, 190, 38);
