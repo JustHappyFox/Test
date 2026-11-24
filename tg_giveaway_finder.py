@@ -149,7 +149,10 @@ def slot_due(now: datetime, hours: list[int], tz_hours: float, last_bot: datetim
                              loc.date() + timedelta(days=2))
                    for h in hours)
     for s in slots:
-        if blocked_until and s < blocked_until and (blocked_from is None or s >= blocked_from):
+        # пауза после поста владельца: не постим, пока она идёт; отложенный пост владельца
+        # в будущем отменяет только слоты после него, а не раньше
+        if blocked_until and s < blocked_until and (blocked_from is None or blocked_from <= now
+                                                      or s >= blocked_from):
             continue
         if s > now:
             return s
