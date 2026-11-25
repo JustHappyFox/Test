@@ -39,7 +39,7 @@ public static class T {
             } else if (step == 3) {
                 Panel content = (Panel)F(b, "content");
                 System.Collections.IList cards = (System.Collections.IList)F(b, "cards");
-                Control p = (Control)F(cards[7], "Panel");
+                Control p = (Control)F(cards[3], "Panel");
                 content.AutoScrollPosition = new System.Drawing.Point(0, p.Top - content.AutoScrollPosition.Y - 4);
             } else if (step == 4) {
                 Process.Start("import", "-window root " + png + "_1.png").WaitForExit();

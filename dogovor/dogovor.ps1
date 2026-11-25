@@ -3063,7 +3063,7 @@ public static class St {
             case "Дополнительно": case "Текст справки": case "Мощность": return new Tint(244, 246, 230, 228, 235, 196, 116, 138, 26);
             // разделы БС и юр наряда - каждый своим цветом, соседние не сливаются
             case "Электроснабжение": return new Tint(237, 238, 252, 216, 219, 247, 80, 90, 200);
-            case "Потери": return new Tint(250, 242, 232, 240, 222, 198, 160, 100, 40);
+            case "Потери": case "Схема учёта и потери": return new Tint(250, 242, 232, 240, 222, 198, 160, 100, 40);
             case "Подписи и даты": case "Подписи": return new Tint(232, 244, 252, 204, 230, 247, 30, 120, 180);
             case "Документы": return new Tint(240, 240, 246, 220, 220, 234, 110, 110, 150);
             default: return new Tint(241, 242, 244, 223, 226, 231, 100, 110, 125);
@@ -3314,7 +3314,7 @@ public static class Ui {
         if (c is CheckBox) return Math.Max(24, c.Font.Height + 8);
         if (c is Heaters) return ((Heaters)c).NeededHeight;
         if (c is Seals) return ((Seals)c).NeededHeight;
-        if (c is RowList) return ((RowList)c).NeededHeight;
+        if (c is RowList) return ((RowList)c).HeightFor(width);
         if (c is PhotoStrip) return ((PhotoStrip)c).HeightFor(width);
         if (c is ComboBox) return Math.Max(((ComboBox)c).PreferredHeight, c.Height);
         return InputHeightCached;
@@ -19163,7 +19163,7 @@ public class StartMenu : Form {
         jurTile.SetBounds(34, 436, 282, 74);
         jurTile.Click += delegate { OpenJur(); };
         // юр лица: пакет документов БС (справка для расчетов, акт, доп. соглашение, наряд, потери)
-        bsTile = new Tile("БС - юр лицо", "справка, акт, доп. соглашение, наряд, потери", St.TintOf("Электроснабжение").Mark);
+        bsTile = new Tile("Пакет юр лица", "БС, ЭЗС...: справка, акт, доп. соглашение, наряд, потери", St.TintOf("Электроснабжение").Mark);
         bsTile.SetBounds(324, 436, 282, 74);
         bsTile.Click += delegate { OpenBs(this); };
         Controls.Add(bsTile);
@@ -27030,7 +27030,7 @@ public class RowList : Panel {
     readonly bool[] combo;
     readonly List<string>[] items;
     readonly string[] defaults;
-    class Row { public Control[] Cells; public Button Remove; }
+    class Row { public Control[] Cells; public Label[] Heads; public Button Remove; }
     readonly List<Row> rows = new List<Row>();
     readonly Label[] heads;
     readonly Button add = new Button();
@@ -27072,7 +27072,49 @@ public class RowList : Panel {
 
     int RowH { get { return Ui.InputHeightCached; } }
     int CapH { get { return St.Small.Height + 3; } }
-    public int NeededHeight { get { return CapH + rows.Count * (RowH + 6) - 6; } }
+    public int NeededHeight { get { return HeightFor(Width); } }
+
+    // узко (нетбук): строка таблицы - в две линии, у каждой линии свои подписи (иначе поля ужимаются до нечитаемых)
+    int split;                        // с какого поля вторая линия; 0 - одна линия
+    int Block { get { return 2 * (CapH + RowH) + 6 + 12; } }
+    public int HeightFor(int width) {
+        int s = SplitFor(width);
+        return s > 0 ? rows.Count * Block - 12 : CapH + rows.Count * (RowH + 6) - 6;
+    }
+
+    int Natural(int i) { return widths[i] > 0 ? (int)(widths[i] * Grid.CharW + 10) : 150; }
+
+    // 0 - всё влезает в одну линию (с небольшим ужатием); иначе - номер поля, с которого вторая линия (линии примерно поровну)
+    int SplitFor(int width) {
+        if (Caps.Length < 6 || width <= 0) return 0;
+        int gap = 6, bw = RowH, total = 0;
+        for (int i = 0; i < Caps.Length; i++) total += Natural(i);
+        int avail = width - gap * Caps.Length - bw * 2 - gap;
+        if (total * 0.85 <= avail) return 0;
+        int best = Caps.Length / 2, bestMax = int.MaxValue, run = 0;
+        for (int s = 1; s < Caps.Length; s++) {
+            run += Natural(s - 1);
+            int m = Math.Max(run, total - run);
+            if (m < bestMax) { bestMax = m; best = s; }
+        }
+        return best;
+    }
+
+    // поля [from, to) в линию шириной avail: свои ширины, широкие делят остаток, не влезает - ужать
+    int[] Line(int from, int to, int avail) {
+        int n = to - from, fixedW = 0, fills = 0;
+        int[] px = new int[n];
+        for (int i = 0; i < n; i++) { if (widths[from + i] > 0) { px[i] = Natural(from + i); fixedW += px[i]; } else fills++; }
+        int minFill = 150 * fills;
+        if (fixedW > 0 && fixedW > avail - minFill) {
+            double k = Math.Max(0.4, (avail - minFill) / (double)fixedW);
+            fixedW = 0;
+            for (int i = 0; i < n; i++) if (widths[from + i] > 0) { px[i] = Math.Max(28, (int)(px[i] * k)); fixedW += px[i]; }
+        }
+        int rest = avail - fixedW;
+        for (int i = 0; i < n; i++) if (widths[from + i] <= 0) px[i] = Math.Max(60, fills > 0 ? rest / fills : 60);
+        return px;
+    }
     public int Count { get { return rows.Count; } }
 
     public void SetItems(int col, List<string> list) {
@@ -27112,6 +27154,14 @@ public class RowList : Panel {
             r.Cells[i] = c;
             Controls.Add(c);
         }
+        r.Heads = new Label[Caps.Length];
+        for (int i = 0; i < Caps.Length; i++) {
+            Label l = Ui.Caption(Caps[i]);
+            l.AutoEllipsis = true;
+            l.Visible = false;
+            r.Heads[i] = l;
+            Controls.Add(l);
+        }
         r.Remove = new Button();
         r.Remove.Text = "×";
         r.Remove.Font = St.Bold;
@@ -27137,6 +27187,7 @@ public class RowList : Panel {
         } else {
             rows.Remove(r);
             foreach (Control c in r.Cells) { Controls.Remove(c); c.Dispose(); }
+            foreach (Control c in r.Heads) { Controls.Remove(c); c.Dispose(); }
             Controls.Remove(r.Remove);
             r.Remove.Dispose();
             Relayout();
@@ -27155,6 +27206,37 @@ public class RowList : Panel {
         base.OnLayout(e);
         if (!ready) return;
         int h = RowH, gap = 6, w = ClientSize.Width, bw = h;
+        int was = split;
+        split = SplitFor(w);
+        if (split > 0) {
+            // две линии: [0, split) - с кнопками «×», «+»; [split, n) - под ней, у каждой линии свои подписи
+            foreach (Label l in heads) l.Visible = false;
+            int[] a = Line(0, split, w - gap * split - bw * 2 - gap), b = Line(split, Caps.Length, w - gap * (Caps.Length - split));
+            for (int r = 0; r < rows.Count; r++) {
+                int y = r * Block, cx = 0;
+                for (int i = 0; i < split; i++) {
+                    rows[r].Heads[i].Visible = true;
+                    rows[r].Heads[i].SetBounds(cx, y, a[i], CapH);
+                    rows[r].Cells[i].SetBounds(cx, y + CapH, a[i], h);
+                    cx += a[i] + gap;
+                }
+                rows[r].Remove.SetBounds(cx, y + CapH, bw, h);
+                if (r == rows.Count - 1) add.SetBounds(cx + bw + gap, y + CapH, bw, h);
+                int y2 = y + CapH + h + 6;
+                cx = 0;
+                for (int i = split; i < Caps.Length; i++) {
+                    rows[r].Heads[i].Visible = true;
+                    rows[r].Heads[i].SetBounds(cx, y2, b[i - split], CapH);
+                    rows[r].Cells[i].SetBounds(cx, y2 + CapH, b[i - split], h);
+                    cx += b[i - split] + gap;
+                }
+            }
+            if (was != split && Resized != null && IsHandleCreated) BeginInvoke((MethodInvoker)delegate { if (Resized != null) Resized(this, EventArgs.Empty); });
+            return;
+        }
+        foreach (Label l in heads) l.Visible = true;
+        foreach (Row rr in rows) foreach (Label l in rr.Heads) l.Visible = false;
+        if (was != split && Resized != null && IsHandleCreated) BeginInvoke((MethodInvoker)delegate { if (Resized != null) Resized(this, EventArgs.Empty); });
         int fixedW = 0, fills = 0;
         int[] px = new int[Caps.Length];
         for (int i = 0; i < Caps.Length; i++) {
@@ -27216,6 +27298,7 @@ public class RowList : Panel {
                     Row r = rows[rows.Count - 1];
                     rows.Remove(r);
                     foreach (Control c in r.Cells) { Controls.Remove(c); c.Dispose(); }
+                    foreach (Control c in r.Heads) { Controls.Remove(c); c.Dispose(); }
                     Controls.Remove(r.Remove);
                     r.Remove.Dispose();
                 }
@@ -27244,6 +27327,7 @@ public class BsForm : Form {
     public StartMenu Home;
     public Form Back;
     bool loading, dirty;
+    string aktWas = "";
     string savedName;
     RowList pu, moshn, linii;
     Seals seals;
@@ -27272,7 +27356,7 @@ public class BsForm : Form {
         this.here = here;
         lists = new Lists(Path.Combine(here, "spravochniki.txt"));
         memory = Memory.For(Path.Combine(here, "nastroiki.txt"));
-        Text = "БС - пакет документов юр лица";
+        Text = "Пакет документов юр лица";
         Font = St.Base;
         BackColor = St.Back;
         StartPosition = FormStartPosition.CenterScreen;
@@ -27369,6 +27453,11 @@ public class BsForm : Form {
             c.Enter += delegate { c.BackColor = St.Focus; };
             c.Leave += delegate { c.BackColor = c.Enabled ? St.Input : St.Disabled; };
         }
+        if (c is ComboBox) {
+            // длинное значение: после ухода из поля и при смене ширины видно начало строки
+            c.Leave += delegate { StartOf((ComboBox)c); };
+            c.SizeChanged += delegate { if (IsHandleCreated) BeginInvoke(new MethodInvoker(delegate { StartOf((ComboBox)c); })); };
+        }
         if (key == "np" || key == "ulica") c.Leave += delegate { string v = c.Text.Trim(); if (v.Length > 0 && Up(v) != v) c.Text = Up(v); };
     }
 
@@ -27421,6 +27510,8 @@ public class BsForm : Form {
 
         c = new Card("Объект", "наименование, код и адрес - строки собираются сами, их можно поправить", 4);
         cards.Add(c);
+        // вид объекта - подставляет наименование, код, характер деятельности, тариф, точку учёта, режим работы (можно поправить)
+        c.Grid.Row(F("Вид объекта (подставит код, характер деятельности, тариф, точку учёта, режим работы)", C("vid_obekta", null), 44));
         c.Grid.Row(F("Объект (как в документах)", C("obekt", "Возведение мобильной базовой станции БС-..."), 0),
             F("Вид сооружения и код", C("kod", "сооружение специализированное связи, код 3 07 00"), 36));
         c.Grid.Row(F("Область", C("obl", null), 16), F("Район", C("rayon", null), 14), F("Сельсовет", C("selsovet", null), 16),
@@ -27435,61 +27526,23 @@ public class BsForm : Form {
         c.Grid.Row(F("Характер деятельности (акт приемки, п. 4)", C("deyat", "электрическая энергия используется для ..."), 0));
         Field("obekt", "Объект", c.Name); Field("kod", "Вид сооружения и код", c.Name); Field("np", "Населённый пункт", c.Name); Field("dom", "Дом", c.Name);
 
-        c = new Card("Электроснабжение", "откуда питание, линия, место включения, акт разграничения", 4);
+        c = new Card("Электроснабжение", "по акту разграничения: откуда питание, дата акта, схема питания; место включения - для наряда", 4);
         cards.Add(c);
         c.Grid.Row(F("Питание от (подстанция)", C("pitanie", "КТПБ-4726"), 18), F("Акт разграничения от", D("data_razgr"), 14),
             F("Место включения (наряд)", C("mesto", "РП-301"), 0));
-        c.Grid.Row(F("Линия в акте, п. 3 (собирается сама из линий раздела «Потери»: вид, марка, длина, на чьём балансе)", T("liniya", null), 0));
-        Field("pitanie", "Питание от", c.Name); Field("data_razgr", "Акт разграничения", c.Name); Field("liniya", "Отходящая линия", c.Name); Field("mesto", "Место включения", c.Name);
+        c.Grid.Row(F("Линия в акте, п. 3 (собирается сама из линий раздела «Схема учёта и потери»: вид, марка, длина, на чьём балансе)", T("liniya", null), 0));
+        Button pick = Ui.Button("Выбрать схему…", false);
+        pick.Name = "shemaPick";
+        pick.Click += delegate { PickShema(); };
+        tip.SetToolTip(pick, "Фото или скан схемы из акта разграничения (JPG, PNG) - встанет в «Потери» на место схемы");
+        c.Grid.Row(F("Схема питания из акта разграничения (картинка)", T("shema", "файл JPG/PNG"), 0), F(" ", pick, 16));
+        shemaNote.Font = St.Small;
+        shemaNote.ForeColor = St.Hint;
+        c.Grid.Row(F(null, shemaNote, 0));
+        Field("shema", "Схема питания", c.Name);
+        Field("pitanie", "Питание от", c.Name); Field("data_razgr", "Акт разграничения", c.Name); Field("liniya", "Линия в акте (п. 3)", c.Name); Field("mesto", "Место включения", c.Name);
 
-        c = new Card("Приборы учёта", "строка на каждый прибор учёта, «+» - ещё один; в справку, акт и доп. соглашение", 4);
-        cards.Add(c);
-        // показания - всегда цифрами: новый счётчик - нули по разрядности (Разр.: «6+2» - 6 целых и 2 после запятой -> 000000,00);
-        // К расч - сам по ТТ и ТН («150/5» -> 30); разрядность запоминается по типу счётчика
-        pu = new RowList(new string[] { "Точка учёта", "Тип счётчика", "№ счётчика", "В", "А", "Показания", "Пов. кв.", "Пов. год", "ТТ тока", "ТТ напр.", "К расч", "Разр." },
-            new int[] { 8, 0, 11, 9, 7, 9, 5, 5, 10, 6, 4, 5 },        // ТТ тока шире: «ТОП-0,66 150/5» (учёт с трансформаторами)
-            new bool[] { true, true, false, true, true, false, true, false, false, false, false, true },
-            new string[] { "ЩУЭ", null, null, "3х230/400", "5(100)", "000000,00", null, null, "-", "-", "1", "6+2" });
-        pu.Name = "pu";
-        Rows(pu);
-        pu.Edited += delegate(int row, int col) {
-            if (col == 1) RazrFor(row);
-            if (col == 1 || col == 5 || col == 11) ZerosFor(row);
-            if (col == 8 || col == 9) KFor(row);
-        };
-        c.Grid.Row(F(null, pu, 0));
-        c.Grid.Row(F(null, X("minus_on", "Строка в акте: «Данные прибора учёта № ... минусуются от данных прибора учёта № ...»"), 0));
-        c.Grid.Row(F("минусуется ПУ №", T("minus_x", null), 14), F("от данных ПУ №", T("minus_y", null), 14), F("Строка в акте (собирается сама)", T("minus", null), 0));
-        Field("pu", "Приборы учёта (тип и номер)", c.Name);
-
-        c = new Card("Мощность", "расчёт по установленной мощности (справка, акт, доп. соглашение); строка на точку учёта", 4);
-        cards.Add(c);
-        moshn = new RowList(new string[] { "Нагрузка (точка учёта)", "Мощность", "Ки", "Время работы", "Выходные" },
-            new int[] { 16, 10, 6, 14, 0 },
-            new bool[] { true, true, true, true, true },
-            new string[] { "ЩУЭ", null, "-", "24 ч/сут.", "Без выходных" });
-        moshn.Name = "moshn";
-        Rows(moshn);
-        c.Grid.Row(F(null, moshn, 0));
-        Field("moshn", "Мощность", c.Name);
-
-        c = new Card("Пломбы", "в акт («Клемная крышка ... опломбирована пломбой ...») и в отчёт пломб", 4);
-        cards.Add(c);
-        seals = new Seals();
-        seals.Name = "plomba_drugoe";
-        seals.Changed += delegate { if (loading) return; dirty = true; Compose("plomby"); RefreshState(); };
-        seals.Resized += delegate { LayoutCards(); };
-        c.Grid.Row(F("Маркировка", C("plomba_marka", "МЭСБ"), 8), F("КК - клеммная крышка (номера через запятую)", T("plomba_klemm", null), 0),
-            F("ВА - вводной автомат (номера)", T("plomba_vvod", null), 0), F("Ток ВА, А", C("va_tok", "63"), 6));
-        c.Grid.Row(F("Другие пломбы (место | номер)", seals, 0));
-        c.Grid.Row(F("Пломбы в акте (собирается само, можно поправить)", T("plomby", null), 0));
-
-        c = new Card("Доп. соглашение", "пункт 1, тарифная группа, ТРЭТ, примечание - варианты пополняются в справочнике", 4);
-        cards.Add(c);
-        c.Grid.Row(F("Пункт 1 соглашения", C("punkt1", null), 0));
-        c.Grid.Row(F("Тарифная группа", C("tarif", null), 0), F("ТРЭТ", T("tret", null), 8), F("Примечание", T("prim", null), 16));
-
-        c = new Card("Потери", "Приложение 8 по ТКП 460-2017: что стоит между границей балансовой принадлежности и учётом - формулы и числа подставятся сами", 4);
+        c = new Card("Схема учёта и потери", "учёт, трансформатор, линии от границы балансовой принадлежности до учёта - по ним «Потери (Приложение 8)» по ТКП 460-2017 и строка линии в акте", 4);
         cards.Add(c);
         Seg potU = new Seg("0,4 кВ", "6 кВ", "10 кВ");
         Reg("pot_u", potU);
@@ -27533,21 +27586,61 @@ public class BsForm : Form {
         potNote.Font = St.Small;
         potNote.ForeColor = St.Caption;
         c.Grid.Row(F("Проверка за месяц: Wа, кВт·ч", T("pot_test", "35000"), 14), F(null, potNote, 0));
-        Button pick = Ui.Button("Выбрать схему…", false);
-        pick.Name = "shemaPick";
-        pick.Click += delegate { PickShema(); };
-        tip.SetToolTip(pick, "Фото или скан схемы питания из проекта (JPG, PNG) - встанет в «потери» на место схемы");
-        c.Grid.Row(F("Схема питания (картинка)", T("shema", "файл JPG/PNG"), 0), F(" ", pick, 16));
-        shemaNote.Font = St.Small;
-        shemaNote.ForeColor = St.Hint;
-        c.Grid.Row(F(null, shemaNote, 0));
-        Field("linii", "Линии (марка, L)", c.Name); Field("shema", "Схема питания", c.Name);
+        Field("linii", "Линии (марка, L)", c.Name);
+
+        c = new Card("Приборы учёта", "строка на каждый прибор учёта, «+» - ещё один; в справку, акт и доп. соглашение", 4);
+        cards.Add(c);
+        // показания - всегда цифрами: новый счётчик - нули по разрядности (Разр.: «6+2» - 6 целых и 2 после запятой -> 000000,00);
+        // К расч - сам по ТТ и ТН («150/5» -> 30); разрядность запоминается по типу счётчика
+        pu = new RowList(new string[] { "Точка учёта", "Тип счётчика", "№ счётчика", "U, В", "I, А", "Показания", "Пов. кв.", "Пов. год", "ТТ тока", "ТН", "К расч", "Разр." },
+            new int[] { 8, 0, 11, 9, 7, 9, 5, 5, 10, 6, 4, 5 },        // ТТ тока шире: «ТОП-0,66 150/5» (учёт с трансформаторами)
+            new bool[] { true, true, false, true, true, false, true, false, false, false, false, true },
+            new string[] { "ЩУЭ", null, null, "3х230/400", "5(100)", "000000,00", null, null, "-", "-", "1", "6+2" });
+        pu.Name = "pu";
+        Rows(pu);
+        pu.Edited += delegate(int row, int col) {
+            if (col == 0 && row < moshn.Count && (moshn.Cell(row, 0).Length == 0 || lists.Get("БС: точка учёта").Contains(moshn.Cell(row, 0)))) moshn.SetCell(row, 0, pu.Cell(row, 0));
+            if (col == 1) RazrFor(row);
+            if (col == 1 || col == 5 || col == 11) ZerosFor(row);
+            if (col == 8 || col == 9) KFor(row);
+        };
+        c.Grid.Row(F(null, pu, 0));
+        c.Grid.Row(F(null, X("minus_on", "Строка в акте: «Данные прибора учёта № ... минусуются от данных прибора учёта № ...»"), 0));
+        c.Grid.Row(F("минусуется ПУ №", T("minus_x", null), 14), F("от данных ПУ №", T("minus_y", null), 14), F("Строка в акте (собирается сама)", T("minus", null), 0));
+        Field("pu", "Приборы учёта (тип и номер)", c.Name);
+
+        c = new Card("Мощность", "расчёт по установленной мощности (справка, акт, доп. соглашение); строка на точку учёта", 4);
+        cards.Add(c);
+        moshn = new RowList(new string[] { "Нагрузка (точка учёта)", "Мощность", "Ки", "Время работы", "Выходные" },
+            new int[] { 16, 10, 6, 14, 0 },
+            new bool[] { true, true, true, true, true },
+            new string[] { "ЩУЭ", null, "-", "24 ч/сут.", "Без выходных" });
+        moshn.Name = "moshn";
+        Rows(moshn);
+        c.Grid.Row(F(null, moshn, 0));
+        Field("moshn", "Мощность", c.Name);
+
+        c = new Card("Пломбы", "в акт («Клемная крышка ... опломбирована пломбой ...») и в отчёт пломб", 4);
+        cards.Add(c);
+        seals = new Seals();
+        seals.Name = "plomba_drugoe";
+        seals.Changed += delegate { if (loading) return; dirty = true; Compose("plomby"); RefreshState(); };
+        seals.Resized += delegate { LayoutCards(); };
+        c.Grid.Row(F("Маркировка", C("plomba_marka", "МЭСБ"), 8), F("КК - клеммная крышка (номера через запятую)", T("plomba_klemm", null), 0),
+            F("ВА - вводной автомат (номера)", T("plomba_vvod", null), 0), F("Ток ВА, А", C("va_tok", "63"), 6));
+        c.Grid.Row(F("Другие пломбы (место | номер)", seals, 0));
+        c.Grid.Row(F("Пломбы в акте (собирается само, можно поправить)", T("plomby", null), 0));
+
+        c = new Card("Доп. соглашение", "пункт 1, тарифная группа, ТРЭТ, примечание - варианты пополняются в справочнике", 4);
+        cards.Add(c);
+        c.Grid.Row(F("Пункт 1 соглашения", C("punkt1", null), 0));
+        c.Grid.Row(F("Тарифная группа", C("tarif", null), 0), F("ТРЭТ", T("tret", null), 8), F("Примечание", T("prim", null), 16));
 
         c = new Card("Наряд", "наряд на включение (отключение): вид, причина, потребитель", 4);
         cards.Add(c);
         Seg vid = new Seg("включение", "отключение");
         Reg("vid", vid);
-        c.Grid.Row(F("Наряд на", vid, 24), F("Причина", C("prichina", "Допуск"), 18), F("Потребитель в наряде (собирается сам)", T("potr", null), 0));
+        c.Grid.Row(F("Наряд на", vid, 24), F("Причина", C("prichina", "Допуск"), 26), F("Потребитель в наряде (собирается сам)", T("potr", null), 0));
         c.Grid.Row(F("Объект в наряде (коротко)", T("obekt_kr", null), 0));
 
         c = new Card("Подписи и даты", "инженер и начальник - из справочника; даты документов", 4);
@@ -27616,6 +27709,9 @@ public class BsForm : Form {
             List<string> tv = new List<string>();
             foreach (string[] x in TgVidy) tv.Add(x[0]);
             Items("tg_vid", tv);
+            List<string> vo = new List<string>();
+            foreach (string[] x in Presets) vo.Add(x[0]);
+            Items("vid_obekta", vo);
             seals.SetPlaces(lists.Get("Места пломб"));
         } finally { loading = was; }
     }
@@ -27696,6 +27792,56 @@ public class BsForm : Form {
         new string[] { "в три смены без выходных", "1,02" }, new string[] { "непрерывная работа", "1,01" } };
     static readonly string[][] TgVidy = { new string[] { "остальные потребители", "0,33" }, new string[] { "асинхронные двигатели, без КРМ", "0,88" },
         new string[] { "асинхронные двигатели, неавтоматизированная КРМ", "0,62" }, new string[] { "асинхронные двигатели, автоматизированная КРМ", "0,20" } };
+
+    // вид объекта: наименование (начало), вид сооружения и код, характер деятельности (акт, п. 4), тарифная группа, точка учёта
+    static readonly string[][] Presets = {
+        new string[] { "Базовая станция связи", "Возведение мобильной базовой станции", "сооружение специализированное связи, код 3 07 00",
+            "электрическая энергия используется для электроснабжения базовой станции", "Промышленные и приравненные к ним потребители", "ЩУЭ" },
+        new string[] { "Зарядная станция электромобилей", "Установка зарядных станций для электромобилей", "",
+            "электрическая энергия используется для зарядки электромобилей", "Электрическая энергия, используемая электрозарядными станциями", "ЭЗС" },
+        new string[] { "Другое", "", "", "", "", "" } };
+
+    // выбран вид объекта: подставить, что относится к виду (поле, вписанное руками для другого вида, тоже меняется; своё - остаётся)
+    void ApplyPreset() {
+        string[] p = null;
+        foreach (string[] x in Presets) if (x[0] == V("vid_obekta")) p = x;
+        if (p == null || p[0] == "Другое") return;
+        string ob = V("obekt");
+        bool other = ob.Length == 0;
+        foreach (string[] x in Presets) if (x[1].Length > 0 && ob.StartsWith(x[1])) other = true;
+        if (other) SetV("obekt", p[1]);
+        SetV("kod", p[2]);
+        SetV("deyat", p[3]);
+        foreach (string t in lists.Get("БС: тарифная группа")) if (p[4].Length > 0 && t.StartsWith(p[4])) { SetV("tarif", t); break; }
+        SetV("rezhim", "непрерывная работа");
+        List<string> points = new List<string>();
+        foreach (string[] x in Presets) if (x[5].Length > 0) points.Add(x[5]);
+        points.AddRange(lists.Get("БС: точка учёта"));
+        for (int i = 0; i < pu.Count; i++) if (pu.Cell(i, 0).Length == 0 || points.Contains(pu.Cell(i, 0))) pu.SetCell(i, 0, p[5]);
+        for (int i = 0; i < moshn.Count; i++) if (moshn.Cell(i, 0).Length == 0 || points.Contains(moshn.Cell(i, 0))) moshn.SetCell(i, 0, p[5]);
+        ShowStarts();
+    }
+
+    // длинные значения списков (пункт 1, тарифная группа, код) - видно начало, а не конец
+    void ShowStarts() {
+        foreach (Control c in inp.Values) if (c is ComboBox) StartOf((ComboBox)c);
+        if (IsHandleCreated) BeginInvoke(new MethodInvoker(delegate { foreach (Control c in inp.Values) if (c is ComboBox) StartOf((ComboBox)c); }));
+    }
+
+    static void StartOf(ComboBox cb) {
+        if (cb.Focused || cb.DropDownStyle == ComboBoxStyle.DropDownList) return;
+        try { cb.SelectionLength = 0; cb.SelectionStart = 0; } catch { }
+    }
+
+    // переключатели «Схемы учёта»: что не относится к выбору - недоступно
+    void PotEnable() {
+        bool tt = V("pot_uchet") != "прямой";
+        Control a = inp["pot_aron"];
+        a.Enabled = tt;
+        if (V("pot_u") == "0,4 кВ" && V("pot_uchet") == "через ТТ и ТН") SetV("pot_uchet", "через ТТ");
+        bool tr = V("tr_tip").Length > 0 && V("tr_tip") != "нет";
+        foreach (string k in new string[] { "tr_u", "tr_r", "tr_x", "tr_dp", "tr_dq" }) { Control c = inp[k]; c.Enabled = tr; c.BackColor = tr ? St.Input : St.Disabled; }
+    }
 
     static string DOf(string rezhim) { foreach (string[] x in Rezhimy) if (x[0] == rezhim) return x[1]; return ""; }
 
@@ -27915,8 +28061,15 @@ public class BsForm : Form {
         else if (key == "rezhim") { string d = DOf(V("rezhim")); if (d.Length > 0) SetV("pot_d", d); }
         else if (key == "tg_vid") { foreach (string[] x in TgVidy) if (x[0] == V("tg_vid")) SetV("pot_tg", x[1]); }
         else if (key == "tr_tip") TrFor();
+        else if (key == "vid_obekta") ApplyPreset();
+        else if (key == "data_akt") {
+            // даты справки следуют за датой акта, пока их не меняли отдельно
+            foreach (string k in new string[] { "data_pu", "data_podp" }) if (aktWas.Length == 0 || V(k) == aktWas) SetV(k, V("data_akt"));
+            aktWas = V("data_akt");
+        }
         else if (key == "pot_uchet") UchetFor();
         if (key == "balans") Compose("liniya");
+        if (key.StartsWith("pot_") || key.StartsWith("tr_")) PotEnable();
         if (key.StartsWith("pot_") || key.StartsWith("tr_") || key == "balans" || key == "rezhim" || key == "tg_vid") PotNote();
     }
 
@@ -28059,12 +28212,12 @@ public class BsForm : Form {
         nav.Width = St.NavWidth;
         nav.BackColor = St.Nav;
         Label title = new Label();
-        title.Text = "БС";
+        title.Text = "Пакет документов";
         title.Font = new Font("Segoe UI", 15f, FontStyle.Bold);
         title.ForeColor = Color.White;
         title.SetBounds(22, 22, 210, 34);
         Label sub = new Label();
-        sub.Text = "пакет документов юр лица";
+        sub.Text = "юр лица: БС, ЭЗС и др.";
         sub.Font = St.Small;
         sub.ForeColor = St.NavText;
         sub.SetBounds(24, 58, 210, 20);
@@ -28088,7 +28241,7 @@ public class BsForm : Form {
         req.Click += delegate { SetupRequired(); };
         NavItem openItem = new NavItem("Открыть сохранённый…", true);
         openItem.Click += delegate { OpenSaved(); };
-        NavItem folder = new NavItem("Папка БС", true);
+        NavItem folder = new NavItem("Папка пакетов (БС)", true);
         folder.Click += delegate {
             try { Directory.CreateDirectory(Folder(here)); Process.Start("explorer.exe", "\"" + Folder(here) + "\""); }
             catch (Exception ex) { MessageBox.Show(this, ex.Message, Text); }
@@ -28232,6 +28385,9 @@ public class BsForm : Form {
         } finally { loading = false; }
         dirty = false;
         Enable();
+        PotEnable();
+        ShowStarts();
+        aktWas = V("data_akt");
         ShemaNote();
         head.Text = "Новый пакет документов";
         headSub.ForeColor = St.Hint;
@@ -28281,6 +28437,9 @@ public class BsForm : Form {
         } finally { loading = false; }
         dirty = false;
         Enable();
+        PotEnable();
+        ShowStarts();
+        aktWas = V("data_akt");
         ShemaNote();
         LayoutCards();
         head.Text = "Пакет «" + name + "»";
@@ -30298,7 +30457,7 @@ public class PotScheme {
     // ---- описание схемы одной строкой (для формы) ----
     public string Summary() {
         List<string> e = new List<string>();
-        e.Add("учёт " + Uv(Uuch) + " кВ " + (Uchet == 0 ? "прямого включения" : Uchet == 1 ? "через ТТ" : "через ТТ и ТН"));
+        e.Add("учёт " + (Uuch < 0.3 ? "0,23" : Uuch < 1 ? "0,4" : N(Uuch)) + " кВ " + (Uchet == 0 ? "прямого включения" : Uchet == 1 ? "через ТТ" : "через ТТ и ТН"));
         if (TT() > 0) e.Add("ТТ " + N(TT()) + " кВт·ч/мес");
         if (TN() > 0) e.Add("ТН " + N(TN()) + " кВт·ч/мес");
         foreach (PotLine l in Near()) e.Add(l.Name + " " + l.Kind + " " + N(l.U) + " кВ, R = " + N(l.R) + " Ом");

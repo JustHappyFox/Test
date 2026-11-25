@@ -235,7 +235,7 @@ public class PotScheme {
     // ---- описание схемы одной строкой (для формы) ----
     public string Summary() {
         List<string> e = new List<string>();
-        e.Add("учёт " + Uv(Uuch) + " кВ " + (Uchet == 0 ? "прямого включения" : Uchet == 1 ? "через ТТ" : "через ТТ и ТН"));
+        e.Add("учёт " + (Uuch < 0.3 ? "0,23" : Uuch < 1 ? "0,4" : N(Uuch)) + " кВ " + (Uchet == 0 ? "прямого включения" : Uchet == 1 ? "через ТТ" : "через ТТ и ТН"));
         if (TT() > 0) e.Add("ТТ " + N(TT()) + " кВт·ч/мес");
         if (TN() > 0) e.Add("ТН " + N(TN()) + " кВт·ч/мес");
         foreach (PotLine l in Near()) e.Add(l.Name + " " + l.Kind + " " + N(l.U) + " кВ, R = " + N(l.R) + " Ом");
