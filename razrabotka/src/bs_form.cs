@@ -304,17 +304,18 @@ public class BsForm : Form {
     readonly Dictionary<string, Control> inp = new Dictionary<string, Control>();
     readonly List<Card> cards = new List<Card>();
     readonly Panel content = new Panel();
-    readonly Label head = new Label(), headSub = new Label(), status = new Label(), shemaNote = new Label(), kabelNote = new Label(), potNote = new Label();
+    readonly Label head = new Label(), headSub = new Label(), status = new Label(), shemaNote = new Label(), kabelNote = new Label(), potNote = new Label(), obNote = new Label();
     readonly ToolTip tip = new ToolTip();
     public StartMenu Home;
     public Form Back;
     bool loading, dirty;
-    string aktWas = "";
+    string aktWas = "", autoVid = "";
+    int obLen, puCount = 1;
     string savedName;
     RowList pu, moshn, linii;
     Seals seals;
     readonly Dictionary<string, string> autos = new Dictionary<string, string>();
-    static readonly string[] Composed = { "adres", "adres_kr", "obekt_full", "obekt_adres", "potr", "plomby", "minus", "paket", "inzh_fio", "liniya" };
+    static readonly string[] Composed = { "adres", "adres_kr", "obekt_full", "obekt_adres", "potr", "plomby", "minus", "paket", "inzh_fio", "liniya", "mesto" };
     static readonly string[] AddrKeys = { "obl", "rayon", "selsovet", "np_tip", "np", "ulica_tip", "ulica", "dom" };
     // документы пакета: ключ галочки, шаблон, имя файла в папке пакета
     public static readonly string[][] Docs = {
@@ -440,6 +441,7 @@ public class BsForm : Form {
             c.Leave += delegate { StartOf((ComboBox)c); };
             c.SizeChanged += delegate { if (IsHandleCreated) BeginInvoke(new MethodInvoker(delegate { StartOf((ComboBox)c); })); };
         }
+        if (key == "obekt") c.Leave += delegate { if (!loading) ObjectLine(); };
         if (key == "np" || key == "ulica") c.Leave += delegate { string v = c.Text.Trim(); if (v.Length > 0 && Up(v) != v) c.Text = Up(v); };
     }
 
@@ -490,28 +492,34 @@ public class BsForm : Form {
             F("Абонент (наименование юр лица)", C("abonent", "ООО «...»"), 0), F("Телефон абонента", T("tel", "+375 29 ..."), 18));
         Field("dog_nom", "Договор №", c.Name); Field("dog_data", "Дата договора", c.Name); Field("abonent", "Абонент", c.Name); Field("tel", "Телефон", c.Name);
 
-        c = new Card("Объект", "наименование, код и адрес - строки собираются сами, их можно поправить", 4);
+        c = new Card("Объект", "строка объекта из бумаг - вставьте целиком: наименование, адрес и код разойдутся по полям сами", 4);
         cards.Add(c);
-        // вид объекта - подставляет наименование, код, характер деятельности, тариф, точку учёта, режим работы (можно поправить)
-        c.Grid.Row(F("Вид объекта (подставит код, характер деятельности, тариф, точку учёта, режим работы)", C("vid_obekta", null), 44));
-        c.Grid.Row(F("Объект (как в документах)", C("obekt", "Возведение мобильной базовой станции БС-..."), 0),
-            F("Вид сооружения и код", C("kod", "сооружение специализированное связи, код 3 07 00"), 36));
+        // 25.11: кода объектов у пользователя нет - строку объекта переносят из бумаг как есть (код в ней то есть, то нет).
+        // Вставили строку «... по адресу: ... (код)» - наименование, адрес по частям и код в скобках разбираются сами;
+        // по наименованию определяется вид объекта (БС, ЭЗС), а он подставляет характер деятельности, тариф, точку учёта, режим
+        c.Grid.Row(F("Объект - строка из бумаг как есть (можно вместе с адресом и кодом)", C("obekt", "вставьте строку объекта из письма или акта"), 0));
+        obNote.Font = St.Small;
+        obNote.ForeColor = St.Hint;
+        c.Grid.Row(F(null, obNote, 0));
+        c.Grid.Row(F("Вид объекта (определится сам по наименованию)", C("vid_obekta", null), 30),
+            F("Код / вид сооружения (если есть в бумагах)", C("kod", "в бумагах нет - пусто"), 0));
         c.Grid.Row(F("Область", C("obl", null), 16), F("Район", C("rayon", null), 14), F("Сельсовет", C("selsovet", null), 16),
             F("Тип н.п.", C("np_tip", null), 7), F("Населённый пункт", C("np", null), 0));
         c.Grid.Row(F("Тип улицы", C("ulica_tip", null), 7), F("Улица", C("ulica", null), 22),
             F("Дом (или «в районе дома №43»)", T("dom", null), 0));
-        c.Grid.Row(F("Адрес полностью (справка, акт, доп. соглашение, потери)", T("adres", null), 0));
+        c.Grid.Row(F("Адрес полностью (справка, акт, доп. соглашение, потери; можно вставить из бумаг - разберётся по частям)", T("adres", null), 0));
+        inp["adres"].Leave += delegate { AdresByHand(); };
         c.Grid.Row(F("Адрес коротко (наряд)", T("adres_kr", null), 0));
         c.Grid.Row(F("Объект в справке, акте, потерях: «наименование по адресу: ...(код)»", T("obekt_full", null), 0));
         c.Grid.Row(F("Объект в доп. соглашении (ячейка таблицы)", T("obekt_adres", null), 0));
         // 24.11: не только БС - характер деятельности в акте приемки (п. 4) на выбор: базовая станция, зарядка электромобилей...
         c.Grid.Row(F("Характер деятельности (акт приемки, п. 4)", C("deyat", "электрическая энергия используется для ..."), 0));
-        Field("obekt", "Объект", c.Name); Field("kod", "Вид сооружения и код", c.Name); Field("np", "Населённый пункт", c.Name); Field("dom", "Дом", c.Name);
+        Field("obekt", "Объект", c.Name); Field("kod", "Код объекта", c.Name); Field("np", "Населённый пункт", c.Name); Field("dom", "Дом", c.Name);
 
         c = new Card("Электроснабжение", "по акту разграничения: откуда питание, дата акта, схема питания; место включения - для наряда", 4);
         cards.Add(c);
         c.Grid.Row(F("Питание от (подстанция)", C("pitanie", "КТПБ-4726"), 18), F("Акт разграничения от", D("data_razgr"), 14),
-            F("Место включения (наряд)", C("mesto", "РП-301"), 0));
+            F("Место включения (наряд; начало - из «Питание от», допишите секцию, рубильник)", C("mesto", "КТПБ-..., РУ-0,4 кВ, 2 секция, руб. 14"), 0));
         c.Grid.Row(F("Линия в акте, п. 3 (собирается сама из линий раздела «Схема учёта и потери»: вид, марка, длина, на чьём балансе)", T("liniya", null), 0));
         Button pick = Ui.Button("Выбрать схему…", false);
         pick.Name = "shemaPick";
@@ -538,13 +546,13 @@ public class BsForm : Form {
         c.Grid.Row(F("Участок от границы до учёта на балансе (абонента - потери прибавляются, РУП - вычитаются)", bal, 40));
         c.Grid.Row(F("Силовой трансформатор между границей и учётом (табл. Б.1-Б.3)", C("tr_tip", "нет"), 22), F("Uнт, кВ", T("tr_u", null), 6),
             F("Rт, Ом", T("tr_r", null), 7), F("Xт, Ом", T("tr_x", null), 7), F("ΔPхх, кВт", T("tr_dp", null), 8), F("ΔQхх, квар", T("tr_dq", null), 8));
-        linii = new RowList(new string[] { "Uн, кВ", "Марка, сечение", "L, км", "r0, Ом/км", "Rл, Ом", "x0, Ом/км", "q30, квар/км" },
+        linii = new RowList(new string[] { "Uн, кВ", "Марка, сечение", "L, км (или «44 м»)", "r0, Ом/км", "Rл, Ом", "x0, Ом/км", "q30, квар/км" },
             new int[] { 6, 0, 8, 8, 9, 8, 9 },
             new bool[] { true, true, false, false, false, false, false },
             new string[] { "0,4", null, null, null, null, null, null });
         linii.Name = "linii";
         Rows(linii);
-        linii.Edited += delegate(int row, int col) { if (col == 0 || col == 1) R0For(row); if (col <= 3) RFor(row); KabelNote(); Compose("liniya"); PotNote(); };
+        linii.Edited += delegate(int row, int col) { if (col == 2) Meters(row); if (col == 0 || col == 1) R0For(row); if (col <= 3) RFor(row); KabelNote(); Compose("liniya"); PotNote(); };
         c.Grid.Row(F(null, linii, 0));
         kabelNote.Font = St.Small;
         kabelNote.ForeColor = St.Hint;
@@ -582,10 +590,12 @@ public class BsForm : Form {
         Rows(pu);
         pu.Edited += delegate(int row, int col) {
             if (col == 0 && row < moshn.Count && (moshn.Cell(row, 0).Length == 0 || lists.Get("БС: точка учёта").Contains(moshn.Cell(row, 0)))) moshn.SetCell(row, 0, pu.Cell(row, 0));
-            if (col == 1) RazrFor(row);
+            if (col == 1) { TypeFill(row); RazrFor(row); }
             if (col == 1 || col == 5 || col == 11) ZerosFor(row);
             if (col == 8 || col == 9) KFor(row);
+            if (col == 3 || col == 4 || col == 8) UchetFromPu(row);
         };
+        pu.Changed += delegate { if (!loading) PuAdded(); };
         c.Grid.Row(F(null, pu, 0));
         c.Grid.Row(F(null, X("minus_on", "Строка в акте: «Данные прибора учёта № ... минусуются от данных прибора учёта № ...»"), 0));
         c.Grid.Row(F("минусуется ПУ №", T("minus_x", null), 14), F("от данных ПУ №", T("minus_y", null), 14), F("Строка в акте (собирается сама)", T("minus", null), 0));
@@ -775,9 +785,10 @@ public class BsForm : Form {
     static readonly string[][] TgVidy = { new string[] { "остальные потребители", "0,33" }, new string[] { "асинхронные двигатели, без КРМ", "0,88" },
         new string[] { "асинхронные двигатели, неавтоматизированная КРМ", "0,62" }, new string[] { "асинхронные двигатели, автоматизированная КРМ", "0,20" } };
 
-    // вид объекта: наименование (начало), вид сооружения и код, характер деятельности (акт, п. 4), тарифная группа, точка учёта
+    // вид объекта: наименование (начало), (код - 25.11 не подставляется: кода у пользователя нет), характер деятельности (акт, п. 4),
+    // тарифная группа, точка учёта
     static readonly string[][] Presets = {
-        new string[] { "Базовая станция связи", "Возведение мобильной базовой станции", "сооружение специализированное связи, код 3 07 00",
+        new string[] { "Базовая станция связи", "Возведение мобильной базовой станции", "",
             "электрическая энергия используется для электроснабжения базовой станции", "Промышленные и приравненные к ним потребители", "ЩУЭ" },
         new string[] { "Зарядная станция электромобилей", "Установка зарядных станций для электромобилей", "",
             "электрическая энергия используется для зарядки электромобилей", "Электрическая энергия, используемая электрозарядными станциями", "ЭЗС" },
@@ -788,11 +799,11 @@ public class BsForm : Form {
         string[] p = null;
         foreach (string[] x in Presets) if (x[0] == V("vid_obekta")) p = x;
         if (p == null || p[0] == "Другое") return;
+        // наименование - только если пусто или там заготовка другого вида (строку из бумаг не трогать)
         string ob = V("obekt");
         bool other = ob.Length == 0;
-        foreach (string[] x in Presets) if (x[1].Length > 0 && ob.StartsWith(x[1])) other = true;
+        foreach (string[] x in Presets) if (x[1].Length > 0 && ob == x[1]) other = true;
         if (other) SetV("obekt", p[1]);
-        SetV("kod", p[2]);
         SetV("deyat", p[3]);
         foreach (string t in lists.Get("БС: тарифная группа")) if (p[4].Length > 0 && t.StartsWith(p[4])) { SetV("tarif", t); break; }
         SetV("rezhim", "непрерывная работа");
@@ -802,6 +813,160 @@ public class BsForm : Form {
         for (int i = 0; i < pu.Count; i++) if (pu.Cell(i, 0).Length == 0 || points.Contains(pu.Cell(i, 0))) pu.SetCell(i, 0, p[5]);
         for (int i = 0; i < moshn.Count; i++) if (moshn.Cell(i, 0).Length == 0 || points.Contains(moshn.Cell(i, 0))) moshn.SetCell(i, 0, p[5]);
         ShowStarts();
+    }
+
+    // ---------- строка объекта из бумаг ----------
+
+    // «Возведение ... БС-6966 по адресу: Минская обл., ..., д. 43 (сооружение ..., код 3 07 00)» -> наименование, адрес, код
+    void ObjectLine() {
+        string s = V("obekt");
+        if (s.Length == 0) return;
+        string t = s.Trim().TrimEnd('.', ';', ' ');
+        if (t.StartsWith("«") && t.EndsWith("»") && t.IndexOf('«', 1) < 0) t = t.Substring(1, t.Length - 2).Trim();
+        else if (t.StartsWith("\"") && t.EndsWith("\"")) t = t.Substring(1, t.Length - 2).Trim();
+        string kod = "";
+        Match k = Regex.Match(t, @"\(([^()]*)\)\s*\.?$");
+        if (k.Success && Regex.IsMatch(k.Groups[1].Value, "код|сооружени|здани|помещени", RegexOptions.IgnoreCase)) {
+            kod = k.Groups[1].Value.Trim();
+            t = t.Substring(0, k.Index).Trim().TrimEnd(',', '.');
+        }
+        string addr = "";
+        Match a = Regex.Match(t, @"[\s,]*(?:расположенн\w*\s+)?по\s+адресу\s*:?\s*", RegexOptions.IgnoreCase);
+        if (a.Success && a.Index > 0) {
+            addr = t.Substring(a.Index + a.Length).Trim().TrimEnd('.', ',');
+            t = t.Substring(0, a.Index).Trim().TrimEnd(',');
+        }
+        if (kod.Length == 0 && addr.Length == 0 && t == s) return;
+        bool was = loading;
+        loading = true;
+        try {
+            SetV("obekt", t);
+            if (kod.Length > 0) SetV("kod", kod);
+            if (addr.Length > 0) ParseAddress(addr);
+        } finally { loading = was; }
+        obLen = V("obekt").Length;
+        dirty = true;
+        RecomposeObject();
+        DetectVid();
+        ObNote();
+        if (addr.Length > 0 || kod.Length > 0) {
+            obNote.Text = "Разобрано: наименование" + (addr.Length > 0 ? ", адрес по частям" : "") + (kod.Length > 0 ? ", код" : "") +
+                " - проверьте поля ниже" + (V("vid_obekta").Length > 0 ? "; вид объекта: " + V("vid_obekta") : "");
+            obNote.ForeColor = St.Good;
+        }
+        ShowStarts();
+        RefreshState();
+    }
+
+    void ObNote() {
+        obNote.Text = "Вставьте строку объекта из бумаг целиком, например «... по адресу: Минская обл., ..., д. 5 (код ...)» - наименование, " +
+            "адрес по частям и код (если есть) разойдутся по полям, вид объекта (БС, ЭЗС) определится сам";
+        obNote.ForeColor = St.Hint;
+    }
+
+    // адрес вписали или вставили руками - разобрать по частям (для короткого адреса наряда и названия пакета)
+    void AdresByHand() {
+        string had;
+        if (loading || V("adres").Length == 0 || (autos.TryGetValue("adres", out had) && had == V("adres"))) return;
+        bool was = loading;
+        loading = true;
+        try { ParseAddress(V("adres").TrimEnd('.')); } finally { loading = was; }
+        RecomposeObject();
+        RefreshState();
+    }
+
+    // строки объекта и адреса - заново из частей (то, что вставили, заменяется собранным в одном виде)
+    void RecomposeObject() {
+        foreach (string k in new string[] { "adres", "adres_kr", "obekt_full", "obekt_adres", "paket" }) { autos[k] = V(k); Compose(k); }
+        autos["obekt_kr"] = V("obekt_kr");
+        SetAuto("obekt_kr", V("obekt"));
+    }
+
+    static readonly string[] NpTypes0 = { "г.п.", "гп.", "р.п.", "аг.", "пос.", "д.", "г.", "п.", "х.", "с.", "к.", "кп." };
+    static readonly string[] StTypes0 = { "ул.", "пер.", "пр-т", "просп.", "пр-д", "пр.", "б-р", "бул.", "пл.", "ш.", "туп.", "проезд", "мкр-н", "мкр.", "тракт", "наб.", "кв-л" };
+
+    List<string> Types(string[] builtIn, string list) {
+        List<string> r = new List<string>(builtIn);
+        foreach (string x in lists.Get(list)) if (x.Trim().Length > 0 && !r.Contains(x.Trim())) r.Add(x.Trim());
+        r.Sort(delegate(string x, string y) { return y.Length.CompareTo(x.Length); });
+        return r;
+    }
+
+    // «д. Тестовка» + типы -> «д.»; тип - в начале и за ним пробел или буква
+    static string TypeAt(string t, List<string> types) {
+        foreach (string x in types)
+            if (t.StartsWith(x, StringComparison.OrdinalIgnoreCase) && t.Length > x.Length && (x.EndsWith(".") || t[x.Length] == ' ')) return x;
+        return null;
+    }
+
+    // «Минская обл., Минский р-н, Пробный с/с, д. Тестовка, ул. Лесная, д. 5» -> области, району, сельсовету, н.п., улице, дому
+    public void ParseAddress(string a) {
+        List<string> np = Types(NpTypes0, "Тип населённого пункта"), st = Types(StTypes0, "Тип улицы");
+        string obl = "", rayon = "", ss = "", npTip = "", npName = "", ulTip = "", ul = "", dom = "";
+        foreach (string raw in a.Split(',', ';')) {
+            string t = raw.Trim();
+            if (t.Length == 0) continue;
+            string l = t.ToLowerInvariant();
+            if (l.Contains("республик") || l == "беларусь" || Regex.IsMatch(t, @"^\d{6}$")) continue;
+            if (l.Contains("обл")) { obl = t; continue; }
+            if (Regex.IsMatch(l, @"(^|\s)(р-н|район)(\s|\.|$)")) { rayon = t; continue; }
+            if (l.Contains("с/с") || l.Contains("сельсовет")) { ss = t; continue; }
+            string tp = TypeAt(t, st);
+            if (tp != null && ul.Length == 0) {
+                string rest = t.Substring(tp.Length).Trim();
+                int v = rest.IndexOf(" в район", StringComparison.OrdinalIgnoreCase);
+                if (v < 0) v = rest.IndexOf(" вблизи", StringComparison.OrdinalIgnoreCase);
+                if (v > 0) { dom = rest.Substring(v + 1).Trim(); rest = rest.Substring(0, v).Trim(); }
+                else {
+                    Match d = Regex.Match(rest, @"^(.*?\S)\s+(?:д\.\s*|дом\s+)?(\d+\S*)$");
+                    if (d.Success) { rest = d.Groups[1].Value; dom = d.Groups[2].Value; }
+                }
+                ulTip = tp; ul = rest;
+                continue;
+            }
+            tp = TypeAt(t, np);
+            if (tp != null && npName.Length == 0) {
+                string rest = t.Substring(tp.Length).Trim();
+                if (rest.Length > 0 && char.IsLetter(rest[0])) { npTip = tp; npName = rest; continue; }
+            }
+            Match dm = Regex.Match(t, @"^(?:д\.|дом)\s*(\d.*)$", RegexOptions.IgnoreCase);
+            if (dm.Success) { dom = (dom + " " + dm.Groups[1].Value).Trim(); continue; }
+            if (char.IsDigit(t[0]) || l.StartsWith("в район") || l.StartsWith("в р-не") || l.StartsWith("вблизи") || l.StartsWith("около") || l.StartsWith("уч")) {
+                dom = (dom.Length > 0 ? dom + ", " : "") + t;
+                continue;
+            }
+            if (npName.Length == 0 && ul.Length == 0 && char.IsUpper(t[0])) { npName = t; continue; }
+            dom = (dom.Length > 0 ? dom + ", " : "") + t;
+        }
+        if (obl.Length > 0) SetV("obl", obl);
+        if (rayon.Length > 0) SetV("rayon", rayon);
+        SetV("selsovet", ss);
+        SetV("np_tip", npTip);
+        SetV("np", npName);
+        SetV("ulica_tip", ul.Length > 0 ? ulTip : "ул.");
+        SetV("ulica", ul);
+        SetV("dom", dom);
+    }
+
+    // вид объекта - по наименованию (пока вид не выбирали руками)
+    void DetectVid() {
+        string o = V("obekt"), l = o.ToLowerInvariant(), d = "";
+        if (l.Contains("заряд") || l.Contains("эзс") || l.Contains("электромобил")) d = Presets[1][0];
+        else if (l.Contains("базов") && l.Contains("станци") || Regex.IsMatch(o, @"(^|[^А-Яа-яA-Za-z])БС\s*-?\s*\d")) d = Presets[0][0];
+        if (d.Length == 0 || d == V("vid_obekta")) return;
+        if (V("vid_obekta").Length > 0 && V("vid_obekta") != autoVid) return;
+        autoVid = d;
+        SetV("vid_obekta", d);
+    }
+
+    // абонент, с которым уже работали: договор, дата договора, телефон - как в прошлый раз (пустые поля)
+    void AbonentFill() {
+        string s = memory.Get("БСАбонент:" + V("abonent"), "");
+        if (s.Length == 0) return;
+        string[] p = s.Split('|');
+        if (V("dog_nom").Length == 0 && p[0].Length > 0) SetV("dog_nom", p[0]);
+        if (p.Length > 1 && p[1].Length > 0 && V("dog_data") == DateTime.Today.ToString("dd.MM.yyyy")) SetV("dog_data", p[1]);
+        if (p.Length > 2 && p[2].Length > 0 && V("tel").Length == 0) SetV("tel", p[2]);
     }
 
     // длинные значения списков (пункт 1, тарифная группа, код) - видно начало, а не конец
@@ -839,7 +1004,68 @@ public class BsForm : Form {
         for (int i = 0; i < pu.Count; i++) {
             if (u == "прямой") { pu.SetCell(i, 8, "-"); pu.SetCell(i, 9, "-"); pu.SetCell(i, 10, "1"); }
             else { if (u == "через ТТ") pu.SetCell(i, 9, "-"); KFor(i); }
+            // ток и напряжение счётчика - по схеме, если там заготовка (своё не трогать)
+            string I = pu.Cell(i, 4), U = pu.Cell(i, 3);
+            if (u == "прямой" && (I.Length == 0 || I == CurTT)) pu.SetCell(i, 4, CurDirect);
+            if (u != "прямой" && (I.Length == 0 || I == CurDirect)) pu.SetCell(i, 4, CurTT);
+            if (u == "через ТТ и ТН" && (U.Length == 0 || U == VoltLow)) pu.SetCell(i, 3, VoltTN);
+            if (u != "через ТТ и ТН" && (U.Length == 0 || U == VoltTN)) pu.SetCell(i, 3, VoltLow);
         }
+    }
+
+    const string CurDirect = "5(100)", CurTT = "5(10)", VoltLow = "3х230/400", VoltTN = "3х57,7/100";
+
+    // по счётчику - схема учёта: «3х57,7/100» - через ТТ и ТН; ток «5(10)», «1(2)» или ТТ с коэффициентом - через ТТ; «5(60)», «10(100)» - прямой
+    void UchetFromPu(int row) {
+        string u = pu.Cell(row, 3), cur = pu.Cell(row, 4), want = "";
+        Match m = Regex.Match(cur, @"^\s*(\d+(?:[.,]\d+)?)\s*\(\s*(\d+(?:[.,]\d+)?)\s*\)");
+        double max = 0;
+        bool hasMax = m.Success && Num(m.Groups[2].Value, out max);
+        if (u.Contains("/100")) want = "через ТТ и ТН";
+        else if (hasMax && max >= 30) want = "прямой";
+        else if (Ratio(pu.Cell(row, 8)) > 1 || (hasMax && max <= 10)) want = "через ТТ";
+        if (want.Length == 0 || want == V("pot_uchet")) return;
+        if (want == "через ТТ и ТН" && V("pot_u") == "0,4 кВ") SetV("pot_u", "10 кВ");
+        SetV("pot_uchet", want);
+    }
+
+    // тип счётчика выбран: напряжение и ток - как у этого типа в прошлый раз (если в строке заготовка)
+    void TypeFill(int row) {
+        string s = memory.Get("БССчётчик:" + pu.Cell(row, 1), "");
+        if (s.Length == 0) return;
+        string[] p = s.Split('|');
+        if (p.Length > 0 && p[0].Length > 0 && (pu.Cell(row, 3).Length == 0 || pu.Cell(row, 3) == VoltLow)) pu.SetCell(row, 3, p[0]);
+        if (p.Length > 1 && p[1].Length > 0 && (pu.Cell(row, 4).Length == 0 || pu.Cell(row, 4) == CurDirect || pu.Cell(row, 4) == CurTT)) pu.SetCell(row, 4, p[1]);
+        UchetFromPu(row);
+    }
+
+    // «+» в приборах учёта: новая строка - как предыдущая (точка, тип, U, I, ТТ, ТН, К, разрядность), № и показания - свои;
+    // в «Мощности» - строка на этот прибор
+    void PuAdded() {
+        if (pu.Count > puCount) {
+            for (int i = Math.Max(1, puCount); i < pu.Count; i++) {
+                if (pu.Cell(i, 2).Length > 0) continue;
+                foreach (int k in new int[] { 0, 1, 3, 4, 8, 9, 10, 11 }) if (pu.Cell(i - 1, k).Length > 0) pu.SetCell(i, k, pu.Cell(i - 1, k));
+                pu.SetCell(i, 5, Zeros(pu.Cell(i, 11)));
+            }
+            if (moshn.Count < pu.Count) {
+                List<string> lines = new List<string>(moshn.Value.Split('\n'));
+                string[] last = lines[lines.Count - 1].Split('|');
+                while (lines.Count < pu.Count) {
+                    string point = pu.Cell(lines.Count, 0);
+                    lines.Add(point + "||" + (last.Length > 2 ? last[2] : "-") + "|" + (last.Length > 3 ? last[3] : "") + "|" + (last.Length > 4 ? last[4] : ""));
+                }
+                moshn.Value = string.Join("\n", lines.ToArray());
+            }
+        }
+        puCount = pu.Count;
+    }
+
+    // длина линии в метрах («44 м», «44м») -> километры (0,044)
+    void Meters(int row) {
+        Match m = Regex.Match(linii.Cell(row, 2), @"^\s*(\d+(?:[.,]\d+)?)\s*м\.?\s*$");
+        double v;
+        if (m.Success && Num(m.Groups[1].Value, out v)) linii.SetCell(row, 2, Fmt(v / 1000));
     }
 
     // «ТОП-0,66 150/5 ...» -> 30; «НАМИ-10 10000/100» -> 100
@@ -1033,8 +1259,19 @@ public class BsForm : Form {
 
     void OnChanged(string key) {
         if (Array.IndexOf(AddrKeys, key) >= 0) { Compose("adres"); Compose("adres_kr"); Compose("obekt_full"); Compose("obekt_adres"); Compose("paket"); }
-        else if (key == "obekt" || key == "kod") { Compose("obekt_full"); Compose("obekt_adres"); if (key == "obekt") { SetAuto("obekt_kr", V("obekt")); Compose("paket"); } }
-        else if (key == "abonent" || key == "tel") Compose("potr");
+        else if (key == "obekt" || key == "kod") {
+            Compose("obekt_full"); Compose("obekt_adres");
+            if (key == "obekt") {
+                SetAuto("obekt_kr", V("obekt")); Compose("paket");
+                // вставили строку целиком (резкий рост длины) - разобрать сразу; набирают руками - при выходе из поля
+                int len = V("obekt").Length;
+                if (len - obLen > 15 && IsHandleCreated) BeginInvoke(new MethodInvoker(delegate { ObjectLine(); }));
+                obLen = len;
+                DetectVid();
+            }
+        }
+        else if (key == "abonent" || key == "tel") { Compose("potr"); if (key == "abonent") AbonentFill(); }
+        else if (key == "pitanie") Compose("mesto");
         else if (key == "minus_x" || key == "minus_y") Compose("minus");
         else if (key.StartsWith("plomba") || key == "va_tok") Compose("plomby");
         else if (key == "inzh") Compose("inzh_fio");
@@ -1051,6 +1288,7 @@ public class BsForm : Form {
         }
         else if (key == "pot_uchet") UchetFor();
         if (key == "balans") Compose("liniya");
+        if (key == "pot_u") Compose("mesto");
         if (key.StartsWith("pot_") || key.StartsWith("tr_")) PotEnable();
         if (key.StartsWith("pot_") || key.StartsWith("tr_") || key == "balans" || key == "rezhim" || key == "tg_vid") PotNote();
     }
@@ -1072,7 +1310,7 @@ public class BsForm : Form {
     void ResetAutos() { foreach (string k in Composed) autos[k] = ""; autos["obekt_kr"] = ""; }
 
     string Street() {
-        string ul = (V("ulica_tip") + " " + V("ulica")).Trim();
+        string ul = V("ulica").Length > 0 ? (V("ulica_tip") + " " + V("ulica")).Trim() : "";
         string dom = V("dom");
         if (dom.Length == 0) return ul;
         // «43» -> «ул. Авиационная, д. 43»; «в районе дома №43» -> «ул. Авиационная в районе дома №43»
@@ -1122,6 +1360,12 @@ public class BsForm : Form {
                 return string.Join(", ", p.ToArray()) + " - на балансе " + (V("balans").StartsWith("РУП") ? "РУП «МИНСКЭНЕРГО»" : "абонента") + ".";
             }
             case "inzh_fio": return EngineerFull(V("inzh"));
+            case "mesto": {
+                // «КТПБ-4726» -> «КТПБ-4726, РУ-0,4 кВ» (секцию и рубильник дописывают через запятую)
+                if (V("pitanie").Length == 0) return "";
+                string u = V("pot_u").Length > 0 ? V("pot_u") : "0,4 кВ";
+                return V("pitanie") + ", РУ-" + u;
+            }
             case "paket": {
                 string n = (V("dog_nom").Length > 0 ? "Дог " + V("dog_nom") + " " : "") + V("np") + " " + ShortObject();
                 foreach (char ch in Path.GetInvalidFileNameChars()) n = n.Replace(ch, '_');
@@ -1222,7 +1466,10 @@ public class BsForm : Form {
         NavItem req = new NavItem("Обязательные поля", true);
         req.Click += delegate { SetupRequired(); };
         NavItem openItem = new NavItem("Открыть сохранённый…", true);
-        openItem.Click += delegate { OpenSaved(); };
+        openItem.Click += delegate { OpenSaved(false); };
+        NavItem sample = new NavItem("Новый по образцу…", true);
+        sample.Click += delegate { OpenSaved(true); };
+        tip.SetToolTip(sample, "Новый пакет из прошлого: абонент, договор, счётчики, схема учёта, подписи - как там; объект, адрес, номера, пломбы, даты - заново");
         NavItem folder = new NavItem("Папка пакетов (БС)", true);
         folder.Click += delegate {
             try { Directory.CreateDirectory(Folder(here)); Process.Start("explorer.exe", "\"" + Folder(here) + "\""); }
@@ -1232,7 +1479,7 @@ public class BsForm : Form {
         dirs.Click += delegate {
             try { Process.Start("notepad.exe", "\"" + lists.File + "\""); } catch (Exception ex) { MessageBox.Show(this, ex.Message, Text); }
         };
-        NavItem[] low = { req, openItem, folder, dirs };
+        NavItem[] low = { req, sample, openItem, folder, dirs };
         foreach (NavItem n in low) { n.Anchor = AnchorStyles.Left | AnchorStyles.Bottom | AnchorStyles.Right; nav.Controls.Add(n); }
         nav.Resize += delegate {
             int yy = nav.ClientSize.Height - 16;
@@ -1336,7 +1583,6 @@ public class BsForm : Form {
             SetV("rayon", memory.Get("БСРайон", First(lists.Get("БС: район"))));
             SetV("np_tip", "д.");
             SetV("ulica_tip", "ул.");
-            SetV("kod", First(lists.Get("БС: вид сооружения и код")));
             SetV("deyat", First(lists.Get("БС: характер деятельности")));
             SetV("plomba_marka", memory.Get("БСМаркировка", First(lists.Get("БС: маркировка пломб"))));
             SetV("punkt1", First(lists.Get("БС: доп. соглашение, пункт 1")));
@@ -1364,8 +1610,12 @@ public class BsForm : Form {
             ResetAutos();
             ComposeAll();
             savedName = null;
+            autoVid = "";
+            obLen = 0;
+            puCount = pu.Count;
         } finally { loading = false; }
         dirty = false;
+        ObNote();
         Enable();
         PotEnable();
         ShowStarts();
@@ -1387,14 +1637,14 @@ public class BsForm : Form {
         return d;
     }
 
-    void OpenSaved() {
+    void OpenSaved(bool asSample) {
         string dir = DataFolder(here);
         if (!Directory.Exists(dir) || Directory.GetFiles(dir, "*.txt").Length == 0) { MessageBox.Show(this, "Сохранённых пакетов документов пока нет.", Text); return; }
         if (dirty && MessageBox.Show(this, "Пакет не сохранён. Открыть другой? Введённое здесь пропадёт.", Text, MessageBoxButtons.YesNo, MessageBoxIcon.Question,
                 MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
         using (SavedDialog dlg = new SavedDialog(dir, 3)) {
             if (dlg.ShowDialog(this) != DialogResult.OK || dlg.Chosen == null) return;
-            try { LoadSaved(dlg.Chosen); }
+            try { if (asSample) LoadSample(dlg.Chosen); else LoadSaved(dlg.Chosen); }
             catch (Exception ex) { MessageBox.Show(this, "Не удалось открыть:\n" + ex.Message, Text); }
         }
     }
@@ -1416,7 +1666,10 @@ public class BsForm : Form {
                     if (File.Exists(f)) { SetV("shema", f); break; }
                 }
             savedName = name;
+            obLen = V("obekt").Length;
+            puCount = pu.Count;
         } finally { loading = false; }
+        ObNote();
         dirty = false;
         Enable();
         PotEnable();
@@ -1429,6 +1682,42 @@ public class BsForm : Form {
         string when;
         d.TryGetValue("сохранён", out when);
         headSub.Text = "открыт сохранённый (" + (when ?? "") + ") - исправьте и сформируйте заново";
+        RefreshState();
+    }
+
+    // новый пакет по образцу сохранённого (тот же абонент - соседняя БС, ещё одна ЭЗС): общее остаётся, своё у объекта - очищается
+    public void LoadSample(string file) {
+        LoadSaved(file);
+        string name = Path.GetFileNameWithoutExtension(file);
+        loading = true;
+        try {
+            foreach (string k in new string[] { "obekt", "kod", "selsovet", "np", "ulica", "dom", "pitanie", "shema", "plomba_klemm", "plomba_vvod",
+                    "minus_x", "minus_y", "pot_test" }) SetV(k, "");
+            foreach (string k in Composed) SetV(k, "");
+            SetV("minus_on", "");
+            seals.Value = "";
+            foreach (string k in new string[] { "data_razgr", "data_pu", "data_podp", "data_akt" }) ((DateBox)inp[k]).Value = DateTime.Today;
+            for (int i = 0; i < pu.Count; i++) { pu.SetCell(i, 2, ""); pu.SetCell(i, 5, Zeros(pu.Cell(i, 11))); pu.SetCell(i, 6, ""); pu.SetCell(i, 7, ""); }
+            for (int i = 0; i < linii.Count; i++) { linii.SetCell(i, 2, ""); linii.SetCell(i, 4, ""); }
+            ResetAutos();
+            ComposeAll();
+            savedName = null;
+            autoVid = "";
+            obLen = 0;
+            puCount = pu.Count;
+        } finally { loading = false; }
+        dirty = false;
+        aktWas = V("data_akt");
+        Enable();
+        KabelNote();
+        PotNote();
+        ShemaNote();
+        ObNote();
+        ShowStarts();
+        LayoutCards();
+        head.Text = "Новый пакет по образцу";
+        headSub.ForeColor = St.Hint;
+        headSub.Text = "из «" + name + "»: впишите объект (строку из бумаг), питание, счётчики (№), длины линий, мощность, пломбы";
         RefreshState();
     }
 
@@ -1733,6 +2022,10 @@ public class BsForm : Form {
         memory.Values["БСРежим"] = V("rezhim");
         for (int i = 0; i < pu.Count; i++) if (pu.Cell(i, 1).Length > 0 && pu.Cell(i, 11).Length > 0) memory.Values["БСРазрядность:" + pu.Cell(i, 1)] = pu.Cell(i, 11);
         memory.Values["БСДолжностьНачальника"] = V("nach_dolzh");
+        // абонент: договор, дата, телефон - выберут абонента ещё раз, подставятся сами
+        if (V("abonent").Length > 0) memory.Values["БСАбонент:" + V("abonent")] = V("dog_nom") + "|" + V("dog_data") + "|" + V("tel");
+        // тип счётчика: напряжение и ток
+        for (int i = 0; i < pu.Count; i++) if (pu.Cell(i, 1).Length > 0) memory.Values["БССчётчик:" + pu.Cell(i, 1)] = pu.Cell(i, 3) + "|" + pu.Cell(i, 4);
         StringBuilder docs = new StringBuilder();
         foreach (string[] d in Docs) docs.Append(V(d[0]) == "1" ? '1' : '0');
         memory.Values["БСДокументы"] = docs.ToString();
