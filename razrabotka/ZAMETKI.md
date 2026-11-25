@@ -54,7 +54,8 @@ XDG_DATA_HOME в scratchpad test/profile (Mono: APPDATA/LOCALAPPDATA = они).
 runtest.sh dogovor razrabotka/tests/t_netbook.cs (run.sh/runtest.sh: SCREEN=ШxВ - свой Xvfb :78). Новые окна делать с Dock/Anchor
 и проверять на 1024x560.
 Выгрузки читаются через VygBook.Open (вид - по содержимому: xlsx, xls BIFF2-8, HTML, XML 2003, текст); проверка - tests/gen_xls_old.py
-+ t_xls_formats.cs (vygtest.sh), копии сравнивать с копией из .xlsx.
++ t_xls_formats.cs (vygtest.sh), копии сравнивать с копией из .xlsx. 25.11: и таблица .dbf (DbfVygBook; TEMP.DBF старой программы базы
+с виртуальной машины без Excel) - проверка tests/gen_dbf.py.
 !!! АРХИВЫ: pack.py берёт только файлы из git. Рабочие файлы программ (nastroiki.txt, spravochniki.txt, otchet*.txt) НИКОГДА не
 класть в архив - 24.11 архив затёр пользователю справочник и настройки. После проверок под Mono удалять из папок программ созданное
 (БС, Справки..., rabotaet.txt). Шаблоны: после пересоздания (bs_templates.py, udalenie_template.py) - tools/tpl_fix.py (МИНСКЭНЕРГО,

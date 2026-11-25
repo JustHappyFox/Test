@@ -400,7 +400,7 @@ public class XlsxBook : IDisposable {
 }
 
 // Выгрузка быта -> своя копия: byt.dbf (поля как в таблице абонентов базы) + byt_ulicy.txt (код улицы -> н.п., улица, сельсовет)
-// Книга выгрузки любого вида (смотрится по содержимому, не по расширению): .xlsx; .xls - Excel 97-2003, Excel 5.0/95 и
+// Книга выгрузки любого вида (смотрится по содержимому, не по расширению): таблица .dbf (25.11); .xlsx; .xls - Excel 97-2003, Excel 5.0/95 и
 // Excel 2-4 (так пишет FoxPro «COPY TO ... TYPE XLS»); «xls», который на деле HTML-таблица, XML-таблица Excel 2003 или текст
 // с табуляцией / точкой с запятой. Строки всех листов подряд, номер сквозной (пустые строки не считаются); первая строка -
 // заголовок; на следующих листах та же строка заголовка пропускается (xls - не больше 65536 строк на листе, выгрузку делят).
@@ -418,6 +418,7 @@ public abstract class VygBook : IDisposable {
             return new XlsVygBook(path, true);
         int t = got >= 4 ? h[0] | (h[1] << 8) : 0, l = got >= 4 ? h[2] | (h[3] << 8) : 0;
         if ((t == 0x0009 || t == 0x0209 || t == 0x0409 || t == 0x0809) && l >= 4 && l <= 20) return new XlsVygBook(path, false);
+        if (DbfVygBook.Is(path)) return new DbfVygBook(path);
         string kind = TextVygBook.Sniff(path);
         if (kind == "xml") return new XmlVygBook(path);
         if (kind == "html") return new HtmlVygBook(path);
@@ -484,6 +485,117 @@ public abstract class VygBook : IDisposable {
     }
 
     protected static string Num(double d) { return d.ToString("R", System.Globalization.CultureInfo.InvariantCulture); }
+}
+
+// Таблица DBF (dBase, FoxPro, Clipper) как книга выгрузки: строка 1 - имена полей (как их показывает Excel), дальше записи.
+// 25.11: база - на виртуальной машине без Excel, её сценарий выгрузки (TEMP.DBF -> Excel -> .xls) не срабатывает; TEMP.DBF
+// читается как есть. Кодировка - по метке таблицы (866 / 1251), без метки - по самим буквам. Удалённые записи пропускаются.
+public class DbfVygBook : VygBook {
+    readonly string path;
+    public DbfVygBook(string path) { this.path = path; }
+
+    // похоже ли на таблицу DBF: версия, дата правки, длины заголовка и записи, первое поле с допустимым типом
+    public static bool Is(string path) {
+        try {
+            using (FileStream fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete)) {
+                byte[] h = new byte[64];
+                if (fs.Read(h, 0, 64) < 64) return false;
+                if (Array.IndexOf(new int[] { 0x02, 0x03, 0x30, 0x31, 0x32, 0x43, 0x63, 0x83, 0x8B, 0xCB, 0xF5, 0xFB }, (int)h[0]) < 0) return false;
+                if (h[2] < 1 || h[2] > 12 || h[3] < 1 || h[3] > 31) return false;
+                int headerLen = h[8] | (h[9] << 8), recLen = h[10] | (h[11] << 8);
+                if (headerLen < 65 || recLen < 2 || headerLen > fs.Length) return false;
+                return "CNDLMFBIYTG0@+OVQW".IndexOf((char)h[32 + 11]) >= 0 && h[32] >= 0x20;
+            }
+        } catch { return false; }
+    }
+
+    sealed class Fld { public char Type; public int Off, Len, Dec; }
+
+    static Encoding EncodingOf(byte ldid, byte[] sample) {
+        if (ldid == 0x26 || ldid == 0x65 || ldid == 0x01 || ldid == 0x64) return Encoding.GetEncoding(866);
+        if (ldid == 0x57 || ldid == 0xC9 || ldid == 0x03) return Encoding.GetEncoding(1251);
+        // без метки: в 866 русские буквы - 0x80-0xAF и 0xE0-0xEF, в 1251 - 0xC0-0xFF (0xC0-0xDF в 866 - рамки, в данных их нет)
+        int dos = 0, win = 0;
+        foreach (byte b in sample) { if (b >= 0x80 && b <= 0xAF) dos++; else if (b >= 0xC0 && b <= 0xDF) win++; }
+        return Encoding.GetEncoding(win > dos ? 1251 : 866);
+    }
+
+    protected override void Sheets(int width, SheetRow onRow) {
+        using (FileStream fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 1 << 16)) {
+            byte[] h = new byte[32];
+            fs.Read(h, 0, 32);
+            int count = BitConverter.ToInt32(h, 4), headerLen = h[8] | (h[9] << 8), recLen = h[10] | (h[11] << 8);
+            byte[] desc = new byte[headerLen - 32];
+            fs.Read(desc, 0, desc.Length);
+            List<Fld> fields = new List<Fld>();
+            int off = 1;
+            for (int p = 0; p + 32 <= desc.Length && desc[p] != 0x0D; p += 32) {
+                Fld f = new Fld();
+                f.Type = (char)desc[p + 11];
+                f.Len = desc[p + 16];
+                f.Dec = desc[p + 17];
+                if (f.Type == 'C' && f.Dec > 0) f.Len += desc[p + 17] << 8;   // длинные символьные поля Clipper/FoxPro
+                f.Off = off;
+                off += f.Len;
+                fields.Add(f);
+            }
+            // кодировка: метка (байт 29) или проба первых записей
+            long avail = Math.Max(0, (fs.Length - headerLen) / Math.Max(1, recLen));
+            if (count <= 0 || count > avail) count = (int)avail;
+            byte[] sample = new byte[(int)Math.Min((long)recLen * Math.Min(count, 2000), 1 << 20)];
+            fs.Position = headerLen;
+            int sg = fs.Read(sample, 0, sample.Length);
+            Encoding enc = EncodingOf(h[29], sample.Length == sg ? sample : Resize(sample, sg));
+            string[] head = new string[width];
+            bool[] none = new bool[width];
+            for (int i = 0; i < fields.Count && i < width; i++) {
+                int p = i * 32, n = 0;
+                while (n < 11 && desc[p + n] != 0) n++;
+                head[i] = enc.GetString(desc, p, n).Trim();
+            }
+            onRow(0, head, none);
+            fs.Position = headerLen;
+            byte[] rec = new byte[recLen];
+            RowBuf row = new RowBuf(width);
+            for (int r = 0; r < count; r++) {
+                int got = 0;
+                while (got < recLen) { int k = fs.Read(rec, got, recLen - got); if (k <= 0) break; got += k; }
+                if (got < recLen || rec[0] == 0x1A) break;
+                if (rec[0] == (byte)'*') continue;
+                row.Reset();
+                for (int i = 0; i < fields.Count && i < width; i++) {
+                    Fld f = fields[i];
+                    if (f.Off + f.Len > recLen) break;
+                    switch (f.Type) {
+                        case 'C': case 'V': row.Set(i, enc.GetString(rec, f.Off, f.Len), false); break;
+                        case 'D': {
+                            string d = Encoding.ASCII.GetString(rec, f.Off, f.Len).Trim();
+                            if (d.Length == 8 && d != "00000000") row.Set(i, d.Substring(6, 2) + "." + d.Substring(4, 2) + "." + d.Substring(0, 4), false);
+                            break;
+                        }
+                        case 'N': case 'F': {
+                            string v = Encoding.ASCII.GetString(rec, f.Off, f.Len).Trim();
+                            double x;
+                            if (double.TryParse(v, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out x)) row.Set(i, Num(x), true);
+                            break;
+                        }
+                        case 'L': {
+                            char c = (char)rec[f.Off];
+                            if (c == 'T' || c == 't' || c == 'Y' || c == 'y') row.Set(i, "1", true);
+                            else if (c == 'F' || c == 'f' || c == 'N' || c == 'n') row.Set(i, "0", true);
+                            break;
+                        }
+                        case 'I': if (f.Len == 4) row.Set(i, BitConverter.ToInt32(rec, f.Off).ToString(), true); break;
+                        case 'B': case 'O': if (f.Len == 8) row.Set(i, Num(BitConverter.ToDouble(rec, f.Off)), true); break;
+                        case 'Y': if (f.Len == 8) row.Set(i, Num(BitConverter.ToInt64(rec, f.Off) / 10000.0), true); break;
+                    }
+                }
+                if (row.Any) onRow(0, row.Cells, row.Num);
+            }
+        }
+    }
+
+    static byte[] Resize(byte[] a, int n) { byte[] r = new byte[Math.Max(0, n)]; Array.Copy(a, r, r.Length); return r; }
 }
 
 public class XlsxVygBook : VygBook {
