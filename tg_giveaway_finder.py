@@ -1317,8 +1317,8 @@ async def inspect_target(client: TelegramClient, target: Any, st: dict[str, Any]
 
 
 def queue_order(e: dict[str, Any]) -> tuple:
-    # владелец 21.11: приоритет — розыгрыши «для всех стран»; внутри — кто раньше кончится
-    return (bool(e.get("countries")), e["until"])
+    # владелец 25.11: первыми — кто раньше кончится (иначе теряем розыгрыши); при равенстве — «для всех стран»
+    return (e["until"], bool(e.get("countries")))
 
 
 # Цена Premium в звёздах (подарок за звёзды): чтобы сравнивать розыгрыши Premium и звёзд одной мерой

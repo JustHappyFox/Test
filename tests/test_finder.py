@@ -459,9 +459,9 @@ class QueueTests(unittest.TestCase):
                 ["post", "--to", "@mygroup", "--state", str(state), "--countries", "RU,BY,KZ"]))
             asyncio.run(gf.cmd_post(client, a))
             st = gf.load_state(state)
-        self.assertEqual(sent, [(5, 100, 7)])                     # «для всех стран» — первыми
-        self.assertEqual([e["key"] for e in st["queue"]], ["ru"])  # истекающий (<3 ч) выброшен
-        self.assertEqual(list(st["posted"]), ["all"])              # завершившийся «old» забыт
+        self.assertEqual(sent, [(1, 100, 7)])                     # владелец 25.11: кто раньше кончится — первым
+        self.assertEqual([e["key"] for e in st["queue"]], ["all"])  # истекающий (<3 ч) выброшен
+        self.assertEqual(list(st["posted"]), ["ru"])               # завершившийся «old» забыт
         self.assertIsNotNone(st["last_post"])
 
 
