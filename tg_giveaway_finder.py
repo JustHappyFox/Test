@@ -1328,6 +1328,19 @@ def giveaway_kind(e: dict[str, Any]) -> str:
 URGENT_HOURS = 12  # кончится раньше — публикуем сразу, без чередования
 
 
+def load_pins(path: str | None) -> list[str]:
+    """Владелец 26.11: «следующим в списке поставь» — ссылки из файла идут первыми, по порядку."""
+    if not path or not Path(path).is_file():
+        return []
+    return [ln.strip().rstrip("/") for ln in Path(path).read_text(encoding="utf-8").splitlines()
+            if ln.strip() and not ln.lstrip().startswith("#")]
+
+
+def pinned_first(ok: list[dict[str, Any]], pins: list[str]) -> dict[str, Any] | None:
+    by_link = {e["link"].rstrip("/"): e for e in ok}
+    return next((by_link[p] for p in pins if p in by_link), None)
+
+
 def pick_alternating(ok: list[dict[str, Any]], last_kind: str | None, when: datetime) -> dict[str, Any] | None:
     """Владелец 26.11: «чередуй розыгрыши для всех и для стран». ok — подходящие, по порядку queue_order.
     Берём самый ранний другого вида, чем прошлый пост; но если самый ранний вообще кончается меньше чем
@@ -1606,6 +1619,7 @@ async def cmd_post_scheduled(client: TelegramClient, args: argparse.Namespace) -
                 and datetime.fromisoformat(e["until"]) - when >= min_left)
 
     scans, finder, last_published = 0, None, None
+    pins = load_pins(getattr(args, "pin_file", None))
 
     def need_more() -> bool:
         if args.refill:
@@ -1723,7 +1737,10 @@ async def cmd_post_scheduled(client: TelegramClient, args: argparse.Namespace) -
         queue = sorted((e for e in queue if e["key"] not in posted and e["key"] not in scheduled
                         and e["key"] not in bad and datetime.fromisoformat(e["until"]) > now),
                        key=queue_order)
-        entry = pick_alternating([e for e in queue if fits(e, next_at)], st.get("last_kind"), next_at)
+        ok = [e for e in queue if fits(e, next_at)]
+        entry = pinned_first(ok, pins) or pick_alternating(ok, st.get("last_kind"), next_at)
+        if entry is not None and entry["link"].rstrip("/") in pins:
+            log.info("Владелец поставил следующим: %s", entry["link"])
         src = queue
         if entry is None:
             last = st.get("last_search")
@@ -2093,6 +2110,9 @@ def build_parser() -> argparse.ArgumentParser:
     ps.add_argument("--daily-search-hours", type=float, default=0, metavar="Ч",
                     help="искать и пополнять запас, если поиска не было Ч часов, даже когда запас не пуст "
                          "(0 — только когда запас кончился)")
+    ps.add_argument("--pin-file", default="state/pin_next.txt", metavar="ФАЙЛ",
+                    help="ссылки на розыгрыши, которые опубликовать следующими в обычный слот, по порядку "
+                         "(state/pin_next.txt; по строке на ссылку)")
     ps.add_argument("--post-now", metavar="ССЫЛКА",
                     help="опубликовать этот розыгрыш из запаса сейчас, вне очереди (расписание не сдвигается)")
     ps.add_argument("--reserve", type=int, default=10, metavar="N",

@@ -1222,3 +1222,17 @@ class AlternateKindTests(unittest.TestCase):
         ok = sorted([urgent, all1], key=gf.queue_order)
         self.assertIs(gf.pick_alternating(ok, "countries", now), urgent)  # скоро кончится — сразу
         self.assertIsNone(gf.pick_alternating([], "all", now))
+
+
+class PinNextTests(unittest.TestCase):
+    def test_pinned_goes_first(self):
+        import tempfile
+        a = {"link": "https://t.me/a/1", "until": "2026-11-28T00:00:00+00:00"}
+        b = {"link": "https://t.me/sbermarketing/13555", "until": "2026-12-08T12:00:00+00:00"}
+        with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False, encoding="utf-8") as f:
+            f.write("# комментарий\nhttps://t.me/sbermarketing/13555/\n")
+        pins = gf.load_pins(f.name)
+        self.assertEqual(pins, ["https://t.me/sbermarketing/13555"])
+        self.assertIs(gf.pinned_first([a, b], pins), b)
+        self.assertIsNone(gf.pinned_first([a], pins))
+        self.assertEqual(gf.load_pins(None), [])
