@@ -1416,4 +1416,155 @@ public static class VygruzkaByt {
         return d;
     }
 }
+// ---- 26.11: юр база (выгрузка юр лиц, таблица точек учёта FTU) - для поиска юр (меню программ) и справки юр («Договор») ----
+// KP договор, NAB карточка, NP наименование договора, NAB_NAIM абонент (объект с адресом), NAIM точка учёта, NST № счётчика,
+// TIPSCH, GODEN поверка, AMPER, VOLT, FAZA, KTT, RAEN. Читается любая выгрузка (dbf, xls, xlsx) через VygBook, один раз.
+public class JurRow {
+    public string Kp = "", Nab = "", Contract = "", Abon = "", Point = "", Meter = "", Type = "", Poverka = "", Amper = "", Volt = "",
+        Faza = "", Ktt = "", Raen = "";
+    public string Hay = "";       // для поиска по словам: всё строчными
+
+    public string Card { get { return Kp + (Nab.Length > 0 ? "/" + Nab : ""); } }
+}
+
+public static class JurIndex {
+    static List<JurRow> rows;
+    static string stamp = "";
+
+    // все строки юр базы (заменили файл выгрузки - читается заново); нет выгрузки - исключение с понятным текстом
+    public static List<JurRow> All() {
+        VygKind k = VygKind.Jur;
+        string path = Istochnik.JurPath;
+        string problem = k.Problem(path);
+        if (problem != null) throw new Exception(problem);
+        string table = k.TableFor(path);
+        string st = "";
+        try { FileInfo fi = new FileInfo(table); st = table + "|" + fi.Length + "|" + fi.LastWriteTimeUtc.Ticks; } catch { }
+        if (rows != null && st == stamp) return rows;
+        List<JurRow> r = new List<JurRow>();
+        using (VygBook book = VygBook.Open(table)) {
+            book.Prepare();
+            int headerRow;
+            string[] h = book.Header(out headerRow);
+            Dictionary<string, int> col = new Dictionary<string, int>();
+            for (int i = 0; i < h.Length; i++) if (h[i] != null && !col.ContainsKey(h[i].Trim().ToUpperInvariant())) col[h[i].Trim().ToUpperInvariant()] = i;
+            if (!col.ContainsKey("KP")) throw new Exception("в юр базе " + Path.GetFileName(table) + " нет поля KP - нужна таблица точек учёта FTU (KP, NP, NAB, NAB_NAIM, NAIM, NST...)");
+            book.ReadRows(Math.Max(h.Length, 1), delegate(int n, string[] cells, bool[] num) {
+                if (n <= headerRow) return;
+                JurRow x = new JurRow();
+                x.Kp = Num(Cell(cells, col, "KP")); x.Nab = Num(Cell(cells, col, "NAB")); x.Contract = Quotes(Cell(cells, col, "NP"));
+                x.Abon = Cell(cells, col, "NAB_NAIM"); x.Point = Cell(cells, col, "NAIM"); x.Meter = Num(Cell(cells, col, "NST"));
+                x.Type = Cell(cells, col, "TIPSCH"); x.Poverka = Cell(cells, col, "GODEN"); x.Amper = Cell(cells, col, "AMPER");
+                x.Volt = Num(Cell(cells, col, "VOLT")); x.Faza = Num(Cell(cells, col, "FAZA")); x.Ktt = Num(Cell(cells, col, "KTT")); x.Raen = Cell(cells, col, "RAEN");
+                if (x.Poverka == "-") x.Poverka = "";
+                if (x.Kp.Length == 0 && x.Meter.Length == 0) return;
+                x.Hay = Low(x.Contract + " " + x.Abon + " " + x.Point + " " + x.Raen + " " + x.Type + " " + x.Meter + " " + x.Kp + "/" + x.Nab);
+                r.Add(x);
+            });
+        }
+        rows = r;
+        stamp = st;
+        return r;
+    }
+
+    static string Cell(string[] cells, Dictionary<string, int> col, string name) {
+        int i;
+        return col.TryGetValue(name, out i) && i < cells.Length && cells[i] != null ? cells[i].Trim() : "";
+    }
+
+    // «11118.00» -> «11118»
+    static string Num(string s) {
+        s = (s ?? "").Trim();
+        System.Text.RegularExpressions.Match m = System.Text.RegularExpressions.Regex.Match(s, @"^(\d+)[.,]0*$");
+        return m.Success ? m.Groups[1].Value : s;
+    }
+
+    // ООО "Тест" -> ООО «Тест»
+    public static string Quotes(string s) {
+        s = (s ?? "").Trim();
+        StringBuilder b = new StringBuilder();
+        bool open = true;
+        foreach (char c in s) {
+            if (c == '"') { b.Append(open ? '«' : '»'); open = !open; } else b.Append(c);
+        }
+        return b.ToString();
+    }
+
+    static string Low(string s) {
+        StringBuilder b = new StringBuilder();
+        foreach (char c in (s ?? "").ToLowerInvariant()) b.Append(c == 'ё' ? 'е' : char.IsLetterOrDigit(c) || c == '/' ? c : ' ');
+        return " " + b.ToString() + " ";
+    }
+
+    static bool SameNum(string a, string b) { return a.TrimStart('0') == b.TrimStart('0') && a.Length > 0 && b.Length > 0; }
+
+    public static List<JurRow> Card(string kp, string nab) {
+        List<JurRow> r = new List<JurRow>();
+        foreach (JurRow x in All()) if (SameNum(x.Kp, kp) && (nab.Length == 0 || SameNum(x.Nab, nab))) r.Add(x);
+        return r;
+    }
+
+    // № счётчика: точно (без ведущих нулей), нет - по части номера (от 4 цифр)
+    public static List<JurRow> ByMeter(string no) {
+        string d = System.Text.RegularExpressions.Regex.Replace(no ?? "", @"\D", "");
+        List<JurRow> r = new List<JurRow>();
+        if (d.Length == 0) return r;
+        foreach (JurRow x in All()) if (SameNum(x.Meter, d)) r.Add(x);
+        if (r.Count == 0 && d.Length >= 4) foreach (JurRow x in All()) if (x.Meter.Contains(d)) r.Add(x);
+        return r;
+    }
+
+    // поиск: num - договор, «договор/карточка» (или через пробел, дефис) или № счётчика; text - слова (название, адрес, точка учёта)
+    public static List<JurRow> Find(string num, string text, int max) {
+        List<JurRow> r = new List<JurRow>();
+        num = (num ?? "").Trim();
+        string kp = "", nab = "", digits = "";
+        System.Text.RegularExpressions.Match m = System.Text.RegularExpressions.Regex.Match(num, @"^(\d{1,7})\s*[/\\\-\s]\s*(\d{1,6})$");
+        if (m.Success) { kp = m.Groups[1].Value; nab = m.Groups[2].Value; }
+        else if (System.Text.RegularExpressions.Regex.IsMatch(num, @"^\d+$")) digits = num;
+        else if (num.Length > 0) text = (num + " " + text).Trim();
+        List<string> words = new List<string>();
+        foreach (string w in Low(text).Split(new char[] { ' ' }, StringSplitOptions.RemoveEmptyEntries)) words.Add(w);
+        if (kp.Length == 0 && digits.Length == 0 && words.Count == 0) return r;
+        string part = digits.TrimStart('0').Length > 0 ? digits.TrimStart('0') : digits;
+        foreach (JurRow x in All()) {
+            if (kp.Length > 0 && !(SameNum(x.Kp, kp) && SameNum(x.Nab, nab))) continue;
+            // одни цифры: договор с таким номером или счётчик с этими цифрами (от 4)
+            if (digits.Length > 0 && !SameNum(x.Kp, digits) && !(digits.Length >= 4 && x.Meter.Contains(part))) continue;
+            bool all = true;
+            foreach (string w in words) if (x.Hay.IndexOf(w, StringComparison.Ordinal) < 0) { all = false; break; }
+            if (!all) continue;
+            r.Add(x);
+            if (r.Count >= max) break;
+        }
+        return r;
+    }
+
+    // «Нераспроданные квартиры п.Макетино,ул.Полевая,34» -> «п. Макетино, ул. Полевая, 34»; район - спереди
+    public static string AddressOf(JurRow x) {
+        string a = x.Abon ?? "";
+        System.Text.RegularExpressions.Match m = System.Text.RegularExpressions.Regex.Match(a, @"(?:^|[\s,])((?:п|д|аг|г|гп|г\.п|пос|дер|ул|пр|пер)\.\s*\S.*)$",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        string tail = m.Success ? m.Groups[1].Value : "";
+        tail = System.Text.RegularExpressions.Regex.Replace(tail, @"\b(п|д|аг|г|гп|пос|дер|ул|пр|пер)\.\s*", "$1. ");
+        tail = System.Text.RegularExpressions.Regex.Replace(tail, @"\s*,\s*", ", ").Trim().TrimEnd(',', '.');
+        string r = x.Raen.Trim();
+        if (r.Length > 0) r = System.Text.RegularExpressions.Regex.Replace(r, @"\s+район$", " р-н", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        return (r.Length > 0 && tail.Length > 0 && tail.IndexOf(r, StringComparison.OrdinalIgnoreCase) < 0 ? r + ", " : "") + tail;
+    }
+
+    // строка прибора учёта для справки: точка|тип|№|U|I|показания|пов. кв.|пов. год|Т/Т|К расч
+    public static string PuLine(JurRow x, string zeros) {
+        string u = x.Volt == "400" || x.Faza == "3" ? "3х230/400" : x.Volt.Length > 0 ? x.Volt : "";
+        string i = System.Text.RegularExpressions.Regex.Replace(x.Amper ?? "", @"^\s*(\d+(?:[.,]\d+)?)\s*[-/]\s*(\d+(?:[.,]\d+)?)\s*$", "$1($2)");
+        string kv = "", god = "";
+        System.Text.RegularExpressions.Match p = System.Text.RegularExpressions.Regex.Match(x.Poverka ?? "", @"(\d{4})\D*(\d)?");
+        if (p.Success) { god = p.Groups[1].Value; kv = p.Groups[2].Value; }
+        double k;
+        bool tt = double.TryParse(x.Ktt, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out k) && k > 1;
+        string tts = tt ? (k * 5).ToString(System.Globalization.CultureInfo.InvariantCulture) + "/5" : "-";
+        return string.Join("|", new string[] { x.Point, x.Type, x.Meter, u, i, zeros, kv, god, tts, tt ? x.Ktt : "1" });
+    }
+}
+
 // ==== КОНЕЦ ОБЩЕГО БЛОКА ВЫГРУЗОК ====
