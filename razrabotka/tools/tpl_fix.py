@@ -6,10 +6,14 @@
 #  6) подписи «ЭНЕРГОСНАБЖАЮЩАЯ ОРГАНИЗАЦИЯ ... МП» из нижнего колонтитула - в конец текста документа;
 #  5) «ПУГОД» г. -> «ПУГОДГ» (год поверки с «г.», без года - пусто);
 #  4) потери: формула в ячейке, плавающая поверх схемы, - в строку ячейки;
+#  9) 26.11 по правкам пользователя: справка - абзац «В связи с допуском прошу ввести в расчёты ... в договор «ДОГНОМ» от «ДОГДАТА».»;
+#     справка, потери - «Инженер ГРП» -> «Инженер по РПЭ»; наряд - причина и место включения подчёркнуты до конца строки
+#     (табуляция с заполнением «_»), место - посередине линии; акт приемки, п. 3 - после линии поле «АКТДОП» (для ЭЗС: тип зарядок,
+#     колонки, коннекторы);
 #  2) подпись начальника: «Начальник ГРП» в начале абзаца -> поле «НАЧДОЛЖН» (должность на выбор: Начальник ГРП / ОПСУ),
 #     в доп. соглашении БС «Начальник ГРП  ОПСУ» -> «НАЧДОЛЖНДС».
 # python3 tpl_fix.py dogovor/*.docx   (после пересоздания шаблонов bs_templates.py / udalenie_template.py - запускать снова)
-import sys, zipfile, re, shutil
+import sys, zipfile, re, shutil, copy
 from lxml import etree
 W = '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}'
 
@@ -94,9 +98,84 @@ def tables_fit(root):
         n += 1
     return n
 
+def text_of(p): return ''.join(t.text or '' for t in runs(p))
+
+def user_26(root):
+    n = 0
+    for p in list(root.iter(W + 'p')):
+        ts = runs(p)
+        text = text_of(p)
+        # справка: после адреса - просьба ввести приборы учёта в расчёты по договору
+        if text == 'Адрес «АДРЕС».' and FILE.endswith('bs_spravka.docx'):
+            nxt = p.getnext()
+            if nxt is None or not text_of(nxt).startswith('В связи с допуском'):
+                q = copy.deepcopy(p)
+                qt = runs(q)
+                qt[0].text = 'В связи с допуском прошу ввести в расчёты следующие приборы учета, в договор «ДОГНОМ» от «ДОГДАТА».'
+                for t in qt[1:]: t.text = ''
+                p.addnext(q)
+                n += 1
+            continue
+        for a, b in (('Инженер ГРП _____________________________________/', 'Инженер по РПЭ ____________________________________/'),
+                     ('Инженер ГРП      __________     ', 'Инженер по РПЭ   _____________ ')):
+            k = text.find(a)
+            if k >= 0: replace(ts, k, k + len(a), b); n += 1; text = text_of(p)
+        # наряд: причина - подчёркивание до конца строки
+        if text.strip().startswith('«ПРИЧИНА»') and p.find(W + 'pPr/' + W + 'tabs') is not None:
+            rs = p.findall(W + 'r')
+            idx = [i for i, r in enumerate(rs) if ''.join(t.text or '' for t in r.iter(W + 't')) == '«ПРИЧИНА»']
+            if idx and not any(r.find(W + 'tab') is not None for r in rs[idx[0] + 1:]):
+                for r in rs[idx[0] + 1:]:
+                    if ''.join(t.text or '' for t in r.iter(W + 't')).strip() == '' and r.find(W + 'tab') is None: p.remove(r)
+                tr = copy.deepcopy(rs[idx[0]])
+                for t in tr.findall(W + 't'): tr.remove(t)
+                etree.SubElement(tr, W + 'tab')
+                rs[idx[0]].addnext(tr)
+                n += 1
+        # наряд: место включения - посередине линии, линия с обеих сторон до краёв
+        if '«МЕСТО»' in text and text.replace('_', '').strip() == '«МЕСТО»':
+            ppr = p.find(W + 'pPr')
+            tabs = ppr.find(W + 'tabs') if ppr is not None else None
+            if tabs is not None and not any(t.get(W + 'val') == 'center' for t in tabs):
+                for t in list(tabs): tabs.remove(t)
+                for val, pos in (('center', '3818'), ('right', '7636')):
+                    t = etree.SubElement(tabs, W + 'tab'); t.set(W + 'val', val); t.set(W + 'leader', 'underscore'); t.set(W + 'pos', pos)
+                jc = ppr.find(W + 'jc')
+                if jc is not None: jc.set(W + 'val', 'left')
+                rs = p.findall(W + 'r')
+                m = None
+                for r in rs:
+                    tx = ''.join(t.text or '' for t in r.iter(W + 't'))
+                    if tx == '«МЕСТО»': m = r
+                    elif tx.strip('_') == '' and tx: p.remove(r)
+                tr = copy.deepcopy(m)
+                for t in tr.findall(W + 't'): tr.remove(t)
+                etree.SubElement(tr, W + 'tab')
+                m.addprevious(tr)
+                t = m.find(W + 't'); t.text = ' «МЕСТО» '; t.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
+                n += 1
+        # подчёркивание в конце строки (табуляция в конце абзаца) Word и LibreOffice не рисуют - последним знаком ставится «_»
+        if ('«ПРИЧИНА»' in text or '«МЕСТО»' in text) and text.replace('_', '').strip() in ('«ПРИЧИНА»', '«МЕСТО»'):
+            rs = p.findall(W + 'r')
+            if rs and rs[-1].find(W + 'tab') is not None:
+                q = copy.deepcopy(rs[-1])
+                for t in q.findall(W + 'tab'): q.remove(t)
+                etree.SubElement(q, W + 't').text = '_'
+                rs[-1].addnext(q)
+                n += 1
+            for t in p.iter(W + 'tab'):
+                if t.get(W + 'val') == 'right' and t.get(W + 'pos') == '7636': t.set(W + 'pos', '7520'); n += 1
+        # акт приемки, п. 3: дополнение после линии
+        if 'прибор учета электроэнергии, отходящая' in text and '«ЛИНИЯ»' in text and '«АКТДОП»' not in text:
+            for r in p.findall(W + 'r'):
+                if ''.join(t.text or '' for t in r.iter(W + 't')) == '«ЛИНИЯ»':
+                    q = copy.deepcopy(r); q.find(W + 't').text = '«АКТДОП»'; r.addnext(q); n += 1
+                    break
+    return n
+
 def fix(xml):
     root = etree.fromstring(xml)
-    n = naryad_fit(root) + tables_fit(root)
+    n = naryad_fit(root) + tables_fit(root) + user_26(root)
     # 4) формула-рисунок в ячейке таблицы, плавающая с отрицательным отступом (в потерях «Wал=Wпу» налезала на схему) - в строку ячейки
     for sh in root.iter(V + 'shape'):
         st = sh.get('style') or ''
@@ -128,7 +207,6 @@ def fix(xml):
         if m: replace(ts, m.start(1), m.end(1), '«НАЧДОЛЖН»'); n += 1
     return etree.tostring(root, xml_declaration=True, encoding='UTF-8', standalone=True), n
 
-import copy
 def footer_to_body(items):
     # 6) подписи сторон с «МП» лежали в нижнем колонтитуле (доп. соглашение) - переносятся в конец текста, колонтитул отключается
     names = [i.filename for i, d in items]
@@ -159,7 +237,9 @@ def footer_to_body(items):
     data = etree.tostring(doc, xml_declaration=True, encoding='UTF-8', standalone=True)
     return [(i, data if i.filename == 'word/document.xml' else d) for i, d in items], n
 
+FILE = ''
 for f in sys.argv[1:]:
+    FILE = f
     zin = zipfile.ZipFile(f)
     items = [(i, zin.read(i.filename)) for i in zin.infolist()]
     zin.close()

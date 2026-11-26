@@ -79,6 +79,7 @@ public class PotScheme {
     public bool Chain = true;                    // потери предыдущих элементов - к энергии следующего (п. 4.12)
     public bool Reactive;                        // считать реактивную составляющую ТРЭТ
     public bool Popr;                            // строка «корректирующая поправка и учёт с коррекцией» (24.11: по умолчанию нет)
+    public bool Numbers;                         // 26.11: формула ещё и с подставленными числами (пользователь убрал её - как в образце)
 
     public static string N(double d) {
         if (Math.Abs(d) >= 100) return Math.Round(d, 1).ToString("0.#", Inv).Replace('.', ',');
@@ -169,8 +170,8 @@ public class PotScheme {
         if (prevP.Length > 0) p.Math.Add("W_{р вх}=W_{р}" + prevP);
     }
 
-    // «A=формула=числа» -> две строки: «A=формула» и «A=числа»
-    static void Two(PotStep p, string lhs, string sym, string num) { p.Math.Add(lhs + "=" + sym); p.Math.Add(lhs + "=" + num); }
+    // «A=формула=числа» -> «A=формула» и (с галочкой) «A=числа»
+    void Two(PotStep p, string lhs, string sym, string num) { p.Math.Add(lhs + "=" + sym); if (Numbers) p.Math.Add(lhs + "=" + num); }
 
     void LineSteps(List<PotStep> s, PotLine l, List<string> sumA, List<string> sumP, ref string prevA, ref string prevP) {
         string n = l.Name;

@@ -315,7 +315,7 @@ public class BsForm : Form {
     RowList pu, moshn, linii;
     Seals seals;
     readonly Dictionary<string, string> autos = new Dictionary<string, string>();
-    static readonly string[] Composed = { "adres", "adres_kr", "obekt_full", "obekt_adres", "potr", "plomby", "minus", "paket", "inzh_fio", "liniya", "mesto" };
+    static readonly string[] Composed = { "adres", "adres_kr", "obekt_full", "obekt_adres", "potr", "plomby", "minus", "paket", "inzh_fio", "liniya", "mesto", "akt_dop" };
     static readonly string[] AddrKeys = { "obl", "rayon", "selsovet", "np_tip", "np", "ulica_tip", "ulica", "dom" };
     // документы пакета: ключ галочки, шаблон, имя файла в папке пакета
     public static readonly string[][] Docs = {
@@ -514,6 +514,9 @@ public class BsForm : Form {
         c.Grid.Row(F("Объект в доп. соглашении (ячейка таблицы)", T("obekt_adres", null), 0));
         // 24.11: не только БС - характер деятельности в акте приемки (п. 4) на выбор: базовая станция, зарядка электромобилей...
         c.Grid.Row(F("Характер деятельности (акт приемки, п. 4)", C("deyat", "электрическая энергия используется для ..."), 0));
+        // 26.11 (правка пользователя в акте): у зарядных станций в п. 3 акта - тип зарядок, сколько колонок и коннекторов
+        c.Grid.Row(F("ЭЗС: тип зарядок", C("ezs_tip", "Mode 3"), 12), F("Колонок", T("ezs_kol", null), 8), F("Коннекторов", T("ezs_kon", null), 10),
+            F("Дополнение в конце п. 3 акта (для ЭЗС собирается само; можно своё)", T("akt_dop", null), 0));
         Field("obekt", "Объект", c.Name); Field("kod", "Код объекта", c.Name); Field("np", "Населённый пункт", c.Name); Field("dom", "Дом", c.Name);
 
         c = new Card("Электроснабжение", "по акту разграничения: откуда питание, дата акта, схема питания; место включения - для наряда", 4);
@@ -572,7 +575,8 @@ public class BsForm : Form {
             "Применяется при расчётах всегда, для любой схемы. В документ строка «δWа = ΔWаΣ; W'а = Wа ± δWа»\n" +
             "добавляется только с этой галочкой (в образцах «Порядка расчета» её обычно не пишут).");
         tip.AutoPopDelay = 30000;
-        c.Grid.Row(F(null, X("pot_popr", "Строка с корректирующей поправкой"), 36), F(null, poprInfo, 2));
+        c.Grid.Row(F(null, X("pot_popr", "Строка с корректирующей поправкой"), 36), F(null, poprInfo, 2),
+            F(null, X("pot_num", "Формулы ещё и с подставленными числами"), 0));
         potNote.Font = St.Small;
         potNote.ForeColor = St.Caption;
         c.Grid.Row(F("Проверка за месяц: Wа, кВт·ч", T("pot_test", "35000"), 14), F(null, potNote, 0));
@@ -675,6 +679,7 @@ public class BsForm : Form {
             Items("va_tok", lists.Get("БС: ток ВА"));
             Items("punkt1", lists.Get("БС: доп. соглашение, пункт 1"));
             Items("tarif", lists.Get("БС: тарифная группа"));
+            Items("ezs_tip", new List<string>(new string[] { "Mode 3", "Mode 4", "Mode 3 и Mode 4" }));
             Items("prichina", With(lists.Get("Наряд: причина"), memory.Hist("наряд причина")));
             Items("inzh", Engineers());
             Items("nach", Names());
@@ -789,9 +794,9 @@ public class BsForm : Form {
     // тарифная группа, точка учёта
     static readonly string[][] Presets = {
         new string[] { "Базовая станция связи", "Возведение мобильной базовой станции", "",
-            "электрическая энергия используется для электроснабжения базовой станции", "Промышленные и приравненные к ним потребители", "ЩУЭ" },
+            "электрическая энергия используется для электроснабжения базовой станции", "Промышленные и приравненные к ним потребители с присоединенной мощностью до 750 кВА", "ЩУЭ" },
         new string[] { "Зарядная станция электромобилей", "Установка зарядных станций для электромобилей", "",
-            "электрическая энергия используется для зарядки электромобилей", "Электрическая энергия, используемая электрозарядными станциями", "ЭЗС" },
+            "электрическая энергия используется для зарядки электромобилей", "Электрическая энергия, используемая зарядными станциями", "ЭЗС" },
         new string[] { "Другое", "", "", "", "", "" } };
 
     // выбран вид объекта: подставить, что относится к виду (поле, вписанное руками для другого вида, тоже меняется; своё - остаётся)
@@ -805,6 +810,7 @@ public class BsForm : Form {
         foreach (string[] x in Presets) if (x[1].Length > 0 && ob == x[1]) other = true;
         if (other) SetV("obekt", p[1]);
         SetV("deyat", p[3]);
+        if (p[5] == "ЭЗС" && V("ezs_tip").Length == 0) SetV("ezs_tip", "Mode 3");
         foreach (string t in lists.Get("БС: тарифная группа")) if (p[4].Length > 0 && t.StartsWith(p[4])) { SetV("tarif", t); break; }
         SetV("rezhim", "непрерывная работа");
         List<string> points = new List<string>();
@@ -949,10 +955,15 @@ public class BsForm : Form {
     }
 
     // вид объекта - по наименованию (пока вид не выбирали руками)
+    static string VidOf(string o) {
+        string l = o.ToLowerInvariant();
+        if (l.Contains("заряд") || l.Contains("эзс") || l.Contains("электромобил")) return Presets[1][0];
+        if (l.Contains("базов") && l.Contains("станци") || Regex.IsMatch(o, @"(^|[^А-Яа-яA-Za-z])БС\s*-?\s*\d")) return Presets[0][0];
+        return "";
+    }
+
     void DetectVid() {
-        string o = V("obekt"), l = o.ToLowerInvariant(), d = "";
-        if (l.Contains("заряд") || l.Contains("эзс") || l.Contains("электромобил")) d = Presets[1][0];
-        else if (l.Contains("базов") && l.Contains("станци") || Regex.IsMatch(o, @"(^|[^А-Яа-яA-Za-z])БС\s*-?\s*\d")) d = Presets[0][0];
+        string d = VidOf(V("obekt"));
         if (d.Length == 0 || d == V("vid_obekta")) return;
         if (V("vid_obekta").Length > 0 && V("vid_obekta") != autoVid) return;
         autoVid = d;
@@ -1134,6 +1145,7 @@ public class BsForm : Form {
         s.Chain = V("pot_chain") == "1";
         s.Reactive = V("pot_react") == "1";
         s.Popr = V("pot_popr") == "1";
+        s.Numbers = V("pot_num") == "1";
         double r, x, dp, dq, unt;
         if (V("tr_tip").Length > 0 && V("tr_tip") != "нет" && Num(V("tr_r"), out r) && Num(V("tr_x"), out x) && Num(V("tr_dp"), out dp) && Num(V("tr_dq"), out dq) && Num(V("tr_u"), out unt)) {
             s.Tr = new TrafoInfo();
@@ -1272,6 +1284,7 @@ public class BsForm : Form {
         }
         else if (key == "abonent" || key == "tel") { Compose("potr"); if (key == "abonent") AbonentFill(); }
         else if (key == "pitanie") Compose("mesto");
+        else if (key.StartsWith("ezs_")) Compose("akt_dop");
         else if (key == "minus_x" || key == "minus_y") Compose("minus");
         else if (key.StartsWith("plomba") || key == "va_tok") Compose("plomby");
         else if (key == "inzh") Compose("inzh_fio");
@@ -1360,6 +1373,15 @@ public class BsForm : Form {
                 return string.Join(", ", p.ToArray()) + " - на балансе " + (V("balans").StartsWith("РУП") ? "РУП «МИНСКЭНЕРГО»" : "абонента") + ".";
             }
             case "inzh_fio": return EngineerFull(V("inzh"));
+            case "akt_dop": {
+                // «Тип зарядок Mode 3, 29 колонок, 29 коннекторов.»
+                List<string> p = new List<string>();
+                int k;
+                if (int.TryParse(V("ezs_kol"), out k)) p.Add(k + " " + Plural(k, "колонка", "колонки", "колонок"));
+                if (int.TryParse(V("ezs_kon"), out k)) p.Add(k + " " + Plural(k, "коннектор", "коннектора", "коннекторов"));
+                if (p.Count == 0) return "";
+                return (V("ezs_tip").Length > 0 ? "Тип зарядок " + V("ezs_tip") + ", " : "") + string.Join(", ", p.ToArray()) + ".";
+            }
             case "mesto": {
                 // «КТПБ-4726» -> «КТПБ-4726, РУ-0,4 кВ» (секцию и рубильник дописывают через запятую)
                 if (V("pitanie").Length == 0) return "";
@@ -1374,6 +1396,12 @@ public class BsForm : Form {
             }
         }
         return "";
+    }
+
+    static string Plural(int n, string one, string few, string many) {
+        int a = Math.Abs(n) % 100, b = a % 10;
+        if (a >= 11 && a <= 14) return many;
+        return b == 1 ? one : b >= 2 && b <= 4 ? few : many;
     }
 
     static string Ss(string s) {
@@ -1586,7 +1614,13 @@ public class BsForm : Form {
             SetV("deyat", First(lists.Get("БС: характер деятельности")));
             SetV("plomba_marka", memory.Get("БСМаркировка", First(lists.Get("БС: маркировка пломб"))));
             SetV("punkt1", First(lists.Get("БС: доп. соглашение, пункт 1")));
-            SetV("tarif", First(lists.Get("БС: тарифная группа")));
+            // тарифная группа - как в прошлый раз (если она ещё в списке), иначе промышленные до 750 кВА; вид объекта поменяет
+            string tar = memory.Get("БСТариф", "");
+            if (!lists.Get("БС: тарифная группа").Contains(tar)) {
+                tar = First(lists.Get("БС: тарифная группа"));
+                foreach (string t in lists.Get("БС: тарифная группа")) if (t.Contains("до 750")) { tar = t; break; }
+            }
+            SetV("tarif", tar);
             SetV("tret", "-");
             SetV("prim", "-");
             SetV("vid", "включение");
@@ -1657,6 +1691,9 @@ public class BsForm : Form {
         try {
             foreach (string k in new List<string>(inp.Keys)) { string v; if (d.TryGetValue(k, out v)) SetV(k, v); }
             foreach (string k in new string[] { "pu", "moshn", "linii", "plomba_drugoe" }) { string v; if (d.TryGetValue(k, out v)) SetV(k, v); }
+            // пакет, сохранённый раньше: вид объекта - по наименованию (без подстановок), у зарядных станций тип зарядок - Mode 3
+            if (V("vid_obekta").Length == 0) SetV("vid_obekta", VidOf(V("obekt")));
+            if (V("vid_obekta") == Presets[1][0] && V("ezs_tip").Length == 0) SetV("ezs_tip", "Mode 3");
             foreach (string k in Composed) autos[k] = AutoOf(k);
             autos["obekt_kr"] = V("obekt");
             // схемы по старому пути нет (другой компьютер, перенесли папку) - копия в папке пакета
@@ -1692,7 +1729,7 @@ public class BsForm : Form {
         loading = true;
         try {
             foreach (string k in new string[] { "obekt", "kod", "selsovet", "np", "ulica", "dom", "pitanie", "shema", "plomba_klemm", "plomba_vvod",
-                    "minus_x", "minus_y", "pot_test" }) SetV(k, "");
+                    "minus_x", "minus_y", "pot_test", "ezs_kol", "ezs_kon" }) SetV(k, "");
             foreach (string k in Composed) SetV(k, "");
             SetV("minus_on", "");
             seals.Value = "";
@@ -1758,6 +1795,7 @@ public class BsForm : Form {
         v["ПИТАНИЕ"] = V("pitanie");
         v["ДАТАРАЗГР"] = V("data_razgr");
         v["ЛИНИЯ"] = V("liniya");
+        v["АКТДОП"] = V("akt_dop").Length > 0 ? " " + V("akt_dop") : "";
         v["МЕСТО"] = V("mesto");
         v["МИНУС"] = V("minus_on") == "1" && V("minus").Length > 0 ? V("minus") : "";
         v["ПЛОМБЫ"] = V("plomby");
@@ -2022,6 +2060,7 @@ public class BsForm : Form {
         memory.Values["БСРежим"] = V("rezhim");
         for (int i = 0; i < pu.Count; i++) if (pu.Cell(i, 1).Length > 0 && pu.Cell(i, 11).Length > 0) memory.Values["БСРазрядность:" + pu.Cell(i, 1)] = pu.Cell(i, 11);
         memory.Values["БСДолжностьНачальника"] = V("nach_dolzh");
+        memory.Values["БСТариф"] = V("tarif");
         // абонент: договор, дата, телефон - выберут абонента ещё раз, подставятся сами
         if (V("abonent").Length > 0) memory.Values["БСАбонент:" + V("abonent")] = V("dog_nom") + "|" + V("dog_data") + "|" + V("tel");
         // тип счётчика: напряжение и ток
