@@ -995,7 +995,7 @@ public static class PhoneShell {
     static void TryDeleteDir(string d) { try { if (Directory.GetFileSystemEntries(d).Length == 0) Directory.Delete(d); } catch { } }
 
     // пришедший файл - в папку дня date; дата «Изменён» - как на телефоне. Возвращает путь (null - такой же файл уже был)
-    static string Place(string got, DateTime date, DateTime modified, string root, MoveResult r) {
+    public static string Place(string got, DateTime date, DateTime modified, string root, MoveResult r) {
         DateTime m = modified != DateTime.MinValue ? modified : date;
         if (m != DateTime.MinValue) { try { File.SetLastWriteTime(got, m); } catch { } }
         string dir = DayFolder(root, date);
@@ -1786,6 +1786,341 @@ public class FolderPickDialog : Form {
 
 // Окно программы: куда складывать, календарь (день или период «с ... по»), дни с фото на телефоне (галочками - и отдельные
 // дни), «Перенести с телефона» - фото уходят с телефона в папки ГГГГ\ММ\ДД по дате «Изменён».
+// ---------- Bluetooth (26.11): проверка адаптера и приём фото, отправленных с телефона ----------
+// Забрать фото с телефона по Bluetooth нельзя (телефон по Bluetooth только отправляет), поэтому: на телефоне «Поделиться» ->
+// Bluetooth -> этот компьютер, здесь - мастер Windows «Получение файлов» (fsquirt.exe, есть в Windows 7-10), потом принятое
+// раскладывается по папкам дат, как фото по кабелю. Драйвер адаптера программа не ставит (нужны права администратора) - только
+// показывает, что не так и какой адаптер (для поиска драйвера). Только встроенное в Windows: WMI, реестр, fsquirt.
+public class BtState {
+    public string Text = "";        // что с Bluetooth - для человека
+    public string Ids = "";         // адаптер для поиска драйвера: название и ИД оборудования
+    public bool Works;              // адаптер работает - можно принимать
+    public bool Unknown;            // проверить не удалось - принимать можно попробовать
+}
+
+public delegate List<string[]> BtQuery();          // устройства: { название, ИД устройства, код ошибки, класс }
+public delegate string BtIds(string deviceId);      // ИД оборудования и совместимые ИД из реестра (через «|»)
+public delegate bool BtFinished();
+public delegate BtFinished BtStart(string exe, string args);
+
+public static class Bt {
+    public const string Class = "{e0cbf06c-cd8b-4647-bb8a-263b43f0f974}";   // класс устройств Bluetooth
+
+    public static BtQuery Query = WmiDevices;
+    public static BtIds Ids = RegistryIds;
+    public static BtStart Start = RunProcess;
+    public static List<string> Folders = DefaultFolders();   // куда мастер Windows сохраняет принятое (смотрятся все)
+
+    static object Call(object o, string m, params object[] a) { return o.GetType().InvokeMember(m, System.Reflection.BindingFlags.InvokeMethod, null, o, a); }
+    static object Prop(object o, string p) { return o.GetType().InvokeMember(p, System.Reflection.BindingFlags.GetProperty, null, o, null); }
+    static string Val(object wmi, string p) {
+        try { object v = Prop(Call(Prop(wmi, "Properties_"), "Item", p), "Value"); return v == null ? "" : v.ToString(); } catch { return ""; }
+    }
+
+    // устройства Windows (как в диспетчере устройств): WMI через COM, без лишних сборок
+    static List<string[]> WmiDevices() {
+        List<string[]> r = new List<string[]>();
+        object loc = Activator.CreateInstance(Type.GetTypeFromProgID("WbemScripting.SWbemLocator"));
+        object svc = Call(loc, "ConnectServer", ".", "root\\cimv2");
+        object set = Call(svc, "ExecQuery", "SELECT Name, DeviceID, ConfigManagerErrorCode, ClassGuid FROM Win32_PnPEntity");
+        foreach (object o in (System.Collections.IEnumerable)set)
+            r.Add(new string[] { Val(o, "Name"), Val(o, "DeviceID"), Val(o, "ConfigManagerErrorCode"), Val(o, "ClassGuid") });
+        return r;
+    }
+
+    static string RegistryIds(string id) {
+        try {
+            using (RegistryKey k = Registry.LocalMachine.OpenSubKey("SYSTEM\\CurrentControlSet\\Enum\\" + id)) {
+                if (k == null) return "";
+                List<string> all = new List<string>();
+                foreach (string v in new string[] { "HardwareID", "CompatibleIDs" }) { string[] a = k.GetValue(v) as string[]; if (a != null) all.AddRange(a); }
+                return string.Join("|", all.ToArray());
+            }
+        } catch { return ""; }
+    }
+
+    static BtFinished RunProcess(string exe, string args) {
+        Process p = Process.Start(exe, args);
+        return delegate { try { return p.HasExited; } catch { return true; } };
+    }
+
+    static List<string> DefaultFolders() {
+        List<string> r = new List<string>();
+        try {
+            string docs = Environment.GetFolderPath(Environment.SpecialFolder.Personal);
+            r.Add(docs);
+            r.Add(Path.Combine(docs, "Bluetooth Exchange Folder"));
+            r.Add(Path.Combine(docs, "Bluetooth Folder"));
+            r.Add(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory));
+            r.Add(Environment.GetFolderPath(Environment.SpecialFolder.MyPictures));
+            string profile = Environment.GetEnvironmentVariable("USERPROFILE");
+            if (!string.IsNullOrEmpty(profile)) r.Add(Path.Combine(profile, "Downloads"));
+        } catch { }
+        return r;
+    }
+
+    // мастер Windows «Получение файлов по Bluetooth»
+    public static string Wizard {
+        get {
+            string w = Environment.GetEnvironmentVariable("WINDIR") ?? "C:\\Windows";
+            foreach (string d in new string[] { "Sysnative", "System32" }) { string f = Path.Combine(Path.Combine(w, d), "fsquirt.exe"); if (File.Exists(f)) return f; }
+            return "fsquirt.exe";
+        }
+    }
+
+    public static string PairWizard {
+        get {
+            string w = Environment.GetEnvironmentVariable("WINDIR") ?? "C:\\Windows";
+            foreach (string d in new string[] { "Sysnative", "System32" }) { string f = Path.Combine(Path.Combine(w, d), "DevicePairingWizard.exe"); if (File.Exists(f)) return f; }
+            return "DevicePairingWizard.exe";
+        }
+    }
+
+    // радиомодуль Bluetooth: USB-класс E0/01/01 (так он виден и без драйвера) или класс Bluetooth, но не его «дети» (BTHENUM...)
+    static bool Radio(string[] d, string ids) {
+        string id = d[1].ToUpperInvariant();
+        if (id.StartsWith("BTHENUM") || id.StartsWith("BTH\\") || id.StartsWith("BTHLE") || id.StartsWith("SWD\\") || id.StartsWith("ROOT\\")) return false;
+        string u = ids.ToUpperInvariant();
+        if (u.Contains("CLASS_E0&SUBCLASS_01&PROT_01")) return true;
+        return string.Compare(d[3], Class, StringComparison.OrdinalIgnoreCase) == 0 || d[0].IndexOf("Bluetooth", StringComparison.OrdinalIgnoreCase) >= 0;
+    }
+
+    // «USB\VID_0CF3&PID_3005&REV_0001» -> «USB\VID_0CF3&PID_3005»
+    static string HwId(string deviceId, string ids) {
+        foreach (string s in (ids + "|" + deviceId).Split('|')) {
+            Match m = Regex.Match(s, @"^(USB|PCI|SDIO)\\(VID|VEN)_[0-9A-F]{4}&(PID|DEV)_[0-9A-F]{4}", RegexOptions.IgnoreCase);
+            if (m.Success) return m.Value.ToUpperInvariant();
+        }
+        return deviceId;
+    }
+
+    public static BtState Check() {
+        BtState s = new BtState();
+        List<string[]> all;
+        try { all = Query(); }
+        catch (Exception ex) {
+            s.Unknown = true;
+            s.Text = "Проверить Bluetooth не удалось (" + Crash.Clean(ex.Message) + "). Можно попробовать принять фото - если адаптер работает, получится.";
+            return s;
+        }
+        string[] best = null;
+        string bestIds = "";
+        int rank = -1;
+        foreach (string[] d in all) {
+            string ids = Ids(d[1]);
+            if (!Radio(d, ids)) continue;
+            int err; int.TryParse(d[2], out err);
+            int r = err == 0 ? 3 : err == 22 ? 2 : 1;     // работающий важнее отключённого, отключённый - без драйвера
+            if (r > rank) { rank = r; best = d; bestIds = ids; }
+        }
+        if (best == null) {
+            s.Text = "Windows не видит Bluetooth-адаптер. Обычно он выключен: на нетбуке - кнопкой (Fn + клавиша с антенной или самолётом) " +
+                "или переключателем на корпусе, иногда - в настройках BIOS. Включите и нажмите «Проверить снова». Если не появится - " +
+                "адаптера в нетбуке нет (тогда только кабель или USB-адаптер Bluetooth).";
+            return s;
+        }
+        int code; int.TryParse(best[2], out code);
+        string name = best[0].Length > 0 ? best[0] : "адаптер Bluetooth";
+        s.Ids = name + " - " + HwId(best[1], bestIds);
+        if (code == 0) {
+            s.Works = true;
+            s.Text = "Bluetooth работает: " + name + ". Можно принимать фото с телефона.";
+            if (ServiceOff()) s.Text += " Но служба поддержки Bluetooth отключена - Windows может не принимать файлы (включает администратор: службы -> «Служба поддержки Bluetooth»).";
+        } else if (code == 22) {
+            s.Text = "Адаптер Bluetooth есть, но отключён в диспетчере устройств: " + name + ". Включите его: Пуск -> «Диспетчер устройств» -> " +
+                "правой кнопкой по адаптеру -> «Задействовать», потом «Проверить снова».";
+        } else if (code == 28 || code == 1 || code == 18 || code == 31 || code == 39 || code == 37 || code == 52) {
+            s.Text = "Адаптер Bluetooth есть, но драйвер не установлен или не работает (код " + code + "): " + name + ". Нужен драйвер для этого адаптера - " +
+                "ставит администратор (с правами администратора) с сайта производителя нетбука или через Центр обновления Windows. Для поиска драйвера - " +
+                "строка ниже («Скопировать»): по ней драйвер ищется точно.";
+        } else {
+            s.Text = "Адаптер Bluetooth с ошибкой (код " + code + " в диспетчере устройств): " + name + ". Попробуйте выключить и включить Bluetooth, " +
+                "перезагрузить компьютер; не поможет - переустановить драйвер (администратор).";
+        }
+        return s;
+    }
+
+    static bool ServiceOff() {
+        try {
+            using (RegistryKey k = Registry.LocalMachine.OpenSubKey("SYSTEM\\CurrentControlSet\\Services\\bthserv")) {
+                if (k == null) return false;
+                object v = k.GetValue("Start");
+                return v is int && (int)v == 4;
+            }
+        } catch { return false; }
+    }
+
+    static readonly string[] Media = { ".jpg", ".jpeg", ".png", ".heic", ".heif", ".gif", ".bmp", ".webp", ".mp4", ".3gp", ".mov", ".avi", ".mkv" };
+
+    // что пришло после since: фото и видео в папках, куда мастер Windows сохраняет (по времени создания файла)
+    public static List<string> Received(DateTime since) {
+        List<string> r = new List<string>();
+        foreach (string dir in Folders) {
+            try {
+                if (!Directory.Exists(dir)) continue;
+                foreach (string f in Directory.GetFiles(dir)) {
+                    if (Array.IndexOf(Media, Path.GetExtension(f).ToLowerInvariant()) < 0) continue;
+                    DateTime c = File.GetCreationTime(f), w = File.GetLastWriteTime(f);
+                    if ((c > w ? c : w) >= since.AddSeconds(-5) && !r.Contains(f)) r.Add(f);
+                }
+            } catch { }
+        }
+        return r;
+    }
+
+    // дата снимка: из имени (IMG_20261103_...), из EXIF (дата съёмки JPEG), иначе «Изменён»
+    public static DateTime DateOf(string f) {
+        DateTime d = PhoneShell.NameDate(Path.GetFileName(f));
+        if (d != DateTime.MinValue) return d;
+        string e = Path.GetExtension(f).ToLowerInvariant();
+        if (e == ".jpg" || e == ".jpeg") {
+            // быстро (без разбора картинки); не отдались свойства - читать целиком
+            try {
+                using (FileStream fs = File.OpenRead(f))
+                using (Image im = Image.FromStream(fs, false, false)) {
+                    DateTime x = Exif(im);
+                    if (x != DateTime.MinValue || im.PropertyItems.Length > 0) return x != DateTime.MinValue ? x : File.GetLastWriteTime(f);
+                }
+            } catch { }
+            try { using (Image im = Image.FromFile(f)) { DateTime x = Exif(im); if (x != DateTime.MinValue) return x; } } catch { }
+        }
+        return File.GetLastWriteTime(f);
+    }
+
+    // дата съёмки (0x9003), иначе дата изменения снимка (0x0132)
+    static DateTime Exif(Image im) {
+        foreach (int id in new int[] { 0x9003, 0x0132 }) {
+            foreach (System.Drawing.Imaging.PropertyItem p in im.PropertyItems) {
+                if (p.Id != id || p.Value == null) continue;
+                string t = Encoding.ASCII.GetString(p.Value).Trim('\0', ' ');
+                DateTime x;
+                if (DateTime.TryParseExact(t, "yyyy:MM:dd HH:mm:ss", CultureInfo.InvariantCulture, DateTimeStyles.None, out x)) return x;
+            }
+        }
+        return DateTime.MinValue;
+    }
+
+    // принятое - в папки дней под root (как фото по кабелю: тот же снимок второй раз не кладётся, другой с тем же именем - «(2)»)
+    public static MoveResult Sort(List<string> files, string root) {
+        MoveResult r = new MoveResult();
+        foreach (string f in files) {
+            try {
+                DateTime d = DateOf(f);
+                string placed = PhoneShell.Place(f, d, File.GetLastWriteTime(f), root, r);
+                if (placed != null) r.Placed.Add(placed);
+            } catch (Exception ex) { r.Error = Crash.Clean(ex.Message); }
+        }
+        return r;
+    }
+}
+
+public class BtDialog : Form {
+    readonly string root;
+    readonly Label state = new Label(), ids = new Label(), howto = new Label(), result = new Label();
+    readonly Button check = new Button(), copy = new Button(), pair = new Button(), receive = new Button(), take = new Button(), close = new Button();
+    readonly Timer wait = new Timer();
+    BtState st;
+    BtFinished running;
+    DateTime since = DateTime.Now;
+    public MoveResult Last;
+
+    public BtDialog(string root) {
+        this.root = root;
+        Text = "Фото с телефона по Bluetooth";
+        Font = new Font("Segoe UI", 10f);
+        StartPosition = FormStartPosition.CenterParent;
+        Rectangle wa = Screen.PrimaryScreen.WorkingArea;
+        Size = new Size(Math.Min(760, wa.Width), Math.Min(560, wa.Height));
+        MinimumSize = new Size(560, 420);
+        Label title = new Label();
+        title.Text = "Bluetooth";
+        title.Font = new Font("Segoe UI", 14f, FontStyle.Bold);
+        title.AutoSize = true;
+        title.Location = new Point(16, 10);
+        state.Font = Font;
+        ids.Font = new Font("Segoe UI", 9f);
+        ids.ForeColor = Look.Hint;
+        howto.Font = new Font("Segoe UI", 9.5f);
+        howto.Text = "Как принять фото (только Android; iPhone по Bluetooth на Windows не отправляет):\n" +
+            "1. Один раз - связать телефон с компьютером: на телефоне открыть Настройки -> Bluetooth (телефон станет видимым), здесь - " +
+            "«Связать с телефоном…», выбрать телефон, подтвердить код на обоих.\n" +
+            "2. «Принять фото…» - откроется окно Windows «Получение файлов».\n" +
+            "3. На телефоне: Галерея -> отметить фото -> «Поделиться» -> Bluetooth -> этот компьютер.\n" +
+            "4. В конце Windows спросит, куда сохранить, - просто «Готово». Программа сама разложит фото по папкам год \\ месяц \\ число.\n" +
+            "По Bluetooth медленно (фото - 10-40 с); много фото быстрее кабелем.";
+        result.Font = new Font("Segoe UI", 10f, FontStyle.Bold);
+        result.AutoEllipsis = true;
+        foreach (Button b in new Button[] { check, copy, pair, receive, take, close }) { b.FlatStyle = FlatStyle.Flat; b.UseVisualStyleBackColor = false; b.Cursor = Cursors.Hand; }
+        check.Text = "Проверить снова"; copy.Text = "Скопировать"; pair.Text = "Связать с телефоном…"; receive.Text = "Принять фото…";
+        take.Text = "Забрать принятое"; close.Text = "Закрыть";
+        Look.MainButton(receive);
+        foreach (Button b in new Button[] { check, copy, pair, take, close }) Look.Button(b);
+        check.Click += delegate { Recheck(); };
+        copy.Click += delegate { try { Clipboard.SetText(st != null ? st.Ids : ""); result.Text = "Скопировано: " + st.Ids; result.ForeColor = Look.Hint; } catch { } };
+        pair.Click += delegate { Launch(Bt.PairWizard, "", false); };
+        receive.Click += delegate { Launch(Bt.Wizard, "-receive", true); };
+        take.Click += delegate { Take(); };
+        close.Click += delegate { Close(); };
+        CancelButton = close;
+        wait.Interval = 1000;
+        wait.Tick += delegate { if (running != null && running()) { wait.Stop(); running = null; receive.Enabled = true; Take(); } };
+        Controls.AddRange(new Control[] { title, state, ids, copy, check, howto, pair, receive, take, result, close });
+        Layout += delegate {
+            int w = ClientSize.Width - 32, h = ClientSize.Height;
+            check.SetBounds(ClientSize.Width - 16 - 170, 12, 170, 32);
+            state.SetBounds(16, 50, w, 72);
+            copy.SetBounds(ClientSize.Width - 16 - 130, 124, 130, 28);
+            ids.SetBounds(16, 128, w - 140, 22);
+            howto.SetBounds(16, 160, w, Math.Max(80, h - 160 - 120));
+            pair.SetBounds(16, h - 112, 220, 38);
+            receive.SetBounds(244, h - 114, 220, 42);
+            take.SetBounds(472, h - 112, 180, 38);
+            result.SetBounds(16, h - 66, w - 140, 50);
+            close.SetBounds(ClientSize.Width - 16 - 120, h - 54, 120, 36);
+        };
+        foreach (Label l in new Label[] { state, ids, howto, result }) l.UseMnemonic = false;     // «&» в ИД адаптера - как есть
+        Look.Wear(this);
+        Load += delegate { Recheck(); };
+        FormClosing += delegate { wait.Stop(); };
+    }
+
+    public BtState State { get { return st; } }
+    public string ResultText { get { return result.Text; } }
+
+    public void Recheck() {
+        st = Bt.Check();
+        state.Text = st.Text;
+        state.ForeColor = st.Works ? Look.Good : st.Unknown ? Look.Warn : Look.Bad;
+        ids.Text = st.Ids.Length > 0 ? "Адаптер: " + st.Ids : "";
+        copy.Visible = st.Ids.Length > 0;
+        receive.Enabled = st.Works || st.Unknown;
+        pair.Enabled = st.Works || st.Unknown;
+    }
+
+    void Launch(string exe, string args, bool receiving) {
+        try {
+            if (receiving) { since = DateTime.Now; running = Bt.Start(exe, args); receive.Enabled = false; wait.Start(); result.Text = "Ждём фото с телефона - окно Windows «Получение файлов» открыто…"; result.ForeColor = Look.Hint; }
+            else Bt.Start(exe, args);
+        } catch (Exception ex) {
+            result.Text = "Не запустилось окно Windows (" + Path.GetFileName(exe) + "): " + Crash.Clean(ex.Message);
+            result.ForeColor = Look.Bad;
+            receive.Enabled = st != null && (st.Works || st.Unknown);
+        }
+    }
+
+    // принятое с момента открытия окна (или последнего «Принять») - по папкам дат
+    public void Take() {
+        if (root.Length == 0) { result.Text = "Не выбрана папка «Куда складывать» в главном окне."; result.ForeColor = Look.Bad; return; }
+        List<string> got = Bt.Received(since);
+        if (got.Count == 0) { result.Text = "Новых фото не найдено. Если Windows сохранила их в другую папку - перенесите оттуда сами."; result.ForeColor = Look.Warn; return; }
+        Last = Bt.Sort(got, root);
+        result.Text = "Принято и разложено: " + Last.Placed.Count + (Last.Duplicates > 0 ? ", уже были: " + Last.Duplicates : "") +
+            (Last.Error != null ? " (ошибка: " + Last.Error + ")" : "") + " - в " + root;
+        result.ForeColor = Last.Error == null ? Look.Good : Look.Warn;
+        since = DateTime.Now;
+    }
+}
+
 public class FotoForm : Form {
     readonly string settingsFile;
     readonly Dictionary<string, string> settings = new Dictionary<string, string>();
@@ -2029,6 +2364,14 @@ public class FotoForm : Form {
         right.Controls.Add(kVideo);
         right.Controls.Add(ls);
         right.Controls.Add(own);
+        // 26.11: фото по Bluetooth (телефон отправляет, программа раскладывает) и проверка адаптера
+        LinkLabel bt = new LinkLabel();
+        bt.Text = "Bluetooth: принять фото…";
+        bt.Font = Small;
+        bt.AutoSize = true;
+        bt.LinkColor = Accent;
+        bt.LinkClicked += delegate { OpenBluetooth(); };
+        right.Controls.Add(bt);
         right.Controls.Add(sources);
         right.Controls.Add(ld);
         right.Controls.Add(days);
@@ -2045,6 +2388,7 @@ public class FotoForm : Form {
             kVideo.Location = new Point(kScreens.Right + 14, 82);
             ls.Location = new Point(8, 112);
             own.Location = new Point(ls.Right + 14, 112);
+            bt.Location = new Point(Math.Max(own.Right + 14, right.ClientSize.Width - 16 - bt.Width), 112);
             sources.SetBounds(8, 130, w, 92);
             ld.Location = new Point(8, sources.Bottom + 10);
             chosen.SetBounds(8, right.ClientSize.Height - 30, w, 24);
@@ -2111,6 +2455,13 @@ public class FotoForm : Form {
             }
         };
         ShowChosen();
+    }
+
+    void OpenBluetooth() {
+        using (BtDialog d = new BtDialog(path.Text.Trim())) {
+            d.ShowDialog(this);
+            if (d.Last != null && d.Last.Placed.Count > 0) Status("По Bluetooth принято и разложено по папкам дат: " + d.Last.Placed.Count, Look.Good);
+        }
     }
 
     static Button MakeButton(string text, bool main) {
