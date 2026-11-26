@@ -1202,3 +1202,23 @@ class PostSlotsTests(unittest.TestCase):
         self.assertEqual(gf.parse_post_at("22, 7,12,17"), [7, 12, 17, 22])
         with self.assertRaises(ValueError):
             gf.parse_post_at("7,25")
+
+
+class AlternateKindTests(unittest.TestCase):
+    """Владелец 26.11: чередовать розыгрыши «для всех стран» и «для стран»."""
+
+    def test_alternates_but_urgent_first(self):
+        from datetime import datetime, timedelta, timezone
+        now = datetime(2026, 11, 26, 14, 0, tzinfo=timezone.utc)
+        ru = {"until": (now + timedelta(days=2)).isoformat(), "countries": ["RU"], "key": "ru"}
+        all1 = {"until": (now + timedelta(days=3)).isoformat(), "countries": None, "key": "a1"}
+        ok = sorted([ru, all1], key=gf.queue_order)
+        self.assertIs(gf.pick_alternating(ok, None, now), ru)          # нет прошлого — самый ранний
+        self.assertIs(gf.pick_alternating(ok, "countries", now), all1)  # прошлый «для стран» → «для всех»
+        self.assertIs(gf.pick_alternating(ok, "all", now), ru)
+        only_all = [all1]
+        self.assertIs(gf.pick_alternating(only_all, "all", now), all1)  # другого вида нет
+        urgent = {"until": (now + timedelta(hours=5)).isoformat(), "countries": ["RU"], "key": "u"}
+        ok = sorted([urgent, all1], key=gf.queue_order)
+        self.assertIs(gf.pick_alternating(ok, "countries", now), urgent)  # скоро кончится — сразу
+        self.assertIsNone(gf.pick_alternating([], "all", now))

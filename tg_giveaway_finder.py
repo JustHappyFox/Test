@@ -1321,6 +1321,25 @@ def queue_order(e: dict[str, Any]) -> tuple:
     return (e["until"], bool(e.get("countries")))
 
 
+def giveaway_kind(e: dict[str, Any]) -> str:
+    return "countries" if e.get("countries") else "all"
+
+
+URGENT_HOURS = 12  # кончится раньше — публикуем сразу, без чередования
+
+
+def pick_alternating(ok: list[dict[str, Any]], last_kind: str | None, when: datetime) -> dict[str, Any] | None:
+    """Владелец 26.11: «чередуй розыгрыши для всех и для стран». ok — подходящие, по порядку queue_order.
+    Берём самый ранний другого вида, чем прошлый пост; но если самый ранний вообще кончается меньше чем
+    через URGENT_HOURS — его (иначе потеряем). Другого вида нет — самый ранний."""
+    if not ok:
+        return None
+    first = ok[0]
+    if last_kind is None or datetime.fromisoformat(first["until"]) - when < timedelta(hours=URGENT_HOURS):
+        return first
+    return next((e for e in ok if giveaway_kind(e) != last_kind), first)
+
+
 # Цена Premium в звёздах (подарок за звёзды): чтобы сравнивать розыгрыши Premium и звёзд одной мерой
 PREMIUM_IN_STARS = {3: 1000, 6: 1500, 12: 2500}
 
@@ -1704,7 +1723,7 @@ async def cmd_post_scheduled(client: TelegramClient, args: argparse.Namespace) -
         queue = sorted((e for e in queue if e["key"] not in posted and e["key"] not in scheduled
                         and e["key"] not in bad and datetime.fromisoformat(e["until"]) > now),
                        key=queue_order)
-        entry = next((e for e in queue if fits(e, next_at)), None)
+        entry = pick_alternating([e for e in queue if fits(e, next_at)], st.get("last_kind"), next_at)
         src = queue
         if entry is None:
             last = st.get("last_search")
@@ -1771,6 +1790,7 @@ async def cmd_post_scheduled(client: TelegramClient, args: argparse.Namespace) -
             scheduled[entry["key"]] = {**entry, "at": when.isoformat()}
             post_times.append(when)
             log.info("🕒 Запланировано на %s UTC: %s | %s", when.strftime("%d.%m %H:%M"), entry["prize"], entry["link"])
+        st["last_kind"] = giveaway_kind(entry)
         next_at = in_post_window(when + interval, window, tz_hours)
 
     # раз в сутки — поиск, даже если запас не пуст (владелец 06.11: агрегаторы проверять раз в день)
