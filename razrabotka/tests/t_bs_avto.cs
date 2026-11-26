@@ -130,6 +130,12 @@ public static class T {
                 Eq("образец: дата акта - сегодня", b.V("data_akt"), DateTime.Today.ToString("dd.MM.yyyy"));
                 Console.WriteLine("   заголовок: " + ((Label)F(b, "headSub")).Text);
                 if (png != null) Snap(b, png + "_2.png", 0);
+                Console.WriteLine("--- разрядность по типу счётчика (26.11): CE318 - 6+2, CE208 - 8; буквы латинские или русские");
+                b.Clear();
+                Type(pu, 0, 1, "CE318BY S31 543 JAVZ");
+                Eq("CE318: разр., показания", ((RowList)pu).Cell(0, 11) + " " + ((RowList)pu).Cell(0, 5), "6+2 000000,00");
+                Type(pu, 0, 1, "СЕ 208 BY S7 145.1");
+                Eq("СЕ 208 (русские буквы): разр., показания", ((RowList)pu).Cell(0, 11) + " " + ((RowList)pu).Cell(0, 5), "8 00000000");
                 Console.WriteLine(bad == 0 ? "ВСЁ ОК" : "ОШИБОК: " + bad);
             } else { t.Stop(); Environment.Exit(0); }
         };

@@ -1100,9 +1100,20 @@ public class BsForm : Form {
         if (r.Length == 0)
             foreach (string s in lists.Get("БС: разрядность счётчика")) {
                 int e = s.IndexOf('=');
-                if (e > 0 && type.StartsWith(s.Substring(0, e).Trim(), StringComparison.OrdinalIgnoreCase)) r = s.Substring(e + 1).Trim();
+                if (e > 0 && MeterKey(type).StartsWith(MeterKey(s.Substring(0, e)))) { r = s.Substring(e + 1).Trim(); break; }
             }
         if (r.Length > 0) pu.SetCell(row, 11, r);
+    }
+
+    // «CE 318», «СЕ-318», «ce318BY» -> «СЕ318BY»: латинские буквы, похожие на русские, - русскими; без пробелов, дефисов, точек
+    static string MeterKey(string t) {
+        StringBuilder b = new StringBuilder();
+        foreach (char ch in t.ToUpperInvariant()) {
+            if (ch == ' ' || ch == '-' || ch == '.' || ch == '_') continue;
+            int i = "ABCEHKMOPTXY".IndexOf(ch);
+            b.Append(i >= 0 ? "АВСЕНКМОРТХУ"[i] : ch);
+        }
+        return b.ToString();
     }
 
     // «6+2» -> «000000,00»; «6» -> «000000»

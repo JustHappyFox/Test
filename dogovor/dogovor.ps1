@@ -2821,6 +2821,11 @@ OformilMark + "\r\n" +
 "\r\n" +
 "[БС: тип счётчика]\r\nМЭС-3-5/100-1/3/А\r\nСС-302.T4U1-AP1\r\n" +
 "\r\n" +
+"[БС: разрядность счётчика]\r\n# 26.11: у каждого типа своя - показания нового счётчика пишутся нулями по ней. Начало обозначения = разрядность:\r\n" +
+"# «6+2» - 6 целых и 2 после запятой (000000,00), «8» - 8 целых (00000000). Латинские и русские буквы, пробелы, дефисы - без разницы.\r\n" +
+"# Другие типы - дописывайте строкой (или впишите «Разр.» в пакете один раз - программа запомнит)\r\n" +
+"CE318 = 6+2\r\nCE208 = 8\r\n" +
+"\r\n" +
 "[БС: напряжение]\r\n3х230/400\r\n230\r\n" +
 "\r\n" +
 "[БС: ток счётчика]\r\n5(100)\r\n5(60)\r\n10(100)\r\n5(7,5)\r\n" +
@@ -28298,9 +28303,20 @@ public class BsForm : Form {
         if (r.Length == 0)
             foreach (string s in lists.Get("БС: разрядность счётчика")) {
                 int e = s.IndexOf('=');
-                if (e > 0 && type.StartsWith(s.Substring(0, e).Trim(), StringComparison.OrdinalIgnoreCase)) r = s.Substring(e + 1).Trim();
+                if (e > 0 && MeterKey(type).StartsWith(MeterKey(s.Substring(0, e)))) { r = s.Substring(e + 1).Trim(); break; }
             }
         if (r.Length > 0) pu.SetCell(row, 11, r);
+    }
+
+    // «CE 318», «СЕ-318», «ce318BY» -> «СЕ318BY»: латинские буквы, похожие на русские, - русскими; без пробелов, дефисов, точек
+    static string MeterKey(string t) {
+        StringBuilder b = new StringBuilder();
+        foreach (char ch in t.ToUpperInvariant()) {
+            if (ch == ' ' || ch == '-' || ch == '.' || ch == '_') continue;
+            int i = "ABCEHKMOPTXY".IndexOf(ch);
+            b.Append(i >= 0 ? "АВСЕНКМОРТХУ"[i] : ch);
+        }
+        return b.ToString();
     }
 
     // «6+2» -> «000000,00»; «6» -> «000000»
