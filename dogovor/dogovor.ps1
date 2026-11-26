@@ -13896,6 +13896,16 @@ public class StreetDirectory {
         return codes;
     }
 
+    // 26.11: в базе в названии населённого пункта бывает приписан сельсовет: «Лесной Боровлянский с/с», «Лесной, Боровлянский
+    // сельсовет» - населённый пункт «Лесной», сельсовет «Боровлянский» (иначе «Лесной» не находится: ищется всё название целиком)
+    public static void SplitTown(ref string town, ref string ss) {
+        System.Text.RegularExpressions.Match m = System.Text.RegularExpressions.Regex.Match(town ?? "",
+            @"^(.*?\S)[\s,]+([А-Яа-яЁёA-Za-z-]+)\s*(?:с/с|с\.\s?с\.?|сельсовет|с/совет)\.?\s*$", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        if (!m.Success) return;
+        town = m.Groups[1].Value.Trim().TrimEnd(',');
+        if ((ss ?? "").Trim().Length == 0) ss = m.Groups[2].Value + " с/с";
+    }
+
     static string CleanSs(string ss) {
         string s = ss.Trim();
         foreach (string tail in new string[] { "с/с", "сельсовет", "с/с.", "сс" })
@@ -14126,6 +14136,7 @@ public class StreetDirectory {
                 else if (name.Contains("SS")) { if (ss.Length == 0) ss = text; }
                 else other += (other.Length > 0 ? ", " : "") + text;
             }
+            SplitTown(ref town, ref ss);
             StringBuilder display = new StringBuilder();
             if (town.Length > 0) display.Append(town);
             if (own.Length > 0) display.Append((display.Length > 0 ? ", " : "") + own);
@@ -14497,6 +14508,7 @@ public class StreetDirectory {
         dir.KeyField = "UL";
         foreach (KeyValuePair<string, string[]> kv in VygruzkaByt.ReadStreets(file)) {
             string code = NormalizeCode(kv.Key), town = kv.Value[0].Trim(), own = kv.Value[1].Trim(), ss = kv.Value[2].Trim();
+            SplitTown(ref town, ref ss);
             StringBuilder display = new StringBuilder(town);
             if (own.Length > 0) display.Append((display.Length > 0 ? ", " : "") + own);
             if (ss.Length > 0) {
