@@ -101,3 +101,6 @@ else:
     d.rep('public class SealRow {', pt + '\n\npublic class SealRow {')
 d.save()
 print('dogovor/dogovor.ps1 потери ок')
+
+# справка юр и поиск по юр базе (только «Договор»): razrabotka/src/jur_spravka.cs, перед классом SealRow
+block('jur_spravka.cs', '// ==== БЛОК СПРАВКИ ЮР', '// ==== КОНЕЦ БЛОКА СПРАВКИ ЮР ====', 'dogovor/dogovor.ps1', 'public class SealRow {')
