@@ -23,6 +23,9 @@ for i in range(n):
            6, None, None, None, 0, None, 1, 'Квартира подъезд', 0, 8, '+37529%07d' % i, 1, ss, 380 if i % 4 else 220, 1, 8, None, None,
            None, None, None, None, None, 2025]
     ws.append(row)
+# 26.11: улица с именем - в быту полностью («Михаила Миля»), в юр базе - «М.Миля», «М Миля» (gen_ftu.py); частные дома 5 и 7
+for j, dom in enumerate([5, 5, 7]):
+    ws.append([int('099%04d' % j), 'Милевский Тест Тестович', 'Макетино', 3874, 'Михаила Миля ул.', dom, '', ''] + [None] * (len(H) - 8))
 for c in ws['V'][1:]: c.number_format = 'dd.mm.yyyy'
 wb.save(out)
 print(out, n)

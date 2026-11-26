@@ -14181,6 +14181,40 @@ public class StreetDirectory {
         n.Codes.Add(code);
     }
 
+    // 26.11: улицу пишут с инициалом или без имени («М. Миля», «М Миля», «Миля») - полное название из справочника («михаила миля»),
+    // если в этом населённом пункте (не узнан - везде) такая улица одна; иначе (или уже полное) - null
+    public string FullStreet(string town, string typed) {
+        PrepareMatch();
+        string[] tw = AddressText.NameWords(typed ?? "");
+        if (tw.Length == 0) return null;
+        Dictionary<string, bool> allowed = null;
+        string nw = string.Join(" ", AddressText.NameWords(town ?? ""));
+        if (nw.Length > 0)
+            foreach (NameEntry t in towns)
+                if (t.Key == nw) { allowed = new Dictionary<string, bool>(); foreach (string c in t.Codes) allowed[c] = true; }
+        string found = null;
+        foreach (KeyValuePair<string, string> kv in streetKey) {
+            if (kv.Value.Length == 0 || allowed != null && !allowed.ContainsKey(kv.Key)) continue;
+            if (!Like(tw, kv.Value.Split(' '))) continue;
+            if (found != null && found != kv.Value) return null;      // несколько разных улиц - не угадывать
+            found = kv.Value;
+        }
+        return found == null || found == string.Join(" ", tw) ? null : found;
+    }
+
+    // набранные слова совпадают с концом названия: целиком или инициалом (одна-две буквы - начало слова); хоть одно - целиком
+    static bool Like(string[] t, string[] k) {
+        if (t.Length > k.Length) return false;
+        bool full = false;
+        for (int i = 1; i <= t.Length; i++) {
+            string a = t[t.Length - i], b = k[k.Length - i];
+            if (a == b) { if (a.Length >= 3) full = true; continue; }
+            if (a.Length <= 2 && b.StartsWith(a)) continue;
+            return false;
+        }
+        return full;
+    }
+
     // слова, которые могут быть названием: подряд, ещё не узнанные
     static List<int> NameSlots(List<AddrToken> toks) {
         List<int> list = new List<int>();
@@ -15724,6 +15758,11 @@ public class BaseLink {
     }
 
     // лицевые, квартиры и дома по адресу дома (без квартиры) или улицы - для книги лицевых новой квартиры: NAB, KV, DOM, KOR
+    // улица полностью по справочнику улиц базы («М. Миля» -> «михаила миля»); null - не нашлась или неоднозначно
+    public string FullStreet(string town, string street) {
+        lock (sync) { return Base != null && Base.Dir != null ? Base.Dir.FullStreet(town, street) : null; }
+    }
+
     public List<string[]> House(string query) {
         List<string[]> found = new List<string[]>();
         lock (sync) {
@@ -25683,7 +25722,7 @@ public class JurBase {
 
     JurFound FindFtu(string np, string street, string dom, string kv, int kp) {
         JurFound r = new JurFound();
-        string v = Word(np), st = Word(street);
+        string v = Word(np), st = StreetWord(street);
         Dictionary<long, JurAbon> cards = new Dictionary<long, JurAbon>();
         Dictionary<long, bool> seen = new Dictionary<long, bool>();
         for (int row = 0; row < Ftu.Count; row++) {
@@ -25764,7 +25803,7 @@ public class JurBase {
     public JurFound Find(string np, string street, string dom, string kv, int kp) {
         if (Ftu != null) return FindFtu(np, street, dom, kv, kp);
         JurFound r = new JurFound();
-        string v = Word(np), st = Word(street);
+        string v = Word(np), st = StreetWord(street);
         Dictionary<long, JurAbon> cards = new Dictionary<long, JurAbon>();
         using (ClarionFile c = ClarionFile.Open(Path.Combine(Folder, "ABON_.DAT"))) {
             ClarionField fkp = Need(c, "KP"), fnab = Need(c, "NAB"), fname = c.Field("NAIM"), fadr = c.Field("ADRES");
@@ -25850,6 +25889,24 @@ public class JurBase {
         foreach (string w in s.ToLowerInvariant().Split(new char[] { ' ', '.', ',', '"', '«', '»', '-', '(', ')' }, StringSplitOptions.RemoveEmptyEntries))
             if (w.Length > best.Length && Array.IndexOf(Types, w) < 0) best = w;
         return best.Length > 5 ? best.Substring(0, 5) : best;
+    }
+
+    // 26.11: улица - по главному (последнему) слову: в юр базе «Михаила Миля» пишут и «М. Миля», и «М Миля», и полностью;
+    // самое длинное слово («михаила») в «М.Миля» не найти, последнее («миля») - есть везде. Первые 5 букв (окончания разные)
+    public static string StreetWord(string s) {
+        string last = "";
+        foreach (string w in s.ToLowerInvariant().Replace('ё', 'е').Split(new char[] { ' ', '.', ',', '"', '«', '»', '(', ')' }, StringSplitOptions.RemoveEmptyEntries))
+            if (w.Length >= 3 && Array.IndexOf(Types, w) < 0 && !Regex.IsMatch(w, @"^\d+(-?[а-я]{1,2})?$")) last = w;
+        if (last.Length == 0) return Word(s);
+        return last.Length > 5 ? last.Substring(0, 5) : last;
+    }
+
+    // улица для поиска в бытовой базе: инициалы перед названием - долой («М. Миля», «М.Миля», «М Миля» -> «Миля»), полностью - как есть
+    public static string NoInitials(string s) {
+        string r = Regex.Replace(s ?? "", @"(?<![\p{L}\d-])\p{L}\.\s*(?=\p{L}{2})", " ");
+        r = Regex.Replace(r, @"(?<![\p{L}\d.-])\p{L}\s+(?=\p{L}{2})", " ");
+        r = Regex.Replace(r, @"\s+", " ").Trim();
+        return r.Length > 0 ? r : (s ?? "").Trim();
     }
 
     static readonly string[] Types = { "ул", "улица", "пер", "переулок", "пр", "пр-т", "проспект", "д", "дер", "деревня", "аг", "агрогородок",
@@ -26324,14 +26381,17 @@ public class JurPick : Form {
 
     // адрес для физ базы: «д. Боровляны, ул. Лесная, д. 7»
     string Query(bool withHouse) {
+        return Q(npTip.Text.Trim(), npBox.Text.Trim(), ulTip.Text.Trim(), JurBase.NoInitials(ulBox.Text.Trim()), domBox.Text.Trim(), korBox.Text.Trim(), withHouse);
+    }
+
+    static string Q(string npTip, string np, string ulTip, string ul, string dom, string kor, bool withHouse) {
         List<string> parts = new List<string>();
-        string np = npBox.Text.Trim(), ul = ulBox.Text.Trim();
-        if (np.Length > 0) parts.Add((npTip.Text.Trim() + " " + np).Trim());
-        if (ul.Length > 0) parts.Add((ulTip.Text.Trim() + " " + ul).Trim());
+        if (np.Length > 0) parts.Add((npTip + " " + np).Trim());
+        if (ul.Length > 0) parts.Add((ulTip + " " + ul).Trim());
         if (withHouse) {
-            if (domBox.Text.Trim().Length == 0) return "";
-            parts.Add("д. " + domBox.Text.Trim());
-            if (korBox.Text.Trim().Length > 0) parts.Add("корп. " + korBox.Text.Trim());
+            if (dom.Length == 0) return "";
+            parts.Add("д. " + dom);
+            if (kor.Length > 0) parts.Add("корп. " + kor);
         }
         return parts.Count > 0 ? string.Join(", ", parts.ToArray()) : "";
     }
@@ -26342,6 +26402,7 @@ public class JurPick : Form {
         if (kpText.Length > 0 && !int.TryParse(kpText, out kp)) { Status("Номер договора юр лица - только цифры (или оставьте пустым).", St.Bad); return; }
         if (kp == 0 && (dom.Length == 0 || np.Length == 0 && ul.Length == 0)) { Status("Нужен адрес: населённый пункт или улица и дом (или номер договора юр лица).", St.Bad); return; }
         string saved = memory.Get("ЮрБазаПапка", ""), house = Query(true), street = Query(false);
+        string qNpTip = npTip.Text.Trim(), qUlTip = ulTip.Text.Trim(), qKor = korBox.Text.Trim();
         string where = (ul.Length > 0 ? ul : np) + (dom.Length > 0 ? ", д." + dom : "") + (korBox.Text.Trim().Length > 0 ? " корп." + korBox.Text.Trim() : "")
             + (kv.Length > 0 ? ", кв." + kv : "");
         int my = ++seq;
@@ -26365,7 +26426,11 @@ public class JurPick : Form {
             BaseLink b = Base();
             if (b == null) lsErr = "база физ лиц недоступна" + (baseError.Length > 0 ? " (" + baseError + ")" : "") + " - лицевой впишите сами";
             else {
-                try { ls = FlatLs.Make(b, house, street, dom, kv, r); }
+                // 26.11: улица с инициалом или без имени («М. Миля», «Миля») - полное название из справочника улиц физ базы
+                string h2 = house, s2 = street, full = null;
+                try { full = b.FullStreet(np, ul); } catch { }
+                if (full != null) { h2 = Q(qNpTip, np, qUlTip, full, dom, qKor, true); s2 = Q(qNpTip, np, qUlTip, full, dom, qKor, false); }
+                try { ls = FlatLs.Make(b, h2, s2, dom, kv, r); }
                 catch (Exception ex) { lsErr = ex.Message; }
             }
             Post(delegate {
