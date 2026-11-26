@@ -89,7 +89,7 @@ jobs:
           --careful --max-channels 1000 --search-pages 2 --source-limit 100
           --web --web-max 6000 --time-limit 30
           --discover-file state/cc_candidates.txt --web-open-max 40 --no-discover
-          --state .state/posted.json ${{ inputs.refill && '--refill' || '' }} ${{ inputs.post_now && format('--post-now {0}', inputs.post_now) || '' }}
+          --state .state/posted.json --pin-file state/pin_next.txt --skip-file state/skip_until.txt ${{ inputs.refill && '--refill' || '' }} ${{ inputs.post_now && format('--post-now {0}', inputs.post_now) || '' }}
           ${{ inputs.gaps && format('--refill --discover-gaps --web-open-max {0}', inputs.gaps) || '' }}
 
       - name: Сохранить состояние

@@ -1328,6 +1328,22 @@ def giveaway_kind(e: dict[str, Any]) -> str:
 URGENT_HOURS = 12  # кончится раньше — публикуем сразу, без чередования
 
 
+def load_skip_until(path: str | None) -> datetime | None:
+    """Первая непустая строка файла (не «#») — время ISO с поясом; до него бот ничего не публикует."""
+    if not path or not Path(path).is_file():
+        return None
+    for ln in Path(path).read_text(encoding="utf-8").splitlines():
+        ln = ln.strip()
+        if ln and not ln.startswith("#"):
+            try:
+                t = datetime.fromisoformat(ln)
+            except ValueError:
+                log.warning("В %s не время: %r — не учитываю", path, ln)
+                return None
+            return t if t.tzinfo else t.replace(tzinfo=timezone.utc)
+    return None
+
+
 def load_pins(path: str | None) -> list[str]:
     """Владелец 26.11: «следующим в списке поставь» — ссылки из файла идут первыми, по порядку."""
     if not path or not Path(path).is_file():
@@ -1611,6 +1627,10 @@ async def cmd_post_scheduled(client: TelegramClient, args: argparse.Namespace) -
         if next_at > now and manual and gap and manual + gap > now:
             log.info("Пауза после вашего поста от %s UTC — до %s UTC", manual.strftime("%d.%m %H:%M"),
                      (manual + gap).strftime("%d.%m %H:%M"))
+    skip = load_skip_until(getattr(args, "skip_file", None))
+    if skip and next_at < skip:  # владелец 26.11: «следующий только завтра» — слоты до этого времени пропускаем
+        log.info("Владелец попросил не публиковать до %s UTC (%s)", skip.strftime("%d.%m %H:%M"), args.skip_file)
+        next_at = skip
 
     allowed = parse_countries(getattr(args, "countries", None))
 
@@ -2110,7 +2130,10 @@ def build_parser() -> argparse.ArgumentParser:
     ps.add_argument("--daily-search-hours", type=float, default=0, metavar="Ч",
                     help="искать и пополнять запас, если поиска не было Ч часов, даже когда запас не пуст "
                          "(0 — только когда запас кончился)")
-    ps.add_argument("--pin-file", default="state/pin_next.txt", metavar="ФАЙЛ",
+    ps.add_argument("--skip-file", default=None, metavar="ФАЙЛ",
+                    help="время (ISO, например 2026-11-27T03:00+00:00), до которого ничего не публиковать "
+                         "(state/skip_until.txt)")
+    ps.add_argument("--pin-file", default=None, metavar="ФАЙЛ",
                     help="ссылки на розыгрыши, которые опубликовать следующими в обычный слот, по порядку "
                          "(state/pin_next.txt; по строке на ссылку)")
     ps.add_argument("--post-now", metavar="ССЫЛКА",

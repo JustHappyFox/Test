@@ -736,6 +736,19 @@ class PostWhenDueTests(ScheduledPostTests):
         self.assertEqual(st["scheduled"], [])
         self.assertIn(self.entry(1)["key"], st["posted"])
 
+    def test_skip_file_blocks_posting(self):
+        c = self.client()
+        with tempfile.TemporaryDirectory() as tmp:
+            path, skip = Path(tmp, "s.json"), Path(tmp, "skip.txt")
+            skip.write_text((NOW + timedelta(hours=8)).isoformat() + "\n", encoding="utf-8")
+            gf.save_state(path, {"posted": {}, "queue": [self.entry(1)],
+                                 "last_post": (NOW - timedelta(hours=4)).isoformat()})
+            a = gf.apply_preset(gf.build_parser().parse_args(
+                ["post", "--to", "@mygroup", "--state", str(path), "--no-discover", "--no-aggregators",
+                 "--min-interval-hours", "3.5", "--schedule-ahead", "0", "--skip-file", str(skip)]))
+            asyncio.run(gf.cmd_post(c, a))
+        self.assertEqual(c.forwards, [])
+
     # унаследованные тесты режима «N отложенных» здесь не нужны
     test_posts_now_and_keeps_two_scheduled = None
     test_nothing_to_do_when_two_already_scheduled = None
@@ -1236,3 +1249,13 @@ class PinNextTests(unittest.TestCase):
         self.assertIs(gf.pinned_first([a, b], pins), b)
         self.assertIsNone(gf.pinned_first([a], pins))
         self.assertEqual(gf.load_pins(None), [])
+
+
+class SkipUntilTests(unittest.TestCase):
+    def test_reads_time(self):
+        import tempfile
+        from datetime import datetime, timezone
+        with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False, encoding="utf-8") as f:
+            f.write("# коммент\n2026-11-27T03:00:00+00:00\n")
+        self.assertEqual(gf.load_skip_until(f.name), datetime(2026, 11, 27, 3, 0, tzinfo=timezone.utc))
+        self.assertIsNone(gf.load_skip_until(None))
