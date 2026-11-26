@@ -19348,7 +19348,7 @@ public class StartMenu : Form {
         sprTile.SetBounds(34, 190, 282, 74);
         sprTile.Click += delegate { OpenSpravka(this, null); };
         // 26.11: справка юр лица (расторжение, ввод в расчёты...) - из юр базы по договору/карточке или № счётчика
-        jsprTile = new Tile("Справка юр", "из юр базы: договор + карточка или № счётчика", St.TintOf("Счётчики").Mark);
+        jsprTile = new Tile("Создать справку юр", "из юр базы: договор + карточка или № счётчика", St.TintOf("Счётчики").Mark);
         jsprTile.SetBounds(324, 190, 282, 74);
         jsprTile.Click += delegate { OpenJurSpravka(this, null, null); };
         Controls.Add(jsprTile);
