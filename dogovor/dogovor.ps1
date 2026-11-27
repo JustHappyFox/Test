@@ -20523,7 +20523,15 @@ public class SpravkaForm : Form {
 
     // ---------- разделы ----------
 
+    // тарифные группы ПУ (в «Тексте справки»): строка на каждый прибор учёта
+    readonly Panel groupHost = new Panel();
+    Grid groupGrid;
+
     void BuildCards() {
+        groupHost.BackColor = Color.Transparent;
+        groupGrid = new Grid(groupHost, 4);
+        groupGrid.PadX = 0;
+        groupGrid.PadBottom = 0;
         Card c = new Card("Справка", "дата и кто подписывает", 4);
         cards.Add(c);
         DateBox date = new DateBox();
@@ -20563,9 +20571,8 @@ public class SpravkaForm : Form {
         Label pl = Ui.Caption("номера - в разделе «Пломбы» выше (ВА, КК, другие); нет пломб - строки нет");
         pl.TextAlign = ContentAlignment.MiddleLeft;
         c.Grid.Row(F(null, X("on_plomby", "«Пломбы: …»"), box), F(null, pl, 0));
-        Label gr = Ui.Caption("выбирается у каждого прибора учёта (раздел ПУ); несколько ПУ - строка на каждый: «ПУ 1 - ...», «ПУ 2 - ...»");
-        gr.TextAlign = ContentAlignment.MiddleLeft;
-        c.Grid.Row(F(null, X("on_gruppa", "Тарифная группа"), box), F(null, gr, 0));
+        // тарифная группа: строка выбора на каждый прибор учёта (ПУ 1, ПУ 2...) - добавляются и убираются вместе с ПУ
+        c.Grid.Row(F(null, X("on_gruppa", "Тарифная группа"), box), Cell.G(groupGrid, 3));
         c.Grid.Row(F(null, X("on_reg", "«Регистрация …»"), box), F("Регистрация", T("reg", "пусто - линия, вписать от руки"), 0));
         TextBox own = Ui.Text(3);
         Reg("svoy", own);
@@ -20594,8 +20601,9 @@ public class SpravkaForm : Form {
         m.Grid.Row(Line());
         m.Grid.Row(MF(m, "zav", "Номер", MT(m, "zav", null), 14), MF(m, "pokaz", "Показания", MT(m, "pokaz", null), 12),
             MF(m, "pov", "Поверка (год-квартал)", MT(m, "pov", "2025-2"), 10));
-        // 27.11: тарифная группа - у каждого прибора учёта своя (в справке строка на каждый ПУ: «ПУ 1 - ...», «ПУ 2 - ...»)
-        m.Grid.Row(MF(m, "gruppa", "Тарифная группа этого ПУ (строка в справке; галочка «Тарифная группа» - в «Тексте справки»)", MC(m, "gruppa"), 0));
+        // 27.11: тарифная группа - у каждого прибора учёта своя; поле стоит в «Тексте справки» у галочки (строка на каждый ПУ)
+        m.Caps["gruppa"] = "Тарифная группа";
+        MC(m, "gruppa");
         m.Pick = new MeterPick(lists, (Combo)m.Ctl["model"], (Combo)m.Ctl["korpus"], (Combo)m.Ctl["modif"], (TextBox)m.Ctl["tip"]);
         // списки модели, корпуса и модификации меняются на ходу - без автодополнения Windows (с ним зависало и вылетало)
         foreach (string k in new string[] { "model", "korpus", "modif" }) ((Combo)m.Ctl[k]).NoAutoComplete();
@@ -20819,6 +20827,11 @@ public class SpravkaForm : Form {
 
     // приборы учёта - в раздел заново: заголовки «Прибор учёта 1, 2...», «× убрать» - когда их больше одного, внизу «+»
     void RebuildMeters() {
+        if (groupGrid != null) {
+            groupGrid.Clear();
+            for (int i = 0; i < meters.Count; i++)
+                groupGrid.Row(Cell.F(meters.Count > 1 ? "Тарифная группа ПУ " + (i + 1) : "Тарифная группа", meters[i].Ctl["gruppa"], 4));
+        }
         meterCard.Grid.Clear();
         meterCard.Grid.RowGap = 12;
         for (int i = 0; i < meters.Count; i++) {
