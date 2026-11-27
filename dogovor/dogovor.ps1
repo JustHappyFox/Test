@@ -20730,6 +20730,27 @@ public class SpravkaForm : Form {
 
     void Note(string text, Color c) { headSub.Text = text; headSub.ForeColor = c; }
 
+    // проверки лицевых по ПУ - вместе (у второго ПУ своя строка, первая не пропадает); красное - если хоть одно красное
+    readonly Dictionary<MeterBlock, string[]> lsNotes = new Dictionary<MeterBlock, string[]>();
+    void LsNote(MeterBlock m, string text, Color c) {
+        lsNotes[m] = new string[] { text, c == St.Bad ? "bad" : c == St.Good ? "good" : "warn" };
+        List<string> all = new List<string>();
+        string worst = "good";
+        foreach (MeterBlock x in meters) {
+            string[] n;
+            if (!lsNotes.TryGetValue(x, out n)) continue;
+            all.Add(n[0]);
+            if (n[1] == "bad" || n[1] == "warn" && worst == "good") worst = n[1];
+        }
+        Note(string.Join(" | ", all.ToArray()), worst == "bad" ? St.Bad : worst == "warn" ? St.Warn : St.Good);
+    }
+
+    // все лицевые справки - проверить заново (после заполнения из перевода, из договора)
+    public void CheckAllLs() {
+        lsNotes.Clear();
+        foreach (MeterBlock m in meters) { m.Asked = ""; AskBase(m); }
+    }
+
     // ответ базы: Ф.И.О., телефон, адрес по частям, счётчик (номер, тип, поверка) - в пустые поля и в подставленные из базы раньше
     // (поправленное руками остаётся); показания - нет (в справке - сегодняшние, их снимают на месте)
     void FromBase(MeterBlock m, string nab, Dictionary<string, string> rec, string err) {
@@ -20737,7 +20758,14 @@ public class SpravkaForm : Form {
         if (i < 1 || BaseLink.Nab(DigitsOnly(MV(m, "ls"))) != nab) return;     // ПУ убрали или лицевой уже другой
         string who = meters.Count > 1 ? "ПУ " + i + ": " : "";
         if (err != null) { Note(who + "база недоступна (" + err + ") - впишите сами; папка базы - в главном меню «База абонентов…»", St.Warn); return; }
-        if (rec == null) { Note(who + "лицевого " + nab + " в базе нет - Ф.И.О., адрес и счётчик впишите сами", St.Warn); return; }
+        // 27.11: не занят ли лицевой - у каждого ПУ (и у второго). Справка из перевода из юр в физ - лицевой новый: занят - ошибка
+        bool newLs = JurInfo != null;
+        if (rec == null) {
+            LsNote(m, who + "лицевой " + nab + " свободен (в базе нет)" + (newLs ? "" : " - Ф.И.О., адрес и счётчик впишите сами"), newLs ? St.Good : St.Warn);
+            return;
+        }
+        if (newLs) { LsNote(m, who + "ЛИЦЕВОЙ " + nab + " ЗАНЯТ: " + rec["text"] + " - для новой квартиры нужен свободный лицевой", St.Bad); return; }
+        LsNote(m, who + "лицевой " + nab + " занят: " + rec["text"] + " - данные абонента подставлены из базы", St.Warn);
         bool force = m.Force;
         m.Force = false;
         Dictionary<string, string> v = BaseValues(rec);
@@ -20761,7 +20789,8 @@ public class SpravkaForm : Form {
         ComposeAddress(m);
         dirty = true;
         RefreshState();
-        Note(who + "из базы: " + rec["text"] + " - проверьте; неверное поправьте руками", St.Good);
+        // что подставлено из базы - в строке проверки лицевых (у каждого ПУ своя)
+        LsNote(m, who + "лицевой " + nab + " занят: " + rec["text"] + " - данные абонента подставлены из базы, проверьте", St.Warn);
     }
 
     // Ф.И.О., телефон, адрес по частям из записи базы
@@ -21156,6 +21185,7 @@ public class SpravkaForm : Form {
 
     public void Clear() {
         JurInfo = null;
+        lsNotes.Clear();
         loading = true;
         try {
             foreach (KeyValuePair<string, Control> kv in inp) if (!(kv.Value is DateBox) && !(kv.Value is Seg)) SetV(kv.Key, "");
@@ -21277,6 +21307,7 @@ public class SpravkaForm : Form {
                 MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2) != DialogResult.Yes) return false;
         Clear();
         FromContract(d);
+        CheckAllLs();
         head.Text = ("Справка " + V("pu1_ls")).Trim() + " - перевод из юр в физ";
         headSub.ForeColor = St.Good;
         headSub.Text = "Адрес, счётчик и лицевой - из баз юр и физ лиц: проверьте их и заполните Ф.И.О., свидетельство (ЕГРНИ), владельцев";
