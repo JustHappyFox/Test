@@ -19820,9 +19820,8 @@ public class StartMenu : Form {
     DogovorForm dog;
     SpravkaForm spr;
     NaryadForm nar;
-    readonly Tile dogTile, sprTile, narTile, jurTile, plTile, logTile, dlogTile, bsTile, jnarTile, jsprTile, jfindTile;
+    readonly Tile dogTile, sprTile, narTile, jurTile, plTile, logTile, dlogTile, bsTile, jnarTile, jsprTile;
     JurSpravkaForm jspr;
-    JurBrowser jfind;
     BsForm bs;
     JurNaryadForm jnar;
     UdalenieForm udal;
@@ -19912,13 +19911,8 @@ public class StartMenu : Form {
         Controls.Add(logTile);
         Controls.Add(dlogTile);
         plTile = new Tile("Мои отчёты пломб", "партии пломб, что поставлено по договорам, пропущенные, печать отчёта", St.TintOf("Пломбы и оборудование").Mark);
-        plTile.SetBounds(34, 518, 282, 74);
+        plTile.SetBounds(34, 518, 572, 74);
         plTile.Click += delegate { OpenPlomby(); };
-        // 26.11: поиск по юр базе - договор, договор/карточка, № счётчика, название, адрес
-        jfindTile = new Tile("Поиск по юр базе", "договор, карточка, счётчик, название, адрес", St.TintOf("Объект").Mark);
-        jfindTile.SetBounds(324, 518, 282, 74);
-        jfindTile.Click += delegate { OpenJurSearch(); };
-        Controls.Add(jfindTile);
         Controls.Add(jurTile);
         Controls.Add(plTile);
 
@@ -20122,38 +20116,6 @@ public class StartMenu : Form {
         if (jspr.WindowState == FormWindowState.Minimized) jspr.WindowState = FormWindowState.Normal;
         jspr.Activate();
         if (from != jspr) from.Hide();
-    }
-
-    // поиск по юр базе
-    public void OpenJurSearch() {
-        Crash.Mark("открываю поиск по юр базе");
-        if (jfind == null || jfind.IsDisposed) {
-            // 27.11: общее окно (как в меню программ): карточки -> точки учёта -> данные счётчика; здесь ещё «Справка юр по карточке»
-            jfind = new JurBrowser();
-            jfind.Font = St.Base;
-            jfind.BackColor = St.Back;
-            jfind.ForeColor = St.Text;
-            try { jfind.Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
-            jfind.TitleLabel.Font = St.Big;
-            foreach (Label l in new Label[] { jfind.Caption1, jfind.Caption2, jfind.Info }) { l.Font = St.Small; l.ForeColor = St.Hint; }
-            foreach (Button b in new Button[] { jfind.BackButton, jfind.CopyButton, jfind.ActionButton, jfind.CloseButton }) {
-                Button t = Ui.Button(b.Text, b == jfind.ActionButton);
-                b.FlatStyle = t.FlatStyle; b.Cursor = t.Cursor; b.UseVisualStyleBackColor = false; b.Font = t.Font; b.BackColor = t.BackColor; b.ForeColor = t.ForeColor;
-                b.FlatAppearance.BorderSize = t.FlatAppearance.BorderSize; b.FlatAppearance.BorderColor = t.FlatAppearance.BorderColor;
-                b.FlatAppearance.MouseOverBackColor = t.FlatAppearance.MouseOverBackColor; b.FlatAppearance.MouseDownBackColor = t.FlatAppearance.MouseDownBackColor;
-                t.Dispose();
-            }
-            jfind.HintColor = St.Hint; jfind.GoodColor = St.Good; jfind.BadColor = St.Bad;
-            JurBrowser me = jfind;
-            jfind.CardAction = delegate(JurCard c) { OpenJurSpravka(me, c.Kp, c.Nab); };
-            jfind.Load += delegate { St.Dress(me); St.Fit(me); };
-            // крестик - обратно в меню (окно прячется, ввод остаётся)
-            jfind.FormClosing += delegate(object s, FormClosingEventArgs e) { if (e.CloseReason == CloseReason.UserClosing) { e.Cancel = true; me.Hide(); Return(null); } };
-        }
-        jfind.Show();
-        if (jfind.WindowState == FormWindowState.Minimized) jfind.WindowState = FormWindowState.Normal;
-        jfind.Activate();
-        Hide();
     }
 
     // юр наряд (A4); from - куда вернётся «Назад»

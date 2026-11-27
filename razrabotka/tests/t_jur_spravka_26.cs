@@ -1,6 +1,6 @@
 // Проверка 26.11: «Справка юр» и «Поиск по юр базе» в «Договоре» на вымышленной юр базе (tests/gen_ftu.py). Аргументы: папка программы,
 // png-префикс; T_FTU - путь к ftu.dbf. Подтягивание: договор + карточка (все счётчики), № счётчика (один, с ТТ); причина -> приложения;
-// сохранение справки; поиск: договор/карточка, договор, счётчик, слова.
+// сохранение справки. (Поиск по юр базе - в меню программ: tests/t_menu_jur.cs.)
 using System; using System.Windows.Forms; using System.Reflection; using System.IO; using System.Collections;
 public static class T {
     static BindingFlags BF = BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Public;
@@ -50,15 +50,6 @@ public static class T {
                 s.SetV("meter", "99999999"); s.ByMeter();
                 Console.WriteLine("   " + ((Label)F(s, "found")).Text);
                 s.Clear();
-                s.GoBack();
-                m.OpenJurSearch();
-            } else if (step == 4) {
-                JurBrowser j = (JurBrowser)F(m, "jfind");
-                string[][] q = { new string[] { "11118", "", "0, 2" }, new string[] { "11118/26", "", "1, 7" }, new string[] { "72220001", "", "1, 1" },
-                    new string[] { "", "Полевая 34", "0, 1" }, new string[] { "", "тестстрой офис", "0, 1" }, new string[] { "", "нетакого", "0, 0" } };
-                foreach (string[] x in q) { j.Num = x[0]; j.Words = x[1]; j.Search(); Eq("поиск «" + x[0] + "» + «" + x[1] + "»: уровень, строк", j.Level + ", " + j.Rows, x[2]); }
-                j.Num = ""; j.Words = "Полевая 34"; j.Search();
-                Snap(png + "_find.png");
                 Console.WriteLine(bad == 0 ? "ВСЁ ОК" : "ОШИБОК: " + bad);
                 t.Stop(); Environment.Exit(0);
             }
