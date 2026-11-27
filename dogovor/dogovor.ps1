@@ -21370,6 +21370,10 @@ public class SpravkaForm : Form {
             }
             // справки до 27.11: одна тарифная группа на справку - первому прибору учёта
             if (V("pu1_gruppa").Length == 0 && Get(d, "gruppa").Length > 0) SetV("pu1_gruppa", Get(d, "gruppa"));
+            // данные юр лица (справка из перевода из юр в физ)
+            Dictionary<string, string> jur = new Dictionary<string, string>();
+            foreach (KeyValuePair<string, string> kv in d) if (kv.Key.StartsWith("jur_")) jur[kv.Key.Substring(4)] = kv.Value;
+            if (jur.Count > 0) JurInfo = jur;
             savedFile = Path.Combine(Folder(here), name + ".docx");
             savedId = Get(d, "номер").Length > 0 ? Get(d, "номер") : null;
         } finally { loading = false; }
@@ -21392,6 +21396,8 @@ public class SpravkaForm : Form {
         sb.Append("pu_n=").Append(meters.Count).Append("\r\n");
         for (int i = 1; i <= meters.Count; i++)
             foreach (string k in MeterKeys) sb.Append("pu").Append(i).Append('_').Append(k).Append('=').Append(Memory.Escape(V("pu" + i + "_" + k))).Append("\r\n");
+        // 27.11: справка из перевода из юр в физ - данные юр лица (для справки в РГ и после открытия сохранённой)
+        if (JurInfo != null) foreach (KeyValuePair<string, string> kv in JurInfo) sb.Append("jur_").Append(kv.Key).Append('=').Append(Memory.Escape(kv.Value)).Append("\r\n");
         // для списка сохранённых справок и отчёта пломб - лицевой и адрес первого прибора учёта
         sb.Append("ls=").Append(Memory.Escape(V("pu1_ls"))).Append("\r\n");
         sb.Append("fio=").Append(Memory.Escape(V("pu1_fio"))).Append("\r\n");
@@ -30984,13 +30990,17 @@ public class UdalenieForm : Form {
     // из «Перевода из юр в физ» (или данных юр лица, запомненных справкой): договор, карточка, наименование, объект, адрес, лицевой, счётчики
     public void FromData(Dictionary<string, string> jur, Dictionary<string, string> spravka) {
         Clear();
+        string found = null;
         loading = true;
         try {
             if (spravka != null) {
-                SetV("ls", BaseLink.Nab(Get(spravka, "pu1_ls")));
-                SetV("adres", Get(spravka, "pu1_adres"));
                 int n;
                 if (!int.TryParse(Get(spravka, "pu_n"), out n)) n = 1;
+                // 27.11: лицевые всех приборов учёта справки - через запятую (одинаковые - один раз)
+                List<string> lss = new List<string>();
+                for (int i = 1; i <= n; i++) { string l = BaseLink.Nab(Get(spravka, "pu" + i + "_ls")); if (l.Length > 0 && !lss.Contains(l)) lss.Add(l); }
+                SetV("ls", string.Join(", ", lss.ToArray()));
+                SetV("adres", Get(spravka, "pu1_adres"));
                 List<string> lines = new List<string>();
                 for (int i = 1; i <= n; i++) {
                     string p = "pu" + i + "_";
@@ -31010,13 +31020,37 @@ public class UdalenieForm : Form {
                     if (Get(jur, "pu").Length > 0) SetV("pu", Get(jur, "pu"));
                 }
             }
+            // 27.11: данных юр лица нет (справку открыли из сохранённых, вписали руками) - договор, карточка, наименование, объект
+            // из юр базы по номерам счётчиков
+            if (V("kp").Length == 0) found = FromJurBase();
         } finally { loading = false; }
         dirty = true;
         LayoutCards();
         head.Text = ("Справка в РГ " + V("kp") + (V("nab").Length > 0 ? "/" + V("nab") : "")).Trim();
         headSub.ForeColor = St.Hint;
-        headSub.Text = (jur != null ? "Заполнено из перевода из юр в физ" : "Заполнено из справки") + " - проверьте показания и наименование юр лица";
+        headSub.Text = (jur != null ? "Заполнено из перевода из юр в физ" : found != null ? "Заполнено из справки, юр лицо - из юр базы (" + found + ")" : "Заполнено из справки") +
+            " - проверьте показания и наименование юр лица";
         RefreshState();
+    }
+
+    // договор, карточка, наименование юр лица, объект - из юр базы по номеру счётчика (первый найденный); null - не нашлось
+    string FromJurBase() {
+        try {
+            for (int i = 0; i < pu.Count; i++) {
+                string no = pu.Cell(i, 1);
+                if (no.Length < 4) continue;
+                List<JurRow> r = JurIndex.ByMeter(no);
+                if (r.Count == 0) continue;
+                JurRow x = r[0];
+                SetV("kp", x.Kp);
+                SetV("nab", x.Nab);
+                SetV("dog_name", x.Contract);
+                string ob = ObjectOf(x.Abon);
+                if (ob.Length > 0) SetV("obekt", ob);
+                return "счётчик № " + x.Meter;
+            }
+        } catch { }
+        return null;
     }
 
     void OpenSaved() {
