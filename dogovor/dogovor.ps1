@@ -20348,7 +20348,7 @@ public class SpravkaForm : Form {
     static readonly string[] AddrKeys = { "np_tip", "np", "ulica_tip", "ulica", "dom", "korp", "kv" };
     // общие с предыдущим прибором учёта (кнопка «Взять общие предыдущего»): лицевой, адрес, Ф.И.О. с телефоном
     static readonly string[] CommonKeys = { "fio", "tel", "ls", "np_tip", "np", "ulica_tip", "ulica", "dom", "korp", "kv", "adres" };
-    static readonly string[] MeterKeys = { "fio", "tel", "ls", "np_tip", "np", "ulica_tip", "ulica", "dom", "korp", "kv", "adres", "model", "korpus", "modif", "tip", "zav", "pokaz", "pov" };
+    static readonly string[] MeterKeys = { "fio", "tel", "ls", "np_tip", "np", "ulica_tip", "ulica", "dom", "korp", "kv", "adres", "model", "korpus", "modif", "tip", "zav", "pokaz", "pov", "gruppa" };
     public StartMenu Home;
     public Form Back;                     // куда «Назад»: меню или окно договора
     bool loading, dirty;
@@ -20361,7 +20361,7 @@ public class SpravkaForm : Form {
     // строки под таблицей, которые можно отключить галочкой: галочка -> поля этой строки
     static readonly string[][] LineKeys = {
         new string[] { "on_egrni", "svid", "vlad" }, new string[] { "on_mesto", "mesto", "prinadl" }, new string[] { "on_zakl", "zakl" },
-        new string[] { "on_gruppa", "gruppa" }, new string[] { "on_reg", "reg" }, new string[] { "on_plomby" } };
+        new string[] { "on_gruppa" }, new string[] { "on_reg", "reg" }, new string[] { "on_plomby" } };
 
     public bool Unsaved { get { return dirty; } }
 
@@ -20563,7 +20563,9 @@ public class SpravkaForm : Form {
         Label pl = Ui.Caption("номера - в разделе «Пломбы» выше (ВА, КК, другие); нет пломб - строки нет");
         pl.TextAlign = ContentAlignment.MiddleLeft;
         c.Grid.Row(F(null, X("on_plomby", "«Пломбы: …»"), box), F(null, pl, 0));
-        c.Grid.Row(F(null, X("on_gruppa", "Тарифная группа"), box), F("Тарифная группа", C("gruppa", true, null), 0));
+        Label gr = Ui.Caption("выбирается у каждого прибора учёта (раздел ПУ); несколько ПУ - строка на каждый: «ПУ 1 - ...», «ПУ 2 - ...»");
+        gr.TextAlign = ContentAlignment.MiddleLeft;
+        c.Grid.Row(F(null, X("on_gruppa", "Тарифная группа"), box), F(null, gr, 0));
         c.Grid.Row(F(null, X("on_reg", "«Регистрация …»"), box), F("Регистрация", T("reg", "пусто - линия, вписать от руки"), 0));
         TextBox own = Ui.Text(3);
         Reg("svoy", own);
@@ -20592,6 +20594,8 @@ public class SpravkaForm : Form {
         m.Grid.Row(Line());
         m.Grid.Row(MF(m, "zav", "Номер", MT(m, "zav", null), 14), MF(m, "pokaz", "Показания", MT(m, "pokaz", null), 12),
             MF(m, "pov", "Поверка (год-квартал)", MT(m, "pov", "2025-2"), 10));
+        // 27.11: тарифная группа - у каждого прибора учёта своя (в справке строка на каждый ПУ: «ПУ 1 - ...», «ПУ 2 - ...»)
+        m.Grid.Row(MF(m, "gruppa", "Тарифная группа этого ПУ (строка в справке; галочка «Тарифная группа» - в «Тексте справки»)", MC(m, "gruppa"), 0));
         m.Pick = new MeterPick(lists, (Combo)m.Ctl["model"], (Combo)m.Ctl["korpus"], (Combo)m.Ctl["modif"], (TextBox)m.Ctl["tip"]);
         // списки модели, корпуса и модификации меняются на ходу - без автодополнения Windows (с ним зависало и вылетало)
         foreach (string k in new string[] { "model", "korpus", "modif" }) ((Combo)m.Ctl[k]).NoAutoComplete();
@@ -20808,6 +20812,7 @@ public class SpravkaForm : Form {
             ((Combo)m.Ctl["ulica_tip"]).SetItems(lists.Get("Тип улицы"));
             ((Combo)m.Ctl["np"]).SetItems(memory.Hist("нп"));
             ((Combo)m.Ctl["ulica"]).SetItems(memory.Hist("улица"));
+            ((Combo)m.Ctl["gruppa"]).SetItems(lists.Get("Тарифная группа"));
             m.Pick.Refresh(false);
         } finally { loading = was; }
     }
@@ -20894,7 +20899,6 @@ public class SpravkaForm : Form {
             Items("prinadl", lists.Get("Справка: чья собственность"));
             Items("vlad", new List<string>(new string[] { "1 владелец", "2 владельца", "3 владельца", "4 владельца", "5 владельцев" }));
             Items("zakl", lists.Get("Справка: заключение"));
-            Items("gruppa", lists.Get("Тарифная группа"));
             ((Seals)inp["plomba_drugoe"]).SetPlaces(lists.Get("Места пломб"));
             foreach (MeterBlock m in meters) MeterLists(m);
         } finally { loading = was; }
@@ -20922,6 +20926,8 @@ public class SpravkaForm : Form {
                 c.BackColor = on ? St.Input : St.Disabled;
             }
         }
+        bool gOn = V("on_gruppa") == "1";
+        foreach (MeterBlock mb in meters) { Control gc; if (mb.Ctl.TryGetValue("gruppa", out gc)) { gc.Enabled = gOn; gc.BackColor = gOn ? St.Input : St.Disabled; } }
     }
 
     // какие строки отключены (для следующих справок): «on_zakl,on_reg»
@@ -21237,7 +21243,7 @@ public class SpravkaForm : Form {
             if (m.Length > 0) SetV("mesto", m);
             string own = Get(d, "pu1_prinadl");
             if (own.Length > 0) SetV("prinadl", own == "Потребитель" ? "собственности абонента" : "собственности " + own);
-            if (Get(d, "pu1_gruppa").Length > 0) SetV("gruppa", Get(d, "pu1_gruppa"));
+            for (int i = 1; i <= meters.Count; i++) if (Get(d, "pu" + i + "_gruppa").Length > 0) SetV("pu" + i + "_gruppa", Get(d, "pu" + i + "_gruppa"));
             if (Get(d, "oformil").Length > 0) SetV("inzh", Get(d, "oformil"));
             if (Get(d, "podp").Length > 0) SetV("nach", Get(d, "podp"));
             savedFile = null;
@@ -21349,6 +21355,8 @@ public class SpravkaForm : Form {
                 mb.AutoAdres = AddressOf(mb);
                 mb.Pick.Loaded();
             }
+            // справки до 27.11: одна тарифная группа на справку - первому прибору учёта
+            if (V("pu1_gruppa").Length == 0 && Get(d, "gruppa").Length > 0) SetV("pu1_gruppa", Get(d, "gruppa"));
             savedFile = Path.Combine(Folder(here), name + ".docx");
             savedId = Get(d, "номер").Length > 0 ? Get(d, "номер") : null;
         } finally { loading = false; }
@@ -21430,8 +21438,16 @@ public class SpravkaForm : Form {
         v["ПРИНАДЛЕЖНОСТЬ"] = V("prinadl").Length > 0 ? V("prinadl") : "собственности __________";
         string z = V("zakl");
         v["ЗАКЛЮЧЕНИЕ"] = z.Length > 0 ? z : DocxTemplate.Drop;
-        string g = V("gruppa");
-        v["ГРУППА"] = g.Length == 0 ? DocxTemplate.Drop : !g.EndsWith(".") ? g + "." : g;
+        // тарифная группа: один ПУ - строкой; несколько - строка на каждый ПУ («ПУ 1 - ...», «ПУ 2 - ...»)
+        List<string> gl = new List<string>();
+        bool anyG = false;
+        for (int i = 1; i <= meters.Count; i++) {
+            string gi = V("pu" + i + "_gruppa").Trim();
+            if (gi.Length > 0) anyG = true;
+            if (gi.Length > 0 && !gi.EndsWith(".")) gi += ".";
+            gl.Add(meters.Count > 1 ? "ПУ " + i + " - " + (gi.Length > 0 ? gi : "______________________________") : gi);
+        }
+        v["ГРУППА"] = !anyG ? DocxTemplate.Drop : meters.Count > 1 ? "\n" + string.Join("\n", gl.ToArray()) : gl[0];
         string pl = SealsText();
         v["ПЛОМБЫ"] = pl.Length > 0 ? pl : DocxTemplate.Drop;
         v["РЕГИСТРАЦИЯ"] = V("reg").Length > 0 ? V("reg") : line;
@@ -21841,6 +21857,9 @@ public class MeterPick {
             Refresh(false);
             autoTip = Full();
             if (tip.Text.Trim().Length == 0) tip.Text = autoTip;
+            // 27.11: тип подставлен (из договора, базы юр лиц, сохранённой справки) - выбор модели, корпуса, модификации его меняет
+            // (раньше подставленный тип, не совпавший с частями, считался вписанным руками и больше не менялся)
+            else autoTip = tip.Text.Trim();
         } finally { busy = false; }
     }
 }
