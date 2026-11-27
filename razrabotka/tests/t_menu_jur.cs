@@ -1,4 +1,4 @@
-// Проверка 26.11: меню программ - строка «Поиск быт | Поиск юр», окно «Поиск юр» по вымышленной юр базе (tests/gen_ftu.py, T_FTU).
+// Проверка 26.11 (27.11 - карточки -> точки учёта -> счётчик): меню программ - строка «Поиск быт | Поиск юр», окно «Поиск юр» по вымышленной юр базе (tests/gen_ftu.py, T_FTU).
 // Аргументы: папка меню, png-префикс.
 using System; using System.Windows.Forms; using System.Reflection;
 public static class T {
@@ -24,12 +24,22 @@ public static class T {
                 Snap(png + "_menu.png");
                 m.GetType().GetMethod("OpenJurFind", BF).Invoke(m, null);
             } else if (step == 2) {
-                JurFindForm j = (JurFindForm)F(m, "jurFind");
-                string[][] q = { new string[] { "11118/26", "", "7" }, new string[] { "11118", "", "8" }, new string[] { "72220001", "", "1" },
-                    new string[] { "", "Полевая 34", "7" }, new string[] { "", "пример садовая", "1" }, new string[] { "11118", "кв 12", "2" } };
-                foreach (string[] x in q) { j.Num = x[0]; j.Words = x[1]; j.Search(); Eq("поиск «" + x[0] + "» + «" + x[1] + "»", j.Found.ToString(), x[2]); }
-                j.Num = ""; j.Words = "Полевая 34"; j.Search();
-                Snap(png + "_find.png");
+                JurBrowser j = (JurBrowser)F(m, "jurFind");
+                // запрос -> уровень (0 - карточки, 1 - точки учёта карточки) и сколько строк
+                string[][] q = { new string[] { "11118", "", "0", "2" }, new string[] { "11118/26", "", "1", "7" }, new string[] { "72220001", "", "1", "1" },
+                    new string[] { "", "Полевая 34", "0", "1" }, new string[] { "", "Садовая", "0", "1" }, new string[] { "11118", "Лесная", "0", "1" }, new string[] { "", "нетакого", "0", "0" } };
+                foreach (string[] x in q) { j.Num = x[0]; j.Words = x[1]; j.Search(); Eq("«" + x[0] + "» + «" + x[1] + "»: уровень, строк", j.Level + ", " + j.Rows, x[2] + ", " + x[3]); }
+                j.Num = "11118"; j.Words = ""; j.Search();
+                Snap(png + "_cards.png");
+                j.Select(0); j.Down();
+                Eq("карточка 11118/26 -> точки учёта", j.Level + ", " + j.Rows, "1, 7");
+                Console.WriteLine("   " + j.PathText);
+                Snap(png + "_points.png");
+                j.Select(2); j.Down();
+                Eq("точка -> данные счётчика", j.Level + ", " + j.Cell(0, 0) + " = " + j.Cell(0, 1), "2, Договор = 11118");
+                Snap(png + "_meter.png");
+                j.Up(); Eq("назад - точки учёта", j.Level.ToString(), "1");
+                j.Up(); Eq("назад - карточки", j.Level + ", " + j.Rows, "0, 2");
                 Console.WriteLine(bad == 0 ? "ВСЁ ОК" : "ОШИБОК: " + bad);
                 t.Stop(); Environment.Exit(0);
             }

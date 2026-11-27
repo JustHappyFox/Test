@@ -53,10 +53,10 @@ public static class T {
                 s.GoBack();
                 m.OpenJurSearch();
             } else if (step == 4) {
-                JurSearchForm j = (JurSearchForm)F(m, "jfind");
-                string[][] q = { new string[] { "11118/26", "", "7" }, new string[] { "11118", "", "8" }, new string[] { "72220001", "", "1" },
-                    new string[] { "", "Полевая 34", "7" }, new string[] { "", "тестстрой офис", "1" }, new string[] { "11118", "кв 12", "2" }, new string[] { "", "нетакого", "0" } };
-                foreach (string[] x in q) { j.Num = x[0]; j.Words = x[1]; j.Search(); Eq("поиск «" + x[0] + "» + «" + x[1] + "»", j.Found.ToString(), x[2]); }
+                JurBrowser j = (JurBrowser)F(m, "jfind");
+                string[][] q = { new string[] { "11118", "", "0, 2" }, new string[] { "11118/26", "", "1, 7" }, new string[] { "72220001", "", "1, 1" },
+                    new string[] { "", "Полевая 34", "0, 1" }, new string[] { "", "тестстрой офис", "0, 1" }, new string[] { "", "нетакого", "0, 0" } };
+                foreach (string[] x in q) { j.Num = x[0]; j.Words = x[1]; j.Search(); Eq("поиск «" + x[0] + "» + «" + x[1] + "»: уровень, строк", j.Level + ", " + j.Rows, x[2]); }
                 j.Num = ""; j.Words = "Полевая 34"; j.Search();
                 Snap(png + "_find.png");
                 Console.WriteLine(bad == 0 ? "ВСЁ ОК" : "ОШИБОК: " + bad);

@@ -1423,7 +1423,16 @@ public class JurRow {
     public string Kp = "", Nab = "", Contract = "", Abon = "", Point = "", Meter = "", Type = "", Poverka = "", Amper = "", Volt = "",
         Faza = "", Ktt = "", Raen = "";
     public string Hay = "";       // для поиска по словам: всё строчными
+    public Dictionary<string, string> Fields = new Dictionary<string, string>();   // все непустые поля строки (имя поля -> значение)
 
+    public string Card { get { return Kp + (Nab.Length > 0 ? "/" + Nab : ""); } }
+}
+
+// карточка договора (договор + карточка) с её точками учёта
+public class JurCard {
+    public string Kp = "", Nab = "", Contract = "", Abon = "", Raen = "";
+    public readonly List<JurRow> Points = new List<JurRow>();
+    public string Hay = "";
     public string Card { get { return Kp + (Nab.Length > 0 ? "/" + Nab : ""); } }
 }
 
@@ -1458,6 +1467,8 @@ public static class JurIndex {
                 x.Volt = Num(Cell(cells, col, "VOLT")); x.Faza = Num(Cell(cells, col, "FAZA")); x.Ktt = Num(Cell(cells, col, "KTT")); x.Raen = Cell(cells, col, "RAEN");
                 if (x.Poverka == "-") x.Poverka = "";
                 if (x.Kp.Length == 0 && x.Meter.Length == 0) return;
+                for (int i = 0; i < h.Length && i < cells.Length; i++)
+                    if (h[i] != null && cells[i] != null && cells[i].Trim().Length > 0) x.Fields[h[i].Trim().ToUpperInvariant()] = cells[i].Trim();
                 x.Hay = Low(x.Contract + " " + x.Abon + " " + x.Point + " " + x.Raen + " " + x.Type + " " + x.Meter + " " + x.Kp + "/" + x.Nab);
                 r.Add(x);
             });
@@ -1540,6 +1551,81 @@ public static class JurIndex {
         return r;
     }
 
+    // 27.11: поиск карточками - договор: все его карточки; договор/карточка - она; № счётчика - карточки с этим счётчиком;
+    // слова (адрес, название) - карточки, где есть все слова (в наименовании, абоненте, районе или точках учёта)
+    public static List<JurCard> Cards(string num, string text, int max) {
+        List<JurCard> r = new List<JurCard>();
+        num = (num ?? "").Trim();
+        string kp = "", nab = "", digits = "";
+        System.Text.RegularExpressions.Match m = System.Text.RegularExpressions.Regex.Match(num, @"^(\d{1,7})\s*[/\\\-\s]\s*(\d{1,6})$");
+        if (m.Success) { kp = m.Groups[1].Value; nab = m.Groups[2].Value; }
+        else if (System.Text.RegularExpressions.Regex.IsMatch(num, @"^\d+$")) digits = num;
+        else if (num.Length > 0) text = (num + " " + text).Trim();
+        List<string> words = new List<string>();
+        foreach (string w in Low(text).Split(new char[] { ' ' }, StringSplitOptions.RemoveEmptyEntries)) words.Add(w);
+        if (kp.Length == 0 && digits.Length == 0 && words.Count == 0) return r;
+        // цифры: есть такой договор - его карточки, нет - счётчик (от 4 цифр)
+        bool isContract = false;
+        if (digits.Length > 0) foreach (JurRow x in All()) if (SameNum(x.Kp, digits)) { isContract = true; break; }
+        string part = digits.TrimStart('0').Length > 0 ? digits.TrimStart('0') : digits;
+        Dictionary<string, JurCard> byKey = new Dictionary<string, JurCard>();
+        List<JurCard> order = new List<JurCard>();
+        Dictionary<string, bool> meterHit = new Dictionary<string, bool>();
+        foreach (JurRow x in All()) {
+            if (kp.Length > 0 && !(SameNum(x.Kp, kp) && SameNum(x.Nab, nab))) continue;
+            if (digits.Length > 0 && isContract && !SameNum(x.Kp, digits)) continue;
+            string key = x.Kp + "/" + x.Nab;
+            JurCard c;
+            if (!byKey.TryGetValue(key, out c)) {
+                c = new JurCard(); c.Kp = x.Kp; c.Nab = x.Nab; c.Contract = x.Contract; c.Abon = x.Abon; c.Raen = x.Raen;
+                byKey[key] = c; order.Add(c);
+            }
+            c.Points.Add(x);
+            c.Hay += x.Hay;
+            if (digits.Length > 0 && !isContract && digits.Length >= 4 && x.Meter.Contains(part)) meterHit[key] = true;
+        }
+        foreach (JurCard c in order) {
+            if (digits.Length > 0 && !isContract && !meterHit.ContainsKey(c.Kp + "/" + c.Nab)) continue;
+            bool all = true;
+            foreach (string w in words) if (c.Hay.IndexOf(w, StringComparison.Ordinal) < 0) { all = false; break; }
+            if (!all) continue;
+            r.Add(c);
+            if (r.Count >= max) break;
+        }
+        r.Sort(delegate(JurCard a, JurCard b) {
+            long ka, kb, na, nb;
+            long.TryParse(a.Kp, out ka); long.TryParse(b.Kp, out kb); long.TryParse(a.Nab, out na); long.TryParse(b.Nab, out nb);
+            return ka != kb ? ka.CompareTo(kb) : na.CompareTo(nb);
+        });
+        return r;
+    }
+
+    // названия полей юр базы для «данных счётчика» (незнакомые - как в базе)
+    public static readonly string[][] FieldNames = {
+        new string[] { "KP", "Договор" }, new string[] { "NAB", "Карточка" }, new string[] { "NP", "Наименование договора" },
+        new string[] { "NAB_NAIM", "Абонент (объект, адрес)" }, new string[] { "NAIM", "Точка учёта" }, new string[] { "NST", "№ счётчика" },
+        new string[] { "TIPSCH", "Тип счётчика" }, new string[] { "VID", "Вид счётчика" }, new string[] { "FAZA", "Фазность" },
+        new string[] { "AMPER", "Ток, А" }, new string[] { "VOLT", "Напряжение, В" }, new string[] { "GODEN", "Поверка (год-квартал)" },
+        new string[] { "SHKALA", "Разрядность (шкала)" }, new string[] { "KTT", "Коэффициент ТТ" }, new string[] { "KTU", "KTU" },
+        new string[] { "KPOTR", "KPOTR" }, new string[] { "NT1", "NT1" }, new string[] { "NT2", "NT2" }, new string[] { "NT3", "NT3" },
+        new string[] { "NAPR", "NAPR" }, new string[] { "ASKUE", "АСКУЭ" }, new string[] { "BAL", "Баланс" }, new string[] { "NAIM_RES", "РЭС" },
+        new string[] { "KOD_TP", "Код ТП" }, new string[] { "NAIM_TP", "ТП" }, new string[] { "ADR_TP", "Адрес ТП" }, new string[] { "RAEN", "Район" },
+        new string[] { "GRUP", "GRUP" }, new string[] { "UROV", "UROV" } };
+
+    // данные счётчика: известные поля по порядку, потом остальные
+    public static List<string[]> Details(JurRow x) {
+        List<string[]> r = new List<string[]>();
+        Dictionary<string, bool> done = new Dictionary<string, bool>();
+        foreach (string[] f in FieldNames) {
+            done[f[0]] = true;
+            string v;
+            if (x.Fields.TryGetValue(f[0], out v) && v.Length > 0) r.Add(new string[] { f[1], f[0] == "NP" ? Quotes(v) : v });
+            if (f[0] == "NAB_NAIM") { string a = AddressOf(x); if (a.Length > 0) r.Add(new string[] { "Адрес (собран)", a }); }
+        }
+        foreach (KeyValuePair<string, string> kv in x.Fields) if (!done.ContainsKey(kv.Key)) r.Add(new string[] { kv.Key, kv.Value });
+        return r;
+    }
+
     // «Нераспроданные квартиры п.Макетино,ул.Полевая,34» -> «п. Макетино, ул. Полевая, 34»; район - спереди
     public static string AddressOf(JurRow x) {
         string a = x.Abon ?? "";
@@ -1567,4 +1653,228 @@ public static class JurIndex {
     }
 }
 
+
+// 27.11: окно поиска по юр базе - одно для меню программ и «Договора». Список карточек (договор - все его карточки, адрес -
+// только нужные) -> двойной щелчок: точки учёта карточки -> двойной щелчок: данные счётчика. «← Назад» / Backspace - уровень вверх.
+// Оформление (тема, шрифты, кнопки) - программа после создания (Look / St), здесь - только устройство окна.
+public delegate void JurCardAction(JurCard c);
+
+public class JurBrowser : Form {
+    readonly TextBox num = new TextBox(), words = new TextBox();
+    readonly ListView list = new ListView();
+    readonly Timer delay = new Timer();
+    public readonly Label TitleLabel = new Label(), Caption1 = new Label(), Caption2 = new Label(), PathLabel = new Label(), Info = new Label();
+    public readonly Button BackButton = new Button(), CopyButton = new Button(), ActionButton = new Button(), CloseButton = new Button();
+    public JurCardAction CardAction;          // «Справка юр по карточке» («Договор»); null - кнопки нет
+    public Color HintColor = Color.Gray, GoodColor = Color.Green, BadColor = Color.Firebrick;
+    int level;                                // 0 - карточки, 1 - точки учёта карточки, 2 - данные счётчика
+    Panel topPanel;
+    List<JurCard> cards = new List<JurCard>();
+    JurCard card;
+    JurRow point;
+
+    public JurBrowser() {
+        Text = "Поиск юр - по юр базе";
+        StartPosition = FormStartPosition.CenterScreen;
+        Rectangle wa = Screen.PrimaryScreen.WorkingArea;
+        Size = new Size(Math.Min(1240, wa.Width), Math.Min(780, wa.Height));
+        MinimumSize = new Size(Math.Min(860, wa.Width), Math.Min(480, wa.Height));
+        KeyPreview = true;
+        Panel top = new Panel();
+        top.Dock = DockStyle.Top;
+        top.Height = 120;
+        TitleLabel.Text = "Поиск юр";
+        TitleLabel.Font = new Font("Segoe UI", 16f, FontStyle.Bold);
+        TitleLabel.AutoSize = true;
+        TitleLabel.Location = new Point(18, 6);
+        Caption1.Text = "Договор, договор/карточка (11118/26) или № счётчика";
+        Caption2.Text = "Адрес, название, точка учёта - слова через пробел";
+        num.Font = words.Font = new Font("Segoe UI", 11f);
+        PathLabel.Font = new Font("Segoe UI", 10f, FontStyle.Bold);
+        PathLabel.AutoEllipsis = true;
+        BackButton.Text = "← Назад";
+        BackButton.Click += delegate { Up(); };
+        top.Controls.AddRange(new Control[] { TitleLabel, Caption1, Caption2, num, words, BackButton, PathLabel });
+        topPanel = top;
+        top.Resize += delegate { PlaceTop(); };
+        list.Dock = DockStyle.Fill;
+        list.View = View.Details;
+        list.FullRowSelect = true;
+        list.HideSelection = false;
+        list.MultiSelect = false;
+        list.GridLines = true;
+        list.DoubleClick += delegate { Down(); };
+        list.Resize += delegate { FillLast(); };
+        list.KeyDown += delegate(object s, KeyEventArgs e) {
+            if (e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; e.Handled = true; Down(); }
+            else if (e.KeyCode == Keys.Back) { e.SuppressKeyPress = true; e.Handled = true; Up(); }
+        };
+        Panel bottom = new Panel();
+        bottom.Dock = DockStyle.Bottom;
+        bottom.Height = 58;
+        CopyButton.Text = "Копировать";
+        CopyButton.Click += delegate { Copy(); };
+        ActionButton.Text = "Справка юр по карточке";
+        ActionButton.Click += delegate { JurCard c = card ?? Selected(); if (c != null && CardAction != null) CardAction(c); };
+        CloseButton.Text = "Закрыть";
+        CloseButton.Click += delegate { Close(); };
+        Info.AutoEllipsis = true;
+        bottom.Controls.AddRange(new Control[] { CopyButton, ActionButton, CloseButton, Info });
+        bottom.Resize += delegate {
+            CloseButton.SetBounds(bottom.ClientSize.Width - 18 - 110, 11, 110, 36);
+            ActionButton.SetBounds(CloseButton.Left - 10 - 220, 11, 220, 36);
+            int left = ActionButton.Visible ? ActionButton.Left : CloseButton.Left;
+            CopyButton.SetBounds(left - 10 - 140, 11, 140, 36);
+            Info.SetBounds(18, 11, Math.Max(10, CopyButton.Left - 32), 36);
+        };
+        Controls.Add(list);
+        Controls.Add(top);
+        Controls.Add(bottom);
+        delay.Interval = 350;
+        delay.Tick += delegate { delay.Stop(); Search(); };
+        num.TextChanged += delegate { delay.Stop(); delay.Start(); };
+        words.TextChanged += delegate { delay.Stop(); delay.Start(); };
+        KeyDown += delegate(object s, KeyEventArgs e) {
+            if (e.KeyCode == Keys.Escape) { e.SuppressKeyPress = true; if (level > 0) Up(); else Close(); }
+            else if (e.KeyCode == Keys.Enter && (ActiveControl == num || ActiveControl == words)) {
+                e.SuppressKeyPress = true; delay.Stop(); Search();
+                if (list.Items.Count > 0) { list.Focus(); list.Items[0].Selected = true; list.Items[0].Focused = true; }
+            }
+        };
+        Load += delegate { ActionButton.Visible = CardAction != null; ShowLevel(); };
+        Shown += delegate { Hint(); num.Focus(); };
+    }
+
+    void PlaceTop() {
+        Panel top = topPanel;
+        int w = (top.ClientSize.Width - 56) / 2;
+        Caption1.SetBounds(18, 42, w, 18);
+        num.SetBounds(18, 60, w, 26);
+        Caption2.SetBounds(38 + w, 42, w, 18);
+        words.SetBounds(38 + w, 60, w, 26);
+        BackButton.SetBounds(18, 90, 110, 28);
+        int x = BackButton.Visible ? 138 : 18;
+        PathLabel.SetBounds(x, 94, Math.Max(10, top.ClientSize.Width - x - 18), 22);
+    }
+
+    public string Num { get { return num.Text; } set { num.Text = value; } }
+    public string Words { get { return words.Text; } set { words.Text = value; } }
+    public int Level { get { return level; } }
+    public int Rows { get { return list.Items.Count; } }
+    public string PathText { get { return PathLabel.Text; } }
+    public string InfoText { get { return Info.Text; } }
+    public void Select(int i) { if (i < list.Items.Count) { list.SelectedItems.Clear(); list.Items[i].Selected = true; list.Items[i].Focused = true; } }
+    public string Cell(int row, int col) { return row < list.Items.Count && col < list.Items[row].SubItems.Count ? list.Items[row].SubItems[col].Text : ""; }
+
+    void Say(string text, Color c) { Info.Text = text; Info.ForeColor = c; }
+
+    void Hint() {
+        try { Say("В юр базе точек учёта: " + JurIndex.All().Count + ". Впишите договор, № счётчика или адрес - список карточек сразу.", HintColor); }
+        catch (Exception ex) { Say("Юр база не открылась: " + ex.Message, BadColor); }
+    }
+
+    public void Search() {
+        level = 0; card = null; point = null;
+        cards = new List<JurCard>();
+        if (num.Text.Trim().Length == 0 && words.Text.Trim().Length == 0) { ShowLevel(); Hint(); return; }
+        try { cards = JurIndex.Cards(num.Text, words.Text, 500); }
+        catch (Exception ex) { ShowLevel(); Say("Юр база не открылась: " + ex.Message, BadColor); return; }
+        ShowLevel();
+        // номер счётчика или договор/карточка - одна карточка: сразу её точки учёта (счётчик - выделен)
+        string n = num.Text.Trim();
+        if (cards.Count == 1 && words.Text.Trim().Length == 0 && n.Length > 0) {
+            card = cards[0];
+            level = 1;
+            ShowLevel();
+            string d = System.Text.RegularExpressions.Regex.Replace(n, @"\D", "");
+            for (int i = 0; i < card.Points.Count; i++)
+                if (d.Length >= 4 && card.Points[i].Meter.Contains(d.TrimStart('0').Length > 0 ? d.TrimStart('0') : d)) { Select(i); list.EnsureVisible(i); break; }
+        }
+    }
+
+    JurCard Selected() {
+        if (level != 0) return card;
+        ListViewItem it = list.SelectedItems.Count > 0 ? list.SelectedItems[0] : list.Items.Count == 1 ? list.Items[0] : null;
+        return it == null ? null : it.Tag as JurCard;
+    }
+
+    public void Down() {
+        ListViewItem it = list.SelectedItems.Count > 0 ? list.SelectedItems[0] : null;
+        if (it == null) return;
+        if (level == 0 && it.Tag is JurCard) { card = (JurCard)it.Tag; level = 1; ShowLevel(); if (list.Items.Count > 0) Select(0); }
+        else if (level == 1 && it.Tag is JurRow) { point = (JurRow)it.Tag; level = 2; ShowLevel(); }
+    }
+
+    public void Up() {
+        if (level == 2) { level = 1; JurRow was = point; point = null; ShowLevel(); if (card != null) Select(card.Points.IndexOf(was)); }
+        else if (level == 1) { JurCard was = card; level = 0; card = null; ShowLevel(); Select(cards.IndexOf(was)); }
+        list.Focus();
+    }
+
+    void Columns(string[] caps, int[] ws) {
+        list.Columns.Clear();
+        for (int i = 0; i < caps.Length; i++) list.Columns.Add(caps[i], ws[i]);
+    }
+
+    // последний столбец - до правого края (иначе справа от шапки - пустая светлая полоса)
+    void FillLast() {
+        if (list.Columns.Count == 0) return;
+        int used = 0;
+        for (int i = 0; i < list.Columns.Count - 1; i++) used += list.Columns[i].Width;
+        int room = list.ClientSize.Width - used - 2;
+        ColumnHeader last = list.Columns[list.Columns.Count - 1];
+        if (room > last.Width) last.Width = room;
+    }
+
+    void ShowLevel() {
+        list.BeginUpdate();
+        try {
+            list.Items.Clear();
+            if (level == 0) {
+                Columns(new string[] { "Договор", "Карт.", "Наименование договора", "Абонент (объект, адрес)", "Точек учёта", "Район" }, new int[] { 80, 60, 260, 470, 100, 140 });
+                foreach (JurCard c in cards) {
+                    ListViewItem it = new ListViewItem(new string[] { c.Kp, c.Nab, c.Contract, c.Abon, c.Points.Count.ToString(), c.Raen });
+                    it.Tag = c;
+                    list.Items.Add(it);
+                }
+                Dictionary<string, bool> dogs = new Dictionary<string, bool>();
+                foreach (JurCard c in cards) dogs[c.Kp] = true;
+                PathLabel.Text = cards.Count == 0 ? "" : "Карточки: " + cards.Count + ", договоров: " + dogs.Count;
+                if (num.Text.Trim().Length > 0 || words.Text.Trim().Length > 0)
+                    Say(cards.Count == 0 ? "Ничего не нашлось - проверьте номер или уберите лишнее слово." :
+                        "Двойной щелчок (или Enter) по карточке - её точки учёта." + (cards.Count >= 500 ? " Показаны первые 500 карточек." : ""), cards.Count == 0 ? BadColor : HintColor);
+            } else if (level == 1 && card != null) {
+                Columns(new string[] { "№", "Точка учёта", "Тип счётчика", "№ счётчика", "Поверка", "I, А", "U, В", "Ктт" }, new int[] { 40, 260, 200, 130, 90, 80, 70, 60 });
+                for (int i = 0; i < card.Points.Count; i++) {
+                    JurRow x = card.Points[i];
+                    ListViewItem it = new ListViewItem(new string[] { (i + 1).ToString(), x.Point, x.Type, x.Meter, x.Poverka, x.Amper, x.Volt, x.Ktt });
+                    it.Tag = x;
+                    list.Items.Add(it);
+                }
+                PathLabel.Text = "Договор " + card.Card + " - " + card.Contract + " - " + card.Abon;
+                Say("Точек учёта: " + card.Points.Count + ". Двойной щелчок (или Enter) по точке - данные счётчика; Backspace - к карточкам.", HintColor);
+            } else if (level == 2 && point != null) {
+                Columns(new string[] { "Что", "Значение" }, new int[] { 260, 760 });
+                foreach (string[] d in JurIndex.Details(point)) list.Items.Add(new ListViewItem(d));
+                PathLabel.Text = "Договор " + point.Card + " - " + point.Point + " - счётчик № " + point.Meter;
+                Say("Данные счётчика из юр базы. Backspace - к точкам учёта карточки.", HintColor);
+            }
+        } finally { list.EndUpdate(); }
+        BackButton.Visible = level > 0;
+        ActionButton.Visible = CardAction != null;
+        if (topPanel != null) PlaceTop();
+        FillLast();
+    }
+
+    void Copy() {
+        StringBuilder sb = new StringBuilder();
+        if (level == 2) foreach (ListViewItem it in list.Items) sb.Append(it.SubItems[0].Text).Append(": ").Append(it.SubItems[1].Text).Append("\r\n");
+        else if (list.SelectedItems.Count > 0) {
+            ListViewItem it = list.SelectedItems[0];
+            for (int i = 0; i < it.SubItems.Count; i++) sb.Append(i > 0 ? "; " : "").Append(list.Columns[i].Text).Append(": ").Append(it.SubItems[i].Text);
+        }
+        if (sb.Length == 0) return;
+        try { Clipboard.SetText(sb.ToString()); Say("Скопировано в буфер обмена.", GoodColor); } catch { }
+    }
+}
 // ==== КОНЕЦ ОБЩЕГО БЛОКА ВЫГРУЗОК ====

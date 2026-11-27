@@ -227,8 +227,23 @@ public static class Look {
                     : al == System.Windows.Forms.HorizontalAlignment.Center ? System.Windows.Forms.TextFormatFlags.HorizontalCenter : System.Windows.Forms.TextFormatFlags.Left);
             string text = e.SubItem != null ? e.SubItem.Text : e.Item.Text;
             System.Windows.Forms.TextRenderer.DrawText(e.Graphics, text, e.Item.Font ?? lv.Font, new System.Drawing.Rectangle(r.X + 4, r.Y, System.Math.Max(0, r.Width - 6), r.Height), fore, f);
+            // 27.11: линии таблицы - тёмные, свои (иначе текст столбцов сливается)
+            using (System.Drawing.Pen gp = new System.Drawing.Pen(Border)) {
+                e.Graphics.DrawLine(gp, r.Right - 1, r.Top, r.Right - 1, r.Bottom - 1);
+                e.Graphics.DrawLine(gp, r.Left, r.Bottom - 1, r.Right - 1, r.Bottom - 1);
+            }
         };
-        lv.MouseMove += delegate(object s, System.Windows.Forms.MouseEventArgs e) { System.Windows.Forms.ListViewItem it = lv.GetItemAt(e.X, e.Y); if (it != null) lv.Invalidate(it.Bounds); };
+        // 27.11: строки мигали - перерисовка была при каждом движении мыши и без двойной буферизации: теперь буфер и только при смене строки
+        try { typeof(System.Windows.Forms.Control).GetProperty("DoubleBuffered", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance).SetValue(lv, true, null); } catch { }
+        System.Windows.Forms.ListViewItem[] hot = new System.Windows.Forms.ListViewItem[1];
+        lv.MouseMove += delegate(object s, System.Windows.Forms.MouseEventArgs e) {
+            System.Windows.Forms.ListViewItem it = lv.GetItemAt(e.X, e.Y);
+            if (it == hot[0]) return;
+            if (hot[0] != null && hot[0].ListView == lv) lv.Invalidate(hot[0].Bounds);
+            hot[0] = it;
+            if (it != null) lv.Invalidate(it.Bounds);
+        };
+        lv.MouseLeave += delegate { if (hot[0] != null && hot[0].ListView == lv) lv.Invalidate(hot[0].Bounds); hot[0] = null; };
         lv.GotFocus += delegate { lv.Invalidate(); };
         lv.LostFocus += delegate { lv.Invalidate(); };
     }
